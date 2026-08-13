@@ -170,7 +170,7 @@ export class GuestController {
         delete: req.user?.superUser || permFlags.delete
       };
 
-      success(res, guests.map(g => this.formatGuest(g, nationalityMap, typesMap, foliosMap)), 'Success', 200, {
+      success(res, guests.map(g => GuestController.formatGuest(g, nationalityMap, typesMap, foliosMap)), 'Success', 200, {
         table: filteredTable,
         permission,
         pagging: {
@@ -317,7 +317,7 @@ export class GuestController {
       }
 
       const fullGuest = await this.getGuestWithRelations(guest.id);
-      success(res, this.formatGuest(fullGuest), 'Profile created successfully');
+      success(res, GuestController.formatGuest(fullGuest), 'Profile created successfully');
     } catch (err: any) {
       console.error('Guest store error:', err);
       if (err.code === 'P2002') {
@@ -347,7 +347,7 @@ export class GuestController {
         return;
       }
 
-      success(res, this.formatGuest(guest), 'Success');
+      success(res, GuestController.formatGuest(guest), 'Success');
     } catch (err: any) {
       console.error('Guest show error:', err);
       error(res, 'Failed to fetch guest', 500);
@@ -391,7 +391,7 @@ export class GuestController {
         statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
       };
 
-      success(res, { ...this.formatGuest(guest), guest_title: guestTitle ? Number(guestTitle) : null, guest_status: guestStatus ? Number(guestStatus) : null, master }, 'Success');
+      success(res, { ...GuestController.formatGuest(guest), guest_title: guestTitle ? Number(guestTitle) : null, guest_status: guestStatus ? Number(guestStatus) : null, master }, 'Success');
     } catch (err: any) {
       console.error('Guest edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -496,7 +496,7 @@ export class GuestController {
       }
 
       const updated = await this.getGuestWithRelations(id);
-      success(res, this.formatGuest(updated), 'Success');
+      success(res, GuestController.formatGuest(updated), 'Success');
     } catch (err: any) {
       console.error('Guest update error:', err);
       error(res, 'Failed to update guest', 500);

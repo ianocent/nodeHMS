@@ -18,6 +18,7 @@
     "skipLibCheck": true,
     "sourceMap": true,
     "resolveJsonModule": true,
+    "isolatedModules": true,
     "declaration": true,
     "forceConsistentCasingInFileNames": true
   },

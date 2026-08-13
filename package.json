@@ -25,7 +25,6 @@
     "moduleFileExtensions": ["ts", "js", "json"],
     "transform": {
       "^.+\\.ts$": ["ts-jest", {
-        "isolatedModules": true,
         "diagnostics": false
       }]
     }

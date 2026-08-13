@@ -102,8 +102,10 @@ app.use('/api', masterSystemRoutes);
 app.use('/cms', masterSystemRoutes);
 
 // Reports routes — Phase 4.6
-// report.routes.ts uses absolute /cms/... paths → must mount at root (no prefix strip)
+// report.routes.ts uses absolute /cms/... paths → mount at root (no prefix strip)
 app.use(reportRoutes);
+// Also under /api for parity with Laravel cms.php (mounted at /api/cms/...)
+app.use('/api', reportRoutes);
 
 // Admin routes — Roles, Permissions, Menus, Settings, Tasks, Logs
 app.use('/api', adminRoutes);

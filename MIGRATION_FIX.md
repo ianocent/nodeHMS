@@ -323,3 +323,9 @@ Audit probe (`probe-all.js`) hit every frontend GLOBALURI; fixed all 5xx, verifi
 **Started**: 2026-07-15
 **Last Updated**: 2026-08-13
 **Next**: Phase 7 done — Bar master + Rate form fixed. Outstanding: guest-request Prisma model, route alias audit, source-maps warning. Next menu to verify: other "Failed to load form data" pages (user, room, reservation, event, dynamic-rate, promotion, guest, company-contract-rate).
+
+## 2026-08-14
+- **guest.controller.ts**: static methods called unbound (GuestController.list) crash on 	his.formatGuest → replaced with GuestController.formatGuest (5 sites). Guests list was 500 in prod.
+- **front-desk.routes.ts**: /front-desk/:id shadowed /front-desk/shifts (static-after-param). Reordered.
+- **Test suite**: 66/70 failing at HEAD — responses are AES ciphertext (res.text, not res.body); helpers.ts now decrypts. Wrong route paths corrected. TEST_USER.lastProperty 999n (property 1 missing in dev DB). 69/69 green.
+- **tsconfig.json**: isolatedModules moved from jest config to compilerOptions (kills ts-jest v30 deprecation warning).

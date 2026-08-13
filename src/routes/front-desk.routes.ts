@@ -6,6 +6,19 @@ import { requirePermission } from '../middleware/permission.middleware';
 
 const router = Router();
 
+// Static paths MUST be before /front-desk/:id to avoid param shadowing
+// Shift
+router.get('/front-desk/shifts', authMiddleware, FrontDeskController.shiftList);
+router.post('/front-desk/shifts/start', authMiddleware, FrontDeskController.shiftStart);
+router.post('/front-desk/shifts/end', authMiddleware, FrontDeskController.shiftEnd);
+router.get('/front-desk/shift-rosters', authMiddleware, FrontDeskController.shiftRosterList);
+
+// Singular aliases for shift
+router.get('/front-desk/shift', authMiddleware, FrontDeskController.shiftList);
+router.post('/front-desk/shift/start', authMiddleware, FrontDeskController.shiftStart);
+router.post('/front-desk/shift/end', authMiddleware, FrontDeskController.shiftEnd);
+router.get('/front-desk/shift-roster', authMiddleware, FrontDeskController.shiftRosterList);
+
 // Front desk routes (menuId: 63 from Laravel)
 router.get('/front-desk', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
 router.get('/front-desk/:id', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
@@ -42,18 +55,6 @@ router.get('/deposits', authMiddleware, FrontDeskController.depositList);
 
 // Singular alias for deposit
 router.get('/deposit', authMiddleware, FrontDeskController.depositList);
-
-// Shift
-router.get('/front-desk/shifts', authMiddleware, FrontDeskController.shiftList);
-router.post('/front-desk/shifts/start', authMiddleware, FrontDeskController.shiftStart);
-router.post('/front-desk/shifts/end', authMiddleware, FrontDeskController.shiftEnd);
-router.get('/front-desk/shift-rosters', authMiddleware, FrontDeskController.shiftRosterList);
-
-// Singular aliases for shift
-router.get('/front-desk/shift', authMiddleware, FrontDeskController.shiftList);
-router.post('/front-desk/shift/start', authMiddleware, FrontDeskController.shiftStart);
-router.post('/front-desk/shift/end', authMiddleware, FrontDeskController.shiftEnd);
-router.get('/front-desk/shift-roster', authMiddleware, FrontDeskController.shiftRosterList);
 
 // Door Lock
 router.get('/door-locks', authMiddleware, FrontDeskController.doorLockList);

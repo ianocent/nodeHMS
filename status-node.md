@@ -84,3 +84,44 @@ Other notes:
 - BigInt from Prisma is everywhere (id fields) — wrap responses with `bigintToNumber()` or explicit `Number()` before `success()`.
 - MenuId-based permission checks on every route (`requirePermission(menuId, action)`); super-user bypasses.
 - Always `force-logout` before login in scripts; token rotation is enforced.
+## 2026-08-14 Session (continuation)
+
+### Guest Requests (Issue #6) — Folio parity (DONE)
+- Rewrote list in src/routes/extra.routes.ts: was wrong guest_profile_preferences impl → now Laravel GuestRequestController parity on folios table.
+- Query: folios where property_id, deleted_at null, OR of 4 instruction fields (not null AND not ''), include reservations (deleted_at null, is_posting 0, orderBy date asc, take 1) + company_profiles_folios_company_profile_idTocompany_profiles.
+- Guest name/account via manual guest_profiles join (no Prisma relation).
+- Constants: GR_STATUS_RESERVATION 0=Check In,1=Check Out,2=Cancelled,3=Reservation,4=In House,5=Pending (verified vs config/cms.php + live DB).
+- Colors match Laravel Global.php: reservation bg-green/purple/red/cyan/blue/yellow; room bg-cyan/green/purple/red/black-red; maid bg-cyan/red/yellow/green.
+- Removed guest-request create/show/update/delete (Laravel index only).
+- Live check: GET /cms/guest-request?page=1&limit=2 -> 200, 2 rows.
+
+### Reports mount (Issue #7) — DONE
+- src/index.ts now mounts reportRoutes at both root AND /api (Laravel parity).
+- Live check: GET /api/cms/report/batch -> 200, 1 row.
+
+### Issue #8 (ts-node source-maps warning) — NOT reproducible on Node v24.14.0 + ts-node 10.9.2; booted clean on PORT=3999. Close.
+
+### Test suite rescue (pre-existing rot, NOT caused by session changes)
+- At HEAD: 66/70 tests failed. Root causes:
+  1. All /cms responses AES-encrypted (text/plain) → supertest puts ciphertext in res.text, res.body={} → tests never saw JSON. Fix: parseBody()/expectLaravelFormat() in src/__tests__/helpers.ts now decrypt (APP_AES_PASSWORD from .env).
+  2. Contract is code/data/message (frontend checks code=="200" in components/helper/index.tsx), NOT 'success' — helper updated.
+  3. Real bugs found + fixed:
+     - guest.controller.ts: unbound 	his.formatGuest in static list/store/show/update → 500. Replaced with GuestController.formatGuest (5 call sites).
+     - front-desk.routes.ts: /front-desk/:id registered BEFORE /front-desk/shifts → param shadowing 404/400. Shift routes moved above /:id (static-before-param).
+  4. Wrong test paths fixed: /api/code-post, /api/setup, /api/log, /api/room-changes, /api/log-audits, /api/shift-confirmation, /api/cms/report-permission, /api/status+/- added to test app.
+  5. TEST_USER.lastProperty 1n → 999n (property 1 does NOT exist; 999 does) — fixes guest documents FK 500.
+- Result: npm test 69/69 PASS.
+- ts-jest isolatedModules deprecation: moved from package.json jest transform → tsconfig.json compilerOptions.
+
+### Frontend (frontend-node)
+- redux/store/store.ts: SSR-safe redux-persist (createNoopStorage + createWebStorage('local')).
+- tailwind.config.js: borderRadius large + 2xl (1.5rem) — fixes invalid theme value warning.
+- next.config.js: experimental.optimizePackageImports (@nextui-org/react, framer-motion, apexcharts, tinymce, ckeditor). cache:false already present (OOM fix).
+- package.json: packageManager yarn@1.22.22 (yarn.lock v1 tracked).
+- .gitignore: next.config.js un-ignored (next.config.local.js + next.config.qa.js ignored instead) — config now committable.
+
+### Next steps
+- [x] Verify guest-request + report mount live
+- [ ] Remove package-lock.json from frontend-node (yarn is source of truth)
+- [ ] Clean stale frontend-node/.next
+- [ ] Commit + push both repos; close issues #6 #7 #8 (nodeHMS)

@@ -254,54 +254,182 @@ router.get('/profile/guest/:id/update', authMiddleware, requirePermission(82, 'e
 router.put('/profile/guest/:id', authMiddleware, requirePermission(82, 'edit'), guestUpdate);
 router.delete('/profile/guest/:id', authMiddleware, requirePermission(82, 'delete'), guestDelete);
 
-// ── Guest Requests (backed by guest_profile_preferences with remark) ──
+// ── Guest Requests (parity with Laravel GuestRequestController — Folio-based) ──
+const GR_STATUS_RESERVATION: Record<number, string> = {
+  0: 'Check In', 1: 'Check Out', 2: 'Cancelled', 3: 'Reservation', 4: 'In House', 5: 'Pending',
+};
+const GR_COLOR_RESERVATION: Record<number, string> = {
+  0: 'bg-green', 1: 'bg-purple', 2: 'bg-red', 3: 'bg-cyan', 4: 'bg-blue', 5: 'bg-yellow',
+};
+const GR_STATUS_ROOM: Record<string, number> = {
+  'Vacant': 0, 'Occupied': 1, 'Due Out': 2, 'Blocked': 3, 'Out of Order': 4,
+};
+const GR_COLOR_ROOM: Record<number, string> = {
+  0: 'bg-cyan', 1: 'bg-green', 2: 'bg-purple', 3: 'bg-red', 4: 'bg-black-red',
+};
+const GR_STATUS_MAID: Record<string, number> = {
+  'Clean': 0, 'Dirty': 1, 'Maid in Room': 2, 'Inspection Required': 3,
+};
+const GR_COLOR_MAID: Record<number, string> = {
+  0: 'bg-cyan', 1: 'bg-red', 2: 'bg-yellow', 3: 'bg-green',
+};
+
+const GR_TABLE = [
+  { label: 'Folio No.', key: 'folio_number', type: 'none', is_search: true },
+  { label: 'Check In Instruction', key: 'check_in_instruction', type: 'none', is_search: true },
+  { label: 'Check Out Instruction', key: 'check_out_instruction', type: 'none', is_search: true },
+  { label: 'Posting Instruction', key: 'posting_instruction', type: 'none', is_search: true },
+  { label: 'Remark', key: 'remark_ins', type: 'none', is_search: false },
+  { label: 'Type', key: 'type_reservation', type: 'none', is_search: false },
+  { label: 'Status', key: 'status_reservation_color', type: 'label', is_search: false },
+  { label: 'Guest Name', key: 'guest_name', type: 'none', is_search: false },
+  { label: 'Room', key: 'room', type: 'none', is_search: false },
+  { label: 'Group Name/Company', key: 'company', type: 'none', is_search: false },
+  { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+  { label: 'Room Status', key: 'room_status_color', type: 'none', is_search: false },
+  { label: 'Clean Status', key: 'room_clean_status_color', type: 'none', is_search: false },
+  { label: 'Check In', key: 'check_in_date', type: 'date', is_search: true },
+  { label: 'Check out', key: 'check_out_date', type: 'date', is_search: true },
+];
+
 router.get('/guest-request', authMiddleware, requirePermission(82, 'view'), async (req: Request, res: Response) => {
   try {
     const propertyId = req.user?.lastProperty;
     const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 25;
+    const limit = parseInt(req.query.limit as string) || 10;
     const search = req.query.search as string;
+    const search_field = req.query.search_field as string;
+    const search_value = req.query.search_value as string;
+
+    const hasInstruction = (field: string) => ({
+      AND: [{ [field]: { not: null } }, { [field]: { not: '' } }],
+    });
 
     const where: any = {
-      property_id: propertyId ? BigInt(propertyId) : undefined,
       deleted_at: null,
-      remark: { not: null },
+      OR: [
+        hasInstruction('check_in_instruction'),
+        hasInstruction('check_out_instruction'),
+        hasInstruction('posting_instruction'),
+        hasInstruction('remark'),
+      ],
     };
+    if (propertyId) where.property_id = BigInt(propertyId);
+
     if (search) {
-      where.remark = { contains: search, mode: 'insensitive' };
+      where.AND = [
+        ...(where.AND || []),
+        {
+          OR: [
+            { first_name: { contains: search, mode: 'insensitive' } },
+            { last_name: { contains: search, mode: 'insensitive' } },
+            { folio_number: { contains: search, mode: 'insensitive' } },
+            { company_name: { contains: search, mode: 'insensitive' } },
+            { email: { contains: search, mode: 'insensitive' } },
+            { telp: { contains: search, mode: 'insensitive' } },
+          ],
+        },
+      ];
+    }
+    if (search_field && search_value) {
+      where[search_field] = { contains: search_value, mode: 'insensitive' };
     }
 
     const [data, total] = await Promise.all([
-      prisma.guest_profile_preferences.findMany({
+      prisma.folios.findMany({
         where,
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { updated_at: 'desc' },
-        include: { guest_profiles: { select: { id: true, first_name: true, last_name: true } } },
+        orderBy: [{ id: 'desc' }, { created_at: 'asc' }],
+        include: {
+          company_profiles_folios_company_profile_idTocompany_profiles: { select: { name: true } },
+          reservations: {
+            where: { deleted_at: null, is_posting: 0 },
+            orderBy: { date: 'asc' },
+            take: 1,
+            select: { room_name: true, room_type_name: true, room_status_name: true, maid_status_name: true },
+          },
+        },
       }),
-      prisma.guest_profile_preferences.count({ where }),
+      prisma.folios.count({ where }),
     ]);
 
-    const table = [
-      { label: 'Guest', key: 'guest_name', type: 'none', is_search: false },
-      { label: 'Request', key: 'remark', type: 'none', is_search: true },
-      { label: 'Status', key: 'request_status', type: 'badge', is_search: false },
-      { label: 'Date', key: 'updated_at', type: 'none', is_search: false },
-      { label: 'Action', key: 'action', type: 'action', is_search: false },
-    ];
-    const permission = { view: true, add: true, edit: true, delete: true };
-    const formatted = data.map((r: any) => ({
-      ...bigintToNumber(r),
-      guest_name: r.guest_profiles
-        ? `${r.guest_profiles.first_name || ''} ${r.guest_profiles.last_name || ''}`.trim()
-        : '-',
-      guest_profiles: undefined,
-    }));
+    const guestIds = data.map((r: any) => r.guest_profile_id).filter((id: any) => id !== null && id !== undefined);
+    const guests = guestIds.length
+      ? await prisma.guest_profiles.findMany({
+          where: { id: { in: guestIds } },
+          select: { id: true, first_name: true, last_name: true, account: true },
+        })
+      : [];
+    const guestMap = new Map(guests.map((g: any) => [g.id, g]));
+
+    const formatted = data.map((r: any) => {
+      const lastRes = r.reservations?.[0];
+      const isVirtual = r.type_reservation === 'vr';
+      const currentRoomName = isVirtual ? '' : lastRes?.room_name ?? '';
+      const currentRoomType = isVirtual ? '' : lastRes?.room_type_name ?? '';
+      const statusId = r.status_reservation ?? -1;
+      const statusLabel = GR_STATUS_RESERVATION[statusId] ?? '';
+      const gp = r.guest_profile_id ? guestMap.get(r.guest_profile_id) : undefined;
+      const guestName =
+        gp && ((gp.first_name ?? '') !== '' || (gp.last_name ?? '') !== '')
+          ? `${gp.first_name ?? ''} ${gp.last_name ?? ''}`.trim()
+          : gp?.account ?? '';
+      const roomStatusId = lastRes?.room_status_name ? GR_STATUS_ROOM[lastRes.room_status_name] : undefined;
+      const maidStatusId = lastRes?.maid_status_name ? GR_STATUS_MAID[lastRes.maid_status_name] : undefined;
+      return {
+        id: Number(r.id),
+        type_reservation: (r.type_reservation || '').toUpperCase(),
+        status_reservation_color: [
+          {
+            label: statusLabel.replace(/ /g, '-'),
+            color: GR_COLOR_RESERVATION[statusId] ?? 'bg-success',
+            is_color: true,
+          },
+        ],
+        room_clean_status_color: lastRes?.maid_status_name
+          ? [
+              {
+                label: lastRes.maid_status_name.replace(/ /g, '-'),
+                color: maidStatusId !== undefined ? GR_COLOR_MAID[maidStatusId] : 'bg-success',
+                is_color: true,
+              },
+            ]
+          : [],
+        room_status_color: lastRes?.room_status_name
+          ? [
+              {
+                label: lastRes.room_status_name.replace(/ /g, '-'),
+                color: roomStatusId !== undefined ? GR_COLOR_ROOM[roomStatusId] : 'bg-success',
+                is_color: true,
+              },
+            ]
+          : [],
+        company: r.company_name && r.company_name !== '' ? r.company_name : r.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? '',
+        folio_number: r.folio_number,
+        guest_name: guestName,
+        room_type: currentRoomType,
+        room: currentRoomName,
+        check_in_date: r.check_in_date,
+        check_out_date: r.check_out_date,
+        check_in_instruction: r.check_in_instruction ?? '',
+        check_out_instruction: r.check_out_instruction ?? '',
+        posting_instruction: r.posting_instruction ?? '',
+        remark_ins: r.remark ?? '',
+      };
+    });
 
     success(res, formatted, 'Success', 200, {
-      table,
-      permission,
-      search_data: [{ field: 'remark', label: 'Request' }],
+      table: GR_TABLE,
+      permission: { view: true, add: true, edit: true, delete: true },
+      search_data: [
+        { field: 'folio_number', label: 'Folio No.' },
+        { field: 'check_in_instruction', label: 'Check In Instruction' },
+        { field: 'check_out_instruction', label: 'Check Out Instruction' },
+        { field: 'posting_instruction', label: 'Posting Instruction' },
+        { field: 'check_in_date', label: 'Check In' },
+        { field: 'check_out_date', label: 'Check out' },
+      ],
       pagging: {
         current_page: page,
         last_page: Math.ceil(total / limit),
@@ -313,114 +441,6 @@ router.get('/guest-request', authMiddleware, requirePermission(82, 'view'), asyn
     });
   } catch (err: any) {
     error(res, err.message || 'Failed to fetch guest requests', 500);
-  }
-});
-
-router.get('/guest-request/create', authMiddleware, requirePermission(82, 'add'), async (req: Request, res: Response) => {
-  try {
-    const propertyId = req.user?.lastProperty;
-    const guests = await prisma.guest_profiles.findMany({
-      where: { deleted_at: null, property_id: propertyId ? BigInt(propertyId) : undefined },
-      select: { id: true, first_name: true, last_name: true },
-      orderBy: { first_name: 'asc' },
-      take: 100,
-    });
-    success(res, {
-      guests: bigintToNumber(guests).map((g: any) => ({ value: g.id, label: `${g.first_name || ''} ${g.last_name || ''}`.trim() || `#${g.id}` })),
-      statuses: [
-        { value: 'pending', label: 'Pending' },
-        { value: 'completed', label: 'Completed' },
-        { value: 'cancelled', label: 'Cancelled' },
-      ],
-    }, 'Success');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to load form data', 500);
-  }
-});
-
-router.post('/guest-request', authMiddleware, requirePermission(82, 'add'), async (req: Request, res: Response) => {
-  try {
-    const propertyId = req.user?.lastProperty;
-    const { id_guest_profile, remark, preference } = req.body;
-    if (!id_guest_profile || !remark) {
-      const { badRequest } = await import('../utils/response');
-      badRequest(res, 'Guest profile and remark are required');
-      return;
-    }
-    const record = await prisma.guest_profile_preferences.create({
-      data: {
-        property_id: BigInt(propertyId ?? 0),
-        id_guest_profile: BigInt(id_guest_profile),
-        preference: preference || null,
-        remark,
-        request_status: 'pending',
-        created_at: new Date(),
-        updated_at: new Date(),
-        created_by: req.user?.id,
-      },
-    });
-    success(res, bigintToNumber(record), 'Guest request created');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to create guest request', 500);
-  }
-});
-
-router.get('/guest-request/:id', authMiddleware, requirePermission(82, 'view'), async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id as string);
-    const record = await prisma.guest_profile_preferences.findUnique({
-      where: { id },
-      include: { guest_profiles: { select: { id: true, first_name: true, last_name: true } } },
-    });
-    if (!record || record.deleted_at) { notFound(res, 'Not Found'); return; }
-    success(res, bigintToNumber(record), 'Success');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to fetch guest request', 500);
-  }
-});
-
-router.get('/guest-request/:id/update', authMiddleware, requirePermission(82, 'edit'), async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id as string);
-    const record = await prisma.guest_profile_preferences.findUnique({
-      where: { id },
-      include: { guest_profiles: { select: { id: true, first_name: true, last_name: true } } },
-    });
-    if (!record || record.deleted_at) { notFound(res, 'Not Found'); return; }
-    success(res, bigintToNumber(record), 'Success');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to fetch guest request', 500);
-  }
-});
-
-router.put('/guest-request/:id', authMiddleware, requirePermission(82, 'edit'), async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id as string);
-    const { remark, request_status, preference } = req.body;
-    const updateData: any = { updated_at: new Date(), updated_by: req.user?.id };
-    if (remark !== undefined) updateData.remark = remark;
-    if (preference !== undefined) updateData.preference = preference;
-    if (request_status !== undefined) {
-      updateData.request_status = request_status;
-      if (request_status === 'completed') updateData.completed_at = new Date();
-    }
-    await prisma.guest_profile_preferences.update({ where: { id }, data: updateData });
-    success(res, null, 'Guest request updated');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to update guest request', 500);
-  }
-});
-
-router.delete('/guest-request/:id', authMiddleware, requirePermission(82, 'delete'), async (req: Request, res: Response) => {
-  try {
-    const id = BigInt(req.params.id as string);
-    await prisma.guest_profile_preferences.update({
-      where: { id },
-      data: { deleted_at: new Date(), deleted_by: req.user?.id },
-    });
-    success(res, null, 'Deleted');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to delete guest request', 500);
   }
 });
 
