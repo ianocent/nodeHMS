@@ -107,8 +107,17 @@ router.post('/event/:eventId/instructions', authMiddleware, requirePermission(21
 
 // Event Management
 router.get('/event-managements', authMiddleware, requirePermission(211, 'view'), EventController.managementList);
-
-// Singular alias
 router.get('/event-management', authMiddleware, requirePermission(211, 'view'), EventController.managementList);
+router.get('/event-management-item', authMiddleware, requirePermission(211, 'view'), EventController.itemList);
+router.get('/event-management-items', authMiddleware, requirePermission(211, 'view'), EventController.itemList);
+
+// Event Timeline
+router.get('/event-timeline/timeline', authMiddleware, requirePermission(211, 'view'), EventController.timeline);
+
+// Frontend master-* page aliases (TableView only, forms are stubs)
+router.get('/master-venue', authMiddleware, requirePermission(211, 'view'), EventController.venueList);
+router.get('/master-layout', authMiddleware, requirePermission(211, 'view'), EventController.layoutList);
+router.get('/master-inventory', authMiddleware, requirePermission(211, 'view'), EventController.inventoryList);
+router.get('/master-capacity', authMiddleware, requirePermission(211, 'view'), EventController.capacityList);
 
 export default router;

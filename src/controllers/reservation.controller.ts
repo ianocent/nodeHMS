@@ -34,6 +34,13 @@ function bigintToNumber(val: any): any {
   return val;
 }
 
+function reservationBn(val: any): any {
+  if (typeof val === 'bigint') return Number(val);
+  if (Array.isArray(val)) return val.map(reservationBn);
+  if (val && typeof val === 'object') { const o: any = {}; for (const [k, v] of Object.entries(val)) o[k] = reservationBn(v); return o; }
+  return val;
+}
+
 export class ReservationController {
   // ─────────────────────────────────────────────
   // GET /api/reservations
@@ -1497,5 +1504,121 @@ export class ReservationController {
       console.error('Reservation item delete error:', err);
       error(res, 'Failed to delete reservation item', 500);
     }
+  }
+
+  private static bn(val: any): any {
+    if (typeof val === 'bigint') return Number(val);
+    if (Array.isArray(val)) return val.map((v) => reservationBn(v));
+    if (val && typeof val === 'object') { const o: any = {}; for (const [k, v] of Object.entries(val)) o[k] = reservationBn(v); return o; }
+    return val;
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/code-item (additional item page)
+  // ─────────────────────────────────────────────
+  static async codeItemList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+      const where: any = { deleted_at: null };
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+      const [data, total] = await Promise.all([
+        prisma.code_items.findMany({
+          where,
+          include: { code_posts: { select: { id: true, name: true } } },
+          orderBy: { name: 'asc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.code_items.count({ where }),
+      ]);
+      const table = [
+        { label: 'Code', key: 'code', type: 'none', is_search: false },
+        { label: 'Name', key: 'name', type: 'none', is_search: true },
+        { label: 'Sales', key: 'sales', type: 'number', is_search: false },
+        { label: 'Status', key: 'status', type: 'badge', is_search: false },
+      ];
+      success(res, reservationBn(data), 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Code item list error:', err); error(res, 'Failed to list code items', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/inclusive
+  // ─────────────────────────────────────────────
+  static async inclusiveList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const modelIdRaw = String(req.query.subfolio_id ?? req.query.code_item_id ?? '');
+      const where: any = { model_type: 'App\\Models\\CodeItem' };
+      if (/^\d+$/.test(modelIdRaw)) where.model_id = BigInt(modelIdRaw);
+      const [data, total] = await Promise.all([
+        prisma.model_has_rate_inclusives.findMany({
+          where,
+          include: { rate_inclusives: true },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.model_has_rate_inclusives.count({ where }),
+      ]);
+      const rows = data.map(d => ({ ...reservationBn(d), ...reservationBn(d.rate_inclusives) }));
+      const table = [
+        { label: 'Description', key: 'description', type: 'none', is_search: false },
+        { label: 'Stock', key: 'stock', type: 'none', is_search: false },
+        { label: 'Frequency', key: 'frequency', type: 'none', is_search: false },
+        { label: 'Cost', key: 'cost', type: 'number', is_search: false },
+        { label: 'Cost On', key: 'cost_on', type: 'none', is_search: false },
+      ];
+      success(res, rows, 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Inclusive list error:', err); error(res, 'Failed to list inclusives', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/masterInclusive
+  // ─────────────────────────────────────────────
+  static async masterInclusiveList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+      const where: any = { deleted_at: null };
+      if (search) where.description = { contains: search, mode: 'insensitive' };
+      const [data, total] = await Promise.all([
+        prisma.rate_inclusives.findMany({ where, orderBy: { description: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.rate_inclusives.count({ where }),
+      ]);
+      const table = [
+        { label: 'Description', key: 'description', type: 'none', is_search: true },
+        { label: 'Stock', key: 'stock', type: 'none', is_search: false },
+        { label: 'Cost', key: 'cost', type: 'number', is_search: false },
+      ];
+      success(res, reservationBn(data), 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Master inclusive list error:', err); error(res, 'Failed to list inclusives', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/subfolio/:id
+  // ─────────────────────────────────────────────
+  static async subfolioList(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!/^\d+$/.test(raw)) { success(res, { data: [] }, 'Success'); return; }
+      const parentId = BigInt(raw);
+      const subs = await prisma.folios.findMany({ where: { parent: parentId }, select: { id: true, folio_number: true }, orderBy: { id: 'asc' } });
+      success(res, { data: subs.map(s => ({ value: Number(s.id), label: s.folio_number })) }, 'Success');
+    } catch (err: any) { console.error('Subfolio list error:', err); error(res, 'Failed to list subfolios', 500); }
   }
 }

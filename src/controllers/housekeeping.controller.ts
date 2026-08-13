@@ -42,7 +42,7 @@ export class HousekeepingController {
   static async setupList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) where.item_name = { contains: search, mode: 'insensitive' };
 
@@ -60,7 +60,7 @@ export class HousekeepingController {
 
   static async setupStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { code, item_name, category, used_by, description, is_required, sort, status } = req.body;
       if (!code || !item_name) { badRequest(res, 'code and item_name are required'); return; }
 
@@ -101,7 +101,7 @@ export class HousekeepingController {
   static async roomStatus(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.name = { contains: search, mode: 'insensitive' }; }
 
@@ -120,7 +120,7 @@ export class HousekeepingController {
   static async workOrderList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid };
       if (search) where.work_description = { contains: search, mode: 'insensitive' };
 
@@ -138,7 +138,7 @@ export class HousekeepingController {
 
   static async workOrderStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to } = req.body;
       if (!work_description) { badRequest(res, 'work_description is required'); return; }
 
@@ -156,6 +156,30 @@ export class HousekeepingController {
       if (!data) { notFound(res, 'Work order not found'); return; }
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to load work order', 500); }
+  }
+
+  static async workOrderForm(req: Request, res: Response): Promise<void> {
+    try {
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const [rooms, users] = await Promise.all([
+        prisma.rooms.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.users.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      ]);
+      const master = {
+        rooms: rooms.map(r => ({ value: Number(r.id), label: r.name })),
+        assign_to: users.map(u => ({ value: Number(u.id), label: u.name })),
+      };
+      if (!idRaw || !/^\d+$/.test(idRaw)) {
+        success(res, { status: 1 }, 'Success', 200, { master });
+        return;
+      }
+      const data = await prisma.work_orders.findUnique({
+        where: { id: BigInt(idRaw) },
+        include: { rooms: { select: { name: true } }, work_order_stocks: true },
+      });
+      if (!data) { notFound(res, 'Work order not found'); return; }
+      success(res, bigintToNumber(data), 'Success', 200, { master });
+    } catch (err: any) { error(res, 'Failed to load work order form', 500); }
   }
 
   static async workOrderUpdate(req: Request, res: Response): Promise<void> {
@@ -182,7 +206,7 @@ export class HousekeepingController {
   static async stockList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.name = { contains: search, mode: 'insensitive' }; }
 
@@ -202,7 +226,7 @@ export class HousekeepingController {
   static async rosterList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
 
       const [data, total] = await Promise.all([
@@ -220,7 +244,7 @@ export class HousekeepingController {
   static async checklistHistory(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { housekeeping_setups: { property_id: pid } };
 
       const [data, total] = await Promise.all([
@@ -238,7 +262,7 @@ export class HousekeepingController {
   static async housekeeperHistory(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid };
 
       const [data, total] = await Promise.all([

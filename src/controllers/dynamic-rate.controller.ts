@@ -381,6 +381,16 @@ export class DynamicRateController {
     }
   }
 
+  static async disable(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const existing = await prisma.dynamic_rate_configs.findUnique({ where: { id } });
+      if (!existing || existing.deleted_at) { notFound(res, 'Dynamic rate config not found'); return; }
+      await prisma.dynamic_rate_configs.update({ where: { id }, data: { is_active: 0, updated_at: new Date() } });
+      success(res, null, 'Config disabled');
+    } catch (err: any) { console.error('Dynamic rate disable error:', err); error(res, 'Failed to disable config', 500); }
+  }
+
   /**
    * POST /api/dynamic-rates/:id/calculate
    * Run calculation engine

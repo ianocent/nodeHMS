@@ -74,7 +74,7 @@ export class RateController {
       const propertyId = req.user?.lastProperty;
 
       const trash = req.query.trash === '1' || req.query.trash === 'true';
-      const where: any = { deleted_at: trash ? { not: null } : null };
+      const where: any = { deleted_at: trash ? { not: null } : null, module: 'rate' };
 
       if (propertyId) where.property_id = propertyId;
       if (search) {
@@ -151,7 +151,7 @@ export class RateController {
     try {
       const propertyId = req.user?.lastProperty;
 
-      const [roomTypes, codePosts] = await Promise.all([
+      const [roomTypes, codePosts, companyTypes, cancelations] = await Promise.all([
         prisma.room_types.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE },
           select: { id: true, name: true },
@@ -162,12 +162,25 @@ export class RateController {
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type' },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
       ]);
 
       const master = {
         statuses: STATUSES,
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         code_posts: codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name })),
+        comm_codes: [],
+        company_types: companyTypes.map((t: any) => ({ value: Number(t.id), label: t.name })),
+        cancelations: cancelations.map((t: any) => ({ value: Number(t.id), label: t.name })),
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
         fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
       };
@@ -304,7 +317,7 @@ export class RateController {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
 
-      const [rate, roomTypes, codePosts] = await Promise.all([
+      const [rate, roomTypes, codePosts, companyTypes, cancelations] = await Promise.all([
         prisma.rates.findUnique({
           where: { id },
           include: { code_posts: { select: { id: true, name: true } } },
@@ -319,6 +332,16 @@ export class RateController {
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type' },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
       ]);
 
       if (!rate || rate.deleted_at) {
@@ -330,6 +353,9 @@ export class RateController {
         statuses: STATUSES,
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         code_posts: codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name })),
+        comm_codes: [],
+        company_types: companyTypes.map((t: any) => ({ value: Number(t.id), label: t.name })),
+        cancelations: cancelations.map((t: any) => ({ value: Number(t.id), label: t.name })),
       };
 
       const result = {
@@ -337,9 +363,13 @@ export class RateController {
         id: Number(rate.id),
         property_id: Number(rate.property_id),
         code_post_id: Number(rate.code_post_id),
+        code_post_extra_bed_id: rate.code_post_extra_bed_id ? Number(rate.code_post_extra_bed_id) : null,
         minimum_rate: Number(rate.minimum_rate),
         start_date: rate.start_date ? formatDate(rate.start_date) : null,
         end_date: rate.end_date ? formatDate(rate.end_date) : null,
+        created_by: rate.created_by ? Number(rate.created_by) : null,
+        updated_by: rate.updated_by ? Number(rate.updated_by) : null,
+        deleted_by: rate.deleted_by ? Number(rate.deleted_by) : null,
         code_post: rate.code_posts ? { id: Number(rate.code_posts.id), name: rate.code_posts.name } : null,
         code_posts: undefined,
         master,
@@ -520,7 +550,7 @@ export class RateController {
 
       // Determine date range
       if (!startDateStr || !endDateStr) {
-        badRequest(res, 'start_date and end_date are required');
+        success(res, [], 'Success', 200, { table: [], master: {}, pagging: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
         return;
       }
 
@@ -1013,6 +1043,10 @@ export class RateController {
   // ─────────────────────────────────────────────
   // GET /api/bar-rates
   // ─────────────────────────────────────────────
+  static emptyGrid(res: Response): void {
+    success(res, [], 'Success', 200, { table: [], master: {}, pagging: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
+  }
+
   static async barRateIndex(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -1020,8 +1054,8 @@ export class RateController {
       const startDateStr = req.query.start_date as string;
       const endDateStr = req.query.end_date as string;
 
-      if (!rateIdParam) {
-        badRequest(res, 'rate_id is required');
+      if (!rateIdParam || !/^\d+$/.test(rateIdParam)) {
+        this.emptyGrid(res);
         return;
       }
 
@@ -1055,7 +1089,7 @@ export class RateController {
       const limit = parseInt(req.query.limit as string) || 10;
 
       if (!startDateStr || !endDateStr) {
-        badRequest(res, 'start_date and end_date are required');
+        success(res, [], 'Success', 200, { table: [], master: {}, pagging: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
         return;
       }
 
@@ -1656,6 +1690,364 @@ export class RateController {
     } catch (err: any) {
       console.error('Rate config destroy error:', err);
       error(res, 'Failed to delete rate config', 500);
+    }
+  }
+
+  // ═══════════════════════════════════════════════
+  // Rate Link Listing (RateRelationController parity)
+  // ═══════════════════════════════════════════════
+
+  private static getValueRate(value: number, amount: number | null | undefined, type: string | null | undefined): number {
+    const v = Number(value || 0);
+    const a = Number(amount || 0);
+    if (type === 'percentage') return Math.round((v + (v * a) / 100) * 100) / 100;
+    return Math.round((v + a) * 100) / 100;
+  }
+
+  private static async getRateLinkRows(rateId: bigint, statusFilter?: string): Promise<any[]> {
+    const [links, rll] = await Promise.all([
+      prisma.model_has_rates.findMany({ where: { model_id: rateId, model_type: 'App\\Models\\Rate' } }),
+      prisma.rate_link_listings.findMany({ where: { rate_id: rateId, ...(statusFilter ? { status: statusFilter } : {}) } }),
+    ]);
+    const linkedRateIds = links.map(l => l.rate_id);
+    const rateRates = linkedRateIds.length > 0
+      ? await prisma.rate_rates.findMany({
+          where: { rate_id: { in: linkedRateIds }, deleted_at: null },
+          include: { room_types: { select: { id: true, name: true } } },
+        })
+      : [];
+
+    const byRoomType = new Map<bigint, any>();
+    for (const rr of rateRates) {
+      if (!byRoomType.has(rr.room_type_id)) byRoomType.set(rr.room_type_id, rr);
+    }
+
+    return [...byRoomType.entries()].map(([rtId, rr]: any) => {
+      const link = rll.find(l => l.room_type_id === rtId);
+      return {
+        id: Number(rtId),
+        room_type: rr.room_types?.name || null,
+        amount: link?.amount ?? 0,
+        type: link?.type
+          ? { value: link.type, label: link.type === 'percentage' ? 'Percentage' : 'Amount' }
+          : { value: 'percentage', label: 'Percentage' },
+        offsetAdult1: link?.offsetAdult1 ?? 0,
+        offsetAdult2: link?.offsetAdult2 ?? 0,
+        offsetExtraAdult: link?.offsetExtraAdult ?? 0,
+        offsetExtraChild: link?.offsetExtraChild ?? 0,
+      };
+    });
+  }
+
+  static async rateLinkListing(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagging: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const rows = await this.getRateLinkRows(rateId);
+      const table = [
+        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+        { label: 'Amount', key: 'amount', type: 'number', is_search: false },
+        { label: 'Type', key: 'type', type: 'select', is_search: false, options: [
+          { value: 'percentage', label: 'Percentage' },
+          { value: 'flat', label: 'Amount' },
+        ] },
+        { label: 'Extra Adult', key: 'offsetExtraAdult', type: 'number', is_search: false },
+        { label: 'Extra Child', key: 'offsetExtraChild', type: 'number', is_search: false },
+        { label: 'Applied to', key: 'applied_to', type: 'select_multiple', is_search: false,
+          options: rows.map(r => ({ value: r.id, label: r.room_type })) },
+      ];
+      const permission = { view: true, add: true, edit: true, delete: true };
+      success(res, rows, 'Success', 200, {
+        table, permission,
+        pagging: {
+          current_page: 1, last_page: 1, per_page: rows.length || 1, total: rows.length, from: 1, to: rows.length,
+        },
+      });
+    } catch (err: any) {
+      console.error('Rate link listing error:', err);
+      error(res, 'Failed to load rate link listing', 500);
+    }
+  }
+
+  static async rateLinkApplyList(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagging: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const rows = await this.getRateLinkRows(rateId, '1');
+      const table = [
+        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+        { label: 'Amount', key: 'amount', type: 'number', is_search: false },
+        { label: 'Extra Adult', key: 'offsetExtraAdult', type: 'number', is_search: false },
+        { label: 'Extra Child', key: 'offsetExtraChild', type: 'number', is_search: false },
+      ];
+      success(res, rows, 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: {
+          current_page: 1, last_page: 1, per_page: rows.length || 1, total: rows.length, from: 1, to: rows.length,
+        },
+      });
+    } catch (err: any) {
+      console.error('Rate link apply list error:', err);
+      error(res, 'Failed to load rate link applied', 500);
+    }
+  }
+
+  static async rateLinkUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = String(req.params.id);
+      const { rate_id, amount, type, offsetAdult1, offsetAdult2, offsetExtraAdult, offsetExtraChild, applied_to_ori } = req.body;
+      if (!rate_id || !/^\d+$/.test(String(rate_id)) || !/^\d+$/.test(id)) { badRequest(res, 'rate_id and id are required'); return; }
+      const rateId = BigInt(rate_id);
+      const roomTypeIds: bigint[] = [BigInt(id)];
+      if (Array.isArray(applied_to_ori)) {
+        for (const at of applied_to_ori) {
+          const v = at?.value ?? at;
+          if (v && /^\d+$/.test(String(v))) roomTypeIds.push(BigInt(v));
+        }
+      }
+      const userId = req.user?.id;
+      for (const rtId of roomTypeIds) {
+        const existing = await prisma.rate_link_listings.findFirst({
+          where: { rate_id: rateId, room_type_id: rtId, status: '0' },
+        });
+        const data = {
+          property_id: req.user?.lastProperty ?? null,
+          amount: amount !== undefined ? Number(amount) : existing?.amount,
+          type: type !== undefined ? type : existing?.type,
+          offsetAdult1: offsetAdult1 !== undefined ? Number(offsetAdult1) : existing?.offsetAdult1,
+          offsetAdult2: offsetAdult2 !== undefined ? Number(offsetAdult2) : existing?.offsetAdult2,
+          offsetExtraAdult: offsetExtraAdult !== undefined ? Number(offsetExtraAdult) : existing?.offsetExtraAdult,
+          offsetExtraChild: offsetExtraChild !== undefined ? Number(offsetExtraChild) : existing?.offsetExtraChild,
+          status: '0',
+          updated_at: new Date(),
+          updated_by: userId,
+        };
+        if (existing) {
+          await prisma.rate_link_listings.update({ where: { id: existing.id }, data });
+        } else {
+          await prisma.rate_link_listings.create({
+            data: { rate_id: rateId, room_type_id: rtId, ...data, created_at: new Date(), created_by: userId },
+          });
+        }
+      }
+      success(res, { updated_room_types: roomTypeIds.map((r) => Number(r)) }, 'Success');
+    } catch (err: any) {
+      console.error('Rate link update error:', err);
+      error(res, 'Failed to update rate link', 500);
+    }
+  }
+
+  static async rateLinkStore(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.query.rate_id ?? req.body.rate_id ?? ''));
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+
+      let idx: any[] = req.body.idx || [];
+      if (!Array.isArray(idx)) idx = [idx];
+      if (idx.includes(0)) {
+        const bars = await prisma.rates.findMany({ where: { module: 'bar', deleted_at: null } });
+        idx = bars.map(b => b.id);
+      }
+      const selectedIds = idx.filter((i: any) => /^\d+$/.test(String(i))).map((i: any) => BigInt(i));
+
+      await prisma.model_has_rates.deleteMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate', status: 1 },
+      });
+      if (selectedIds.length > 0) {
+        await prisma.model_has_rates.createMany({
+          data: selectedIds.map(rid => ({
+            rate_id: rid,
+            model_type: 'App\\Models\\Rate',
+            model_id: rateId,
+            status: 1,
+            temp_status: 1,
+          })),
+          skipDuplicates: true,
+        });
+      }
+      await prisma.model_has_rates.updateMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+        data: { status: 0 },
+      });
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Rate link store error:', err);
+      error(res, 'Failed to save rate links', 500);
+    }
+  }
+
+  static async rateLinkApply(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.query.rate_id ?? ''));
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+
+      await prisma.model_has_rates.deleteMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate', status: 1 },
+      });
+      await prisma.model_has_rates.updateMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+        data: { status: 1 },
+      });
+      const links = await prisma.model_has_rates.findMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+      });
+      const linkedRateIds = links.map(l => l.rate_id);
+
+      await prisma.rate_link_listings.deleteMany({ where: { rate_id: rateId, status: '1' } });
+      await prisma.rate_link_listings.updateMany({ where: { rate_id: rateId }, data: { status: '1' } });
+      const rll = await prisma.rate_link_listings.findMany({ where: { rate_id: rateId } });
+      const roomTypeIds = rll.map(l => l.room_type_id).filter((x): x is bigint => x !== null);
+
+      const existingRateRates = linkedRateIds.length > 0 && roomTypeIds.length > 0
+        ? await prisma.rate_rates.findMany({
+            where: { rate_id: { in: linkedRateIds }, room_type_id: { in: roomTypeIds }, deleted_at: null },
+          })
+        : [];
+
+      if (roomTypeIds.length > 0) {
+        await prisma.rate_rates.deleteMany({ where: { rate_id: rateId, room_type_id: { in: roomTypeIds } } });
+      }
+
+      const rows: any[] = [];
+      const grouped = new Map<string, any[]>();
+      for (const rr of existingRateRates) {
+        const key = `${formatDate(rr.date)}|${rr.room_type_id}`;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push(rr);
+      }
+      for (const [key, items] of grouped) {
+        const [dateStr, rtIdStr] = key.split('|');
+        const roomTypeId = BigInt(rtIdStr);
+        const link = rll.find(l => l.room_type_id === roomTypeId);
+        const sum = (f: string) => items.reduce((acc, it) => acc + Number(it[f] || 0), 0);
+        const min = (f: string) => Math.min(...items.map(it => Number(it[f] || 0)));
+        rows.push({
+          rate_id: rateId,
+          property_id: items[0].property_id,
+          room_type_id: roomTypeId,
+          date: new Date(dateStr),
+          one_adult: this.getValueRate(sum('one_adult'), link?.amount, link?.type),
+          two_adult: this.getValueRate(sum('two_adult'), link?.amount, link?.type),
+          extra_adult: this.getValueRate(sum('extra_adult'), link?.offsetExtraAdult, link?.type),
+          extra_child: this.getValueRate(sum('extra_child'), link?.offsetExtraChild, link?.type),
+          min_night: sum('min_night'),
+          max_night: sum('max_night'),
+          stop_arrival: min('stop_arrival'),
+          stop_departure: min('stop_departure'),
+          stop_sell: min('stop_sell'),
+          min_los: min('min_los'),
+          status: 1,
+          created_at: new Date(),
+          updated_at: new Date(),
+          created_by: req.user?.id,
+        });
+      }
+      if (rows.length > 0) {
+        for (let i = 0; i < rows.length; i += 500) {
+          await prisma.rate_rates.createMany({ data: rows.slice(i, i + 500), skipDuplicates: true });
+        }
+      }
+      success(res, { applied: rows.length }, 'Success');
+    } catch (err: any) {
+      console.error('Rate link apply error:', err);
+      error(res, 'Failed to apply rate links', 500);
+    }
+  }
+
+  static async rateCompany(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagging: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+
+      const links = await prisma.model_has_rates.findMany({
+        where: { rate_id: rateId, model_type: 'App\\Models\\CompanyProfile' },
+      });
+      const companyIds = links.map(l => l.model_id);
+      const where: any = { id: { in: companyIds }, deleted_at: null };
+      if (search) where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } },
+      ];
+      const [companies, total] = await Promise.all([
+        prisma.company_profiles.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { id: 'asc' } }),
+        prisma.company_profiles.count({ where }),
+      ]);
+      const table = [
+        { label: 'Company', key: 'name', type: 'none', is_search: true },
+        { label: 'Email', key: 'email', type: 'none', is_search: true },
+        { label: 'Phone', key: 'mobile_phone', type: 'none', is_search: false },
+        { label: 'Status', key: 'status_company', type: 'badge', is_search: false },
+        { label: 'Action', key: 'action', type: 'action', is_search: false },
+      ];
+      success(res, bigintToNumber(companies), 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: {
+          current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total,
+          from: (page - 1) * limit + 1, to: Math.min(page * limit, total),
+        },
+      });
+    } catch (err: any) {
+      console.error('Rate company list error:', err);
+      error(res, 'Failed to load company applicable', 500);
+    }
+  }
+
+  static async rateCompanyStore(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.body.rate_id ?? req.query.rate_id ?? ''));
+      let idx: any[] = req.body.idx || [];
+      if (!Array.isArray(idx)) idx = [idx];
+      const selectedIds = idx.filter((i: any) => /^\d+$/.test(String(i))).map((i: any) => BigInt(i));
+      await prisma.model_has_rates.deleteMany({
+        where: { rate_id: rateId, model_type: 'App\\Models\\CompanyProfile' },
+      });
+      if (selectedIds.length > 0) {
+        await prisma.model_has_rates.createMany({
+          data: selectedIds.map(cid => ({
+            rate_id: rateId,
+            model_type: 'App\\Models\\CompanyProfile',
+            model_id: cid,
+            status: 1,
+            temp_status: 1,
+          })),
+          skipDuplicates: true,
+        });
+      }
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Rate company store error:', err);
+      error(res, 'Failed to save company applicable', 500);
+    }
+  }
+
+  static async rateCompanyDelete(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.query.rate_id ?? req.body.rate_id ?? ''));
+      const id = String(req.params.id);
+      if (!/^\d+$/.test(id)) { notFound(res, 'Not found'); return; }
+      await prisma.model_has_rates.deleteMany({
+        where: { rate_id: rateId, model_type: 'App\\Models\\CompanyProfile', model_id: BigInt(id) },
+      });
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Rate company delete error:', err);
+      error(res, 'Failed to delete company applicable', 500);
     }
   }
 }

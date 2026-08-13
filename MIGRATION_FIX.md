@@ -235,6 +235,77 @@ Minor — suppress in `next.config.js` on demand.
 
 ---
 
+## Phase 7 ✅ Bar Master CRUD parity (2026-08-13)
+
+Frontend Rate & Bar Sales Marketing pages: create/update failed ("Failed to load form data", 404, "rate id is required").
+
+### 7.1 New `bar.controller.ts` — full parity with Laravel `BarController` (rates where module='bar')
+- [x] `list` — search name/description/code, `whereBetween` created_at, code_post join, pagging, table, permission (menu 87), business_date default on start_date row
+- [x] `create` — master: statuses, code_posts, business_date (via `log_audits` last date +1)
+- [x] `store` — Laravel validations + date overlap check ("Date range is overlap with another bar") + duplicate code ("Code already exist")
+- [x] `show` / `edit` — formatData + master
+- [x] `update` — partial update, overlap check excluding self
+- [x] `destroy` (soft) / `forceDelete` (`/delete`) / `restore`
+- [x] `getRoomType` (`/bar/minimum-rate`) + `updateRoomType` (`PUT /bar/minimum-rate/:id`)
+
+### 7.2 Routes — `rate.routes.ts` remap
+- [x] `/bar` list/create/store; `/bar/minimum-rate`; `/bar/inclusives` (wrapper maps `?bar_id=` → `rateId`, reuse `RateAddonController`)
+- [x] `/bar/:id` show; `/bar/:id/update` edit; `PUT /bar/:id`; `DELETE /bar/:id`; `/delete`; `/restore`
+- [x] Static paths (create/minimum-rate/inclusives) registered BEFORE `/bar/:id`
+- [x] `/rate/:id/update` alias → `RateController.edit` (frontend form URL)
+
+### 7.3 Bug fixes
+- [x] `RateController.edit` — BigInt serialization 500 → explicit Number() conversion of all BigInt fields
+- [x] `RateController.list` — add `module: 'rate'` filter (bar rows leaked into rate list)
+- [x] `RateController.create`/`edit` — master now includes `comm_codes` (empty), `company_types`, `cancelations` (types group `company-type` / `cancellation-reservation`) per Laravel
+- [x] **DB sequences stale after import** — `rate_inclusives_id_seq` at 2 while MAX(id)=69 → P2002 unique on insert. Fixed ALL public-schema sequences: `setval(seq, GREATEST(MAX(id),1))` (script `fix_sequences.sql`)
+
+### 7.4 Verified (test-bar-crud.js, all 200)
+- [x] bar list/create-form/edit-form/show, POST store, PUT update, GET/POST/DELETE inclusives, soft delete, 404 after delete, restore, force delete
+- [x] rate edit form (`/rate/:id/update`), rate create master keys
+- [x] `tsc` clean
+
+---
+
+## Phase 8 ✅ Route alias coverage + probe audit (2026-08-13)
+
+Audit probe (`probe-all.js`) hit every frontend GLOBALURI; fixed all 5xx, verified all list endpoints 200.
+
+### 8.1 Route aliases added (frontend URI → handler)
+- [x] `/profile/guest-document|family|history|preference|loyalty-card` GET/POST/DELETE (guest_id query) — `user-guest.routes.ts`
+- [x] `/profile/guest-folio` — `GuestController.folioList` (paginated folios by guest_id)
+- [x] `/profile/company-contract-rate` GET/POST/PUT/DELETE — `rate.routes.ts`
+- [x] `/company-profile-billing-setup` — `CompanyController.billingSetupList/Store/Destroy`
+- [x] `/concierge/baggage` CRUD — `concierge.routes.ts`
+- [x] `/master-capacity|inventory|layout|venue` — `event.routes.ts` (`capacityList` on event_capacities, GenericController for others)
+- [x] `/reservation/code-item|inclusive|masterInclusive|subfolio/:id` — `ReservationController` statics BEFORE `/reservation/:id`
+- [x] `/rate/code-item` — `ReservationController.codeItemList` (moved above `/rate/:id`; was shadowed → 500 "Failed to fetch rate")
+- [x] `/transaction/pos` — `PosController.listTransactions` before `/transaction/:id` (was BigInt crash on id='pos')
+- [x] `/housekeeping-setup/create` + singular `/housekeeping-setup/:id/update`
+- [x] `/yield/:id/update` + `/yields/:id/update` — `extra.routes.ts`
+- [x] `POST /dynamic-rate(s)/:id/disable` — `DynamicRateController.disable`
+- [x] `GET /accounting/:type/create` (createForm) + `PUT /accounting/:type/:id` (updateStatus)
+
+### 8.2 BigInt serialization fixes
+- [x] `GuestController.edit` master (Number on t.id/s.id/b.id); `formatGuest` Number() on nationality/city/country/status/title/property ids
+- [x] `RoomController.show` room_configurations/in_room_equipments via bigintToNumber
+- [x] `CompanyContractRateController.list` company + code_billing
+- [x] `AccountingController.show` numeric-id guard (killed `BigInt('create')` crash)
+- [x] `GenericController.toPlural` irregulars: stocks, work_order_stocks, roster_list, shift_roster (fixed "Model not found" 500s)
+- [x] `company.controller.ts` createForm — countries has no deleted_at; store pid BigInt guard
+- [x] `content.controller.ts` otherGuestList — nationality → nationality_id
+
+### 8.3 Tolerance handlers (query-param grids with missing params → empty 200, not 500/404)
+- [x] `RateController` — emptyGrid static; barRateIndex, rateLinkListing, rateLinkApplyList, rateCompany non-numeric/missing rate_id → empty success
+- [x] `/bar/rate-link-listing` wrapper numeric-checks bar_id/rate_id → emptyGrid
+
+### 8.4 Probe results (final)
+- [x] LOGIN OK, zero 5xx, every `list` = 200
+- [x] Remaining 404s are artifacts: TableView-only pages (frontend never calls /create or /:id/update — inline add = POST uri, edit = PUT uri/:id) or id=1 data-misses ("Dynamic rate config not found", "Rate is not found", etc.)
+- [x] `tsc --noEmit` clean
+
+---
+
 ## Error Log Analysis Summary
 
 | Category | Count | Severity |
@@ -250,5 +321,5 @@ Minor — suppress in `next.config.js` on demand.
 ---
 
 **Started**: 2026-07-15
-**Last Updated**: 2026-07-15
-**Next**: All phases complete. Outstanding: guest-request Prisma model, route alias audit, source-maps warning.
+**Last Updated**: 2026-08-13
+**Next**: Phase 7 done — Bar master + Rate form fixed. Outstanding: guest-request Prisma model, route alias audit, source-maps warning. Next menu to verify: other "Failed to load form data" pages (user, room, reservation, event, dynamic-rate, promotion, guest, company-contract-rate).

@@ -419,7 +419,7 @@ export class RoomController {
       const configMap = new Map<bigint, any[]>();
       for (const mt of modelTypes) {
         if (!configMap.has(mt.model_id)) configMap.set(mt.model_id, []);
-        configMap.get(mt.model_id)!.push(mt.types);
+        configMap.get(mt.model_id)!.push(bigintToNumber(mt.types));
       }
 
       const formatted = rooms.map((r: any) => ({
@@ -909,8 +909,8 @@ export class RoomController {
 
       const result = {
         ...bigintToNumber(room),
-        room_configurations: mht.filter((m) => m.types.group === 'room-configuration').map((m) => m.types),
-        in_room_equipments: mht.filter((m) => m.types.group === 'in-room-equipment').map((m) => m.types),
+        room_configurations: bigintToNumber(mht.filter((m) => m.types.group === 'room-configuration').map((m) => m.types)),
+        in_room_equipments: bigintToNumber(mht.filter((m) => m.types.group === 'in-room-equipment').map((m) => m.types)),
       };
 
       success(res, result, 'Success');
@@ -1247,6 +1247,34 @@ export class RoomController {
   }
 
   /**
+   * GET /api/room-type-images/create | /api/room-type-images/:id/update
+   * Form data for room type image add/edit
+   */
+  static async imageForm(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const roomTypes = await prisma.room_types.findMany({
+        where: { deleted_at: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const master = {
+        room_types: roomTypes.map((r: any) => ({ value: Number(r.id), label: r.name })),
+      };
+      if (!idParam || !/^\d+$/.test(idParam)) {
+        success(res, { status: 1 }, 'Success', 200, { master });
+        return;
+      }
+      const record = await prisma.room_type_image.findUnique({ where: { id: BigInt(idParam) } });
+      if (!record || record.deleted_at) { notFound(res, 'Image is not found'); return; }
+      success(res, bigintToNumber(record), 'Success', 200, { master });
+    } catch (err: any) {
+      console.error('Room type image form error:', err);
+      error(res, 'Failed to load image form', 500);
+    }
+  }
+
+  /**
    * POST /api/room-types/:roomTypeId/images
    */
   static async imageStore(req: Request, res: Response): Promise<void> {
@@ -1254,7 +1282,7 @@ export class RoomController {
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
       const roomTypeIdParam = Array.isArray(req.params.roomTypeId) ? req.params.roomTypeId[0] : req.params.roomTypeId;
-      const roomTypeId = roomTypeIdParam ? BigInt(roomTypeIdParam) : null;
+      const roomTypeId = roomTypeIdParam ? BigInt(roomTypeIdParam) : (req.body.room_type_id ? BigInt(req.body.room_type_id) : null);
       const { image } = req.body;
 
       const errors: Record<string, string[]> = {};

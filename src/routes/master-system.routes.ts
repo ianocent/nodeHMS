@@ -13,9 +13,11 @@ const router = Router();
 // ════════════════════════════════════════════════════════
 
 router.get('/code-post', authMiddleware, requirePermission(69, 'view'), MasterDataController.codePostList);
+router.get('/code-post/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_posts'; MasterDataController.masterForm(req, res); });
 router.post('/code-post', authMiddleware, requirePermission(69, 'add'), MasterDataController.codePostCreate);
 router.get('/code-post/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codePostShow);
 router.get('/code-post/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codePostEdit);
+router.get('/code-post/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codePostEdit);
 router.put('/code-post/:id', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codePostUpdate);
 router.delete('/code-post/:id', authMiddleware, requirePermission(69, 'delete'), MasterDataController.codePostDestroy);
 
@@ -24,9 +26,11 @@ router.delete('/code-post/:id', authMiddleware, requirePermission(69, 'delete'),
 // ═════════════════════════════════════════════════════════
 
 router.get('/code-item', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeItemList);
+router.get('/code-item/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_items'; MasterDataController.masterForm(req, res); });
 router.post('/code-item', authMiddleware, requirePermission(69, 'add'), MasterDataController.codeItemCreate);
 router.get('/code-item/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeItemShow);
 router.get('/code-item/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeItemEdit);
+router.get('/code-item/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeItemEdit);
 router.put('/code-item/:id', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeItemUpdate);
 router.delete('/code-item/:id', authMiddleware, requirePermission(69, 'delete'), MasterDataController.codeItemDestroy);
 
@@ -35,9 +39,11 @@ router.delete('/code-item/:id', authMiddleware, requirePermission(69, 'delete'),
 // ═════════════════════════════════════════════════════════
 
 router.get('/code-billing', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeBillingList);
+router.get('/code-billing/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_billings'; MasterDataController.masterForm(req, res); });
 router.post('/code-billing', authMiddleware, requirePermission(69, 'add'), MasterDataController.codeBillingCreate);
 router.get('/code-billing/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeBillingShow);
 router.get('/code-billing/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeBillingEdit);
+router.get('/code-billing/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeBillingEdit);
 router.put('/code-billing/:id', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeBillingUpdate);
 router.delete('/code-billing/:id', authMiddleware, requirePermission(69, 'delete'), MasterDataController.codeBillingDestroy);
 
@@ -46,17 +52,21 @@ router.delete('/code-billing/:id', authMiddleware, requirePermission(69, 'delete
 // ═════════════════════════════════════════════════════════
 
 router.get('/code-gls', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlList);
+router.get('/code-gls/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_gls'; MasterDataController.masterForm(req, res); });
 router.post('/code-gls', authMiddleware, requirePermission(69, 'add'), MasterDataController.codeGlCreate);
 router.get('/code-gls/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlShow);
 router.get('/code-gls/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeGlEdit);
+router.get('/code-gls/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeGlEdit);
 router.put('/code-gls/:id', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeGlUpdate);
 router.delete('/code-gls/:id', authMiddleware, requirePermission(69, 'delete'), MasterDataController.codeGlDestroy);
 
 // Singular alias
 router.get('/code-gl', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlList);
+router.get('/code-gl/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_gls'; MasterDataController.masterForm(req, res); });
 router.post('/code-gl', authMiddleware, requirePermission(69, 'add'), MasterDataController.codeGlCreate);
 router.get('/code-gl/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlShow);
 router.get('/code-gl/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeGlEdit);
+router.get('/code-gl/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeGlEdit);
 router.put('/code-gl/:id', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeGlUpdate);
 router.delete('/code-gl/:id', authMiddleware, requirePermission(69, 'delete'), MasterDataController.codeGlDestroy);
 
@@ -73,7 +83,9 @@ router.get('/pos-matrix-sales', authMiddleware, requirePermission(69, 'view'), P
 
 router.get('/accounting/get/:type', authMiddleware, requirePermission(69, 'view'), AccountingController.autocomplete);
 router.get('/accounting/:type', authMiddleware, requirePermission(69, 'view'), AccountingController.list);
+router.get('/accounting/:type/create', authMiddleware, requirePermission(69, 'add'), AccountingController.createForm);
 router.post('/accounting/:type', authMiddleware, requirePermission(69, 'add'), AccountingController.store);
+router.put('/accounting/:type/:id', authMiddleware, requirePermission(69, 'edit'), AccountingController.updateStatus);
 router.post('/accounting/:type/update-status', authMiddleware, requirePermission(69, 'edit'), AccountingController.updateStatus);
 router.get('/accounting/:type/:id', authMiddleware, requirePermission(69, 'view'), AccountingController.show);
 

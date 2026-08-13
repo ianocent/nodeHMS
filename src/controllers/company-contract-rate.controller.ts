@@ -147,7 +147,7 @@ export class CompanyContractRateController {
           property_id: Number(item.property_id),
           rate_code: item.rate_code ?? null,
           rate: rateRec ? bigintToNumber(rateRec) : null,
-          company: companyMap.get(Number(item.company_profile_id)) || null,
+          company: companyMap.get(Number(item.company_profile_id)) ? bigintToNumber(companyMap.get(Number(item.company_profile_id))) : null,
         };
       });
 
@@ -186,7 +186,7 @@ export class CompanyContractRateController {
                 id: Number(cp.id),
                 name: cp.name,
                 code_billing: cp.code_billing_id
-                  ? cbMap.get(Number(cp.code_billing_id)) || null
+                  ? bigintToNumber(cbMap.get(Number(cp.code_billing_id)) || null)
                   : null,
               }
             : null,

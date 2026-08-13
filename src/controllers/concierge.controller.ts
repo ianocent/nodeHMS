@@ -40,7 +40,7 @@ export class ConciergeController {
   static async phoneBookGroupList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
@@ -58,7 +58,7 @@ export class ConciergeController {
 
   static async phoneBookGroupTree(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const groups = await prisma.phone_book_groups.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { sort: 'asc' } });
       const children = await prisma.phone_book_groups.findMany({ where: { property_id: pid, parent_id: { not: null }, deleted_at: null }, select: { parent_id: true } });
       const tree = buildTree(groups);
@@ -68,7 +68,7 @@ export class ConciergeController {
 
   static async phoneBookGroupStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { parent_id, name, sort, status } = req.body;
       if (!name) { badRequest(res, 'name is required'); return; }
 
@@ -100,7 +100,7 @@ export class ConciergeController {
   static async phoneBookList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const groupId = req.query.group_id as string;
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.name = { contains: search, mode: 'insensitive' }; }
@@ -120,7 +120,7 @@ export class ConciergeController {
 
   static async phoneBookStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { phone_book_group_id, name, address, telp, fax, email, contact_name, remark, sort, status } = req.body;
       if (!name) { badRequest(res, 'name is required'); return; }
 
@@ -152,7 +152,7 @@ export class ConciergeController {
   static async baggageList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.name = { contains: search, mode: 'insensitive' }; }
 
@@ -170,7 +170,7 @@ export class ConciergeController {
 
   static async baggageStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { date, name, tag_no, remark, phone_number, status } = req.body;
       if (!date) { badRequest(res, 'date is required'); return; }
 
@@ -202,7 +202,7 @@ export class ConciergeController {
   static async carParkList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.vehicle_no = { contains: search, mode: 'insensitive' }; }
 
@@ -220,7 +220,7 @@ export class ConciergeController {
 
   static async carParkStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { room, remark, car_park_lot, vehicle_no, folio, status } = req.body;
       if (!vehicle_no) { badRequest(res, 'vehicle_no is required'); return; }
 
@@ -252,7 +252,7 @@ export class ConciergeController {
   static async lostFoundList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.item = { contains: search, mode: 'insensitive' }; }
 
@@ -268,9 +268,22 @@ export class ConciergeController {
     } catch (err: any) { console.error('Lost & found list error:', err); error(res, 'Failed to list lost & found', 500); }
   }
 
+  static async lostFoundForm(req: Request, res: Response): Promise<void> {
+    try {
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) {
+        success(res, { status: 0 }, 'Success', 200);
+        return;
+      }
+      const data = await prisma.lost_and_founds.findUnique({ where: { id: BigInt(idRaw) } });
+      if (!data || data.deleted_at) { notFound(res, 'Lost & found not found'); return; }
+      success(res, bigintToNumber(data), 'Success', 200);
+    } catch (err: any) { console.error('Lost & found form error:', err); error(res, 'Failed to load lost & found', 500); }
+  }
+
   static async lostFoundStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { ref_no, report_date, item, room, room_founder, owner_item, item_status, hotel_location, description, instruction, status } = req.body;
       if (!item) { badRequest(res, 'item is required'); return; }
 

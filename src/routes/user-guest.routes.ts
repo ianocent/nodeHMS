@@ -16,6 +16,7 @@ router.get('/users/simple/list', authMiddleware, requirePermission(1116, 'view')
 router.get('/users/all/list', authMiddleware, requirePermission(1116, 'view'), UserController.listAll);
 router.get('/users/:id', authMiddleware, requirePermission(1116, 'view'), UserController.show);
 router.get('/users/:id/edit', authMiddleware, requirePermission(1116, 'edit'), UserController.edit);
+router.get('/users/:id/update', authMiddleware, requirePermission(1116, 'edit'), UserController.edit);
 router.put('/users/:id', authMiddleware, requirePermission(1116, 'edit'), UserController.update);
 router.delete('/users/:id', authMiddleware, requirePermission(1116, 'delete'), UserController.destroy);
 router.post('/users/:id/restore', authMiddleware, requirePermission(1116, 'edit'), UserController.restore);
@@ -29,6 +30,7 @@ router.get('/user/simple/list', authMiddleware, requirePermission(1116, 'view'),
 router.get('/user/all/list', authMiddleware, requirePermission(1116, 'view'), UserController.listAll);
 router.get('/user/:id', authMiddleware, requirePermission(1116, 'view'), UserController.show);
 router.get('/user/:id/edit', authMiddleware, requirePermission(1116, 'edit'), UserController.edit);
+router.get('/user/:id/update', authMiddleware, requirePermission(1116, 'edit'), UserController.edit);
 router.put('/user/:id', authMiddleware, requirePermission(1116, 'edit'), UserController.update);
 router.delete('/user/:id', authMiddleware, requirePermission(1116, 'delete'), UserController.destroy);
 router.post('/user/:id/restore', authMiddleware, requirePermission(1116, 'edit'), UserController.restore);
@@ -44,6 +46,7 @@ router.get('/guests/countries', authMiddleware, requirePermission(82, 'view'), G
 router.get('/guests/cities', authMiddleware, requirePermission(82, 'view'), GuestController.cities);
 router.get('/guests/:id', authMiddleware, requirePermission(82, 'view'), GuestController.show);
 router.get('/guests/:id/edit', authMiddleware, requirePermission(82, 'edit'), GuestController.edit);
+router.get('/guests/:id/update', authMiddleware, requirePermission(82, 'edit'), GuestController.edit);
 router.put('/guests/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.update);
 router.delete('/guests/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.destroy);
 router.post('/guests/:id/restore', authMiddleware, requirePermission(82, 'edit'), GuestController.restore);
@@ -82,6 +85,7 @@ router.get('/guest/countries', authMiddleware, requirePermission(82, 'view'), Gu
 router.get('/guest/cities', authMiddleware, requirePermission(82, 'view'), GuestController.cities);
 router.get('/guest/:id', authMiddleware, requirePermission(82, 'view'), GuestController.show);
 router.get('/guest/:id/edit', authMiddleware, requirePermission(82, 'edit'), GuestController.edit);
+router.get('/guest/:id/update', authMiddleware, requirePermission(82, 'edit'), GuestController.edit);
 router.put('/guest/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.update);
 router.delete('/guest/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.destroy);
 router.post('/guest/:id/restore', authMiddleware, requirePermission(82, 'edit'), GuestController.restore);
@@ -100,5 +104,25 @@ router.delete('/guest/documents/:id', authMiddleware, requirePermission(82, 'del
 router.delete('/guest/family/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.familyDestroy);
 router.delete('/guest/preferences/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.preferenceDestroy);
 router.delete('/guest/loyalty-cards/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.loyaltyDestroy);
+
+// ── /profile/guest-* aliases (frontend pages) ──
+const guestIdFromQuery = (req: any) => {
+  req.params.guestId = String(req.query.guest_id ?? req.query.guestId ?? req.query.data ?? '');
+};
+
+router.get('/profile/guest-folio', authMiddleware, requirePermission(82, 'view'), GuestController.folioList);
+router.get('/profile/guest-document', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.documentList(req, res); });
+router.post('/profile/guest-document', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.documentStore(req, res); });
+router.delete('/profile/guest-document/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.documentDestroy);
+router.get('/profile/guest-family', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.familyList(req, res); });
+router.post('/profile/guest-family', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.familyStore(req, res); });
+router.delete('/profile/guest-family/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.familyDestroy);
+router.get('/profile/guest-history', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.historyList(req, res); });
+router.get('/profile/guest-preference', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.preferenceList(req, res); });
+router.post('/profile/guest-preference', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.preferenceStore(req, res); });
+router.delete('/profile/guest-preference/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.preferenceDestroy);
+router.get('/profile/guest-loyalty-card', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.loyaltyList(req, res); });
+router.post('/profile/guest-loyalty-card', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.loyaltyStore(req, res); });
+router.delete('/profile/guest-loyalty-card/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.loyaltyDestroy);
 
 export default router;

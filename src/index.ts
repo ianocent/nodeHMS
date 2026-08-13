@@ -24,6 +24,7 @@ import eventRoutes from './routes/event.routes';
 import statisticRoutes from './routes/statistic.routes';
 import genericRoutes from './routes/generic.routes';
 import extraRoutes from './routes/extra.routes';
+import contentRoutes from './routes/content.routes';
 
 const app: Express = express();
 const port = process.env.PORT || 3000;
@@ -101,8 +102,8 @@ app.use('/api', masterSystemRoutes);
 app.use('/cms', masterSystemRoutes);
 
 // Reports routes — Phase 4.6
-app.use('/api', reportRoutes);
-app.use('/cms', reportRoutes);
+// report.routes.ts uses absolute /cms/... paths → must mount at root (no prefix strip)
+app.use(reportRoutes);
 
 // Admin routes — Roles, Permissions, Menus, Settings, Tasks, Logs
 app.use('/api', adminRoutes);
@@ -139,6 +140,10 @@ app.use('/cms/generic', genericRoutes);
 // Extra modules — allotment, overbooking, yield, competitor, statistic/occupancy, countryByRegion, email
 app.use('/api', extraRoutes);
 app.use('/cms', extraRoutes);
+
+// Content module — Phase 8 (contents, banners, cancelation rules, emails, other-guests)
+app.use('/api', contentRoutes);
+app.use('/cms', contentRoutes);
 
 // ============================================================
 // 404 Catch-all

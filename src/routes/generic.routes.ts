@@ -12,14 +12,18 @@ router.use(authMiddleware);
 // Generic CRUD for any model — mounted at /generic/:model
 // GET    /generic/:model              → list (paginated, searchable, sortable)
 // POST   /generic/:model              → create
+// GET    /generic/:model/create       → create form (empty master)
 // GET    /generic/:model/:id          → show
+// GET    /generic/:model/:id/update   → edit form
 // PUT    /generic/:model/:id          → update
 // DELETE /generic/:model/:id          → destroy (soft delete)
 // POST   /generic/:model/:id/restore  → restore (undo soft delete)
 
 router.get('/:model', ctrl.list.bind(ctrl));
 router.post('/:model', ctrl.create.bind(ctrl));
+router.get('/:model/create', ctrl.createForm.bind(ctrl));
 router.get('/:model/:id', ctrl.show.bind(ctrl));
+router.get('/:model/:id/update', ctrl.editForm.bind(ctrl));
 router.put('/:model/:id', ctrl.update.bind(ctrl));
 router.delete('/:model/:id', ctrl.destroy.bind(ctrl));
 router.post('/:model/:id/restore', ctrl.restore.bind(ctrl));

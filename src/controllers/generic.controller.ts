@@ -29,9 +29,12 @@ function bigintToNumber(val: any): any {
   return val;
 }
 
-function idParam(val: any): bigint {
-  if (Array.isArray(val)) return BigInt(val[0]);
-  return BigInt(val);
+function idParam(val: any): bigint | null {
+  if (Array.isArray(val)) val = val[0];
+  if (val === undefined || val === null || val === '') return null;
+  const s = String(val);
+  if (!/^\d+$/.test(s)) return null;
+  return BigInt(s);
 }
 
 function parsePagination(query: any) {
@@ -73,6 +76,10 @@ export class GenericController {
       room_type: 'room_types',
       rate: 'rates',
       promotion: 'promotions',
+      stocks: 'stocks',
+      work_order_stocks: 'work_order_stocks',
+      roster_list: 'roster_list',
+      shift_roster: 'shift_roster',
     };
     if (Object.values(irregular).includes(name)) return name;
     return irregular[name] || (name.endsWith('y') ? name.slice(0, -1) + 'ies' : name + 's');
@@ -102,6 +109,20 @@ export class GenericController {
     return searchFields[modelName] || ['name'];
   }
 
+  private softDeleteCache = new Map<string, boolean>();
+
+  private async modelHasSoftDelete(model: string): Promise<boolean> {
+    if (this.softDeleteCache.has(model)) return this.softDeleteCache.get(model)!;
+    let has = true;
+    try {
+      await (getPrisma() as any)[model].findFirst({ where: { deleted_at: null } });
+    } catch {
+      has = false;
+    }
+    this.softDeleteCache.set(model, has);
+    return has;
+  }
+
   async list(req: Request, res: Response): Promise<void> {
     try {
       const model = String(req.params.model);
@@ -110,8 +131,11 @@ export class GenericController {
       const modelDelegate = this.getPrismaModel(model);
       console.log('Model delegate:', modelDelegate ? 'found' : 'NOT FOUND');
       const searchFields = this.parseSearchFields(model, search || '');
+      const hasSoftDelete = await this.modelHasSoftDelete(model);
 
-      const where: any = trash ? { deleted_at: { not: null } } : { deleted_at: null };
+      const where: any = trash
+        ? (hasSoftDelete ? { deleted_at: { not: null } } : {})
+        : (hasSoftDelete ? { deleted_at: null } : {});
       if (search && searchFields.length > 0) {
         where.OR = searchFields.map((f: string) => ({ [f]: { contains: search, mode: 'insensitive' } }));
       }
@@ -164,13 +188,40 @@ export class GenericController {
     try {
       const model = String(req.params.model);
       const modelDelegate = this.getPrismaModel(model);
-      const record = await modelDelegate.findUnique({ where: { id: idParam(String(req.params.id)) } });
+      const id = idParam(String(req.params.id));
+      if (id === null) { notFound(res, 'Record not found'); return; }
+      const record = await modelDelegate.findUnique({ where: { id } });
       if (!record) { notFound(res, 'Record not found'); return; }
       const permission = { view: true, add: true, edit: true, delete: true };
       success(res, bigintToNumber(record), 'Success', 200, { table: [], search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic show error:', err); error(res, 'Failed to load', 500); }
+    }
+  }
+
+  async createForm(req: Request, res: Response): Promise<void> {
+    try {
+      const permission = { view: true, add: true, edit: true, delete: true };
+      success(res, { status: 1 }, 'Success', 200, { table: [], master: {}, search_data: [], permission });
+    } catch (err: any) {
+      error(res, 'Failed to load form data', 500);
+    }
+  }
+
+  async editForm(req: Request, res: Response): Promise<void> {
+    try {
+      const model = String(req.params.model);
+      const modelDelegate = this.getPrismaModel(model);
+      const id = idParam(String(req.params.id));
+      if (id === null) { notFound(res, 'Record not found'); return; }
+      const record = await modelDelegate.findUnique({ where: { id } });
+      if (!record) { notFound(res, 'Record not found'); return; }
+      const permission = { view: true, add: true, edit: true, delete: true };
+      success(res, bigintToNumber(record), 'Success', 200, { table: [], master: {}, search_data: [], permission });
+    } catch (err: any) {
+      if (err.message.includes('not found')) notFound(res, err.message);
+      else { console.error('Generic edit form error:', err); error(res, 'Failed to load', 500); }
     }
   }
 
@@ -194,10 +245,12 @@ async update(req: Request, res: Response): Promise<void> {
       const model = String(req.params.model);
       const id = String(req.params.id);
       const modelDelegate = this.getPrismaModel(model);
-      const existing = await modelDelegate.findUnique({ where: { id: idParam(String(id)) } });
+      const parsedId = idParam(String(id));
+      if (parsedId === null) { notFound(res, 'Record not found'); return; }
+      const existing = await modelDelegate.findUnique({ where: { id: parsedId } });
       if (!existing) { notFound(res, 'Record not found'); return; }
       const data = { ...req.body, updated_at: new Date() };
-      const record = await modelDelegate.update({ where: { id: idParam(String(id)) }, data });
+      const record = await modelDelegate.update({ where: { id: parsedId }, data });
       success(res, bigintToNumber(record), 'Updated');
     } catch (err: any) {
       console.error('Generic update error:', err);
@@ -211,9 +264,15 @@ async update(req: Request, res: Response): Promise<void> {
       const model = String(req.params.model);
       const id = String(req.params.id);
       const modelDelegate = this.getPrismaModel(model);
-      const existing = await modelDelegate.findUnique({ where: { id: idParam(String(id)) } });
+      const parsedId = idParam(String(id));
+      if (parsedId === null) { notFound(res, 'Record not found'); return; }
+      const existing = await modelDelegate.findUnique({ where: { id: parsedId } });
       if (!existing) { notFound(res, 'Record not found'); return; }
-      await modelDelegate.update({ where: { id: idParam(String(id)) }, data: { deleted_at: new Date() } });
+      if (await this.modelHasSoftDelete(model)) {
+        await modelDelegate.update({ where: { id: parsedId }, data: { deleted_at: new Date() } });
+      } else {
+        await modelDelegate.delete({ where: { id: parsedId } });
+      }
       success(res, null, 'Deleted');
     } catch (err: any) {
       console.error('Generic destroy error:', err);
@@ -227,9 +286,12 @@ async update(req: Request, res: Response): Promise<void> {
       const model = String(req.params.model);
       const id = String(req.params.id);
       const modelDelegate = this.getPrismaModel(model);
-      const existing = await modelDelegate.findUnique({ where: { id: idParam(String(id)) } });
+      const parsedId = idParam(String(id));
+      if (parsedId === null) { notFound(res, 'Record not found'); return; }
+      if (!(await this.modelHasSoftDelete(model))) { badRequest(res, 'Model has no soft delete'); return; }
+      const existing = await modelDelegate.findUnique({ where: { id: parsedId } });
       if (!existing) { notFound(res, 'Record not found'); return; }
-      await modelDelegate.update({ where: { id: idParam(String(id)) }, data: { deleted_at: null } });
+      await modelDelegate.update({ where: { id: parsedId }, data: { deleted_at: null } });
       success(res, null, 'Restored');
     } catch (err: any) {
       console.error('Generic restore error:', err);

@@ -36,9 +36,44 @@ function parsePagination(query: any) {
 }
 
 export class MasterDataController {
+  /**
+   * GET /api/:model/create | /api/:model/:id/update (form alias)
+   * req.params.model maps to a prisma model name; returns form shell or record
+   */
+  static async masterForm(req: Request, res: Response): Promise<void> {
+    try {
+      const modelName = String(req.params.model || '');
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const model: any = (prisma as any)[modelName];
+      if (!model) { notFound(res, 'Model not found'); return; }
+
+      const master: Record<string, any> = {};
+      try {
+        const [codePosts, codeBillings, codeGls] = await Promise.all([
+          prisma.code_posts.findMany({ where: { deleted_at: null }, select: { id: true, name: true, type: true }, orderBy: { name: 'asc' } }),
+          prisma.code_billings.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+          prisma.code_gls.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        ]);
+        master.code_posts = codePosts.map(c => ({ value: Number(c.id), label: `${c.name}${c.type ? ` (${c.type})` : ''}` }));
+        master.code_billings = codeBillings.map(c => ({ value: Number(c.id), label: c.name }));
+        master.code_gls = codeGls.map(c => ({ value: Number(c.id), label: c.name }));
+      } catch { /* master optional */ }
+
+      if (idRaw && /^\d+$/.test(idRaw)) {
+        const record = await model.findUnique({ where: { id: BigInt(idRaw) } });
+        if (!record || record.deleted_at) { notFound(res, 'Not found'); return; }
+        success(res, bigintToNumber(record), 'Success', 200, { master });
+        return;
+      }
+      success(res, { status: 1 }, 'Success', 200, { master });
+    } catch (err: any) {
+      error(res, 'Failed to load form', 500);
+    }
+  }
+
   static async codePostList(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
@@ -63,7 +98,7 @@ export class MasterDataController {
 
   static async codePostCreate(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { name, type, code_billing_id, code_gl_id, pay_commission, is_pos, local_tax, local_tax_percentage, service_charge, service_charge_percentage, service_charge_include_local_tax, tax, tax_percentage, tax_include_local_tax, sort, status } = req.body;
 
       if (!name) { badRequest(res, 'name is required'); return; }
@@ -168,7 +203,7 @@ export class MasterDataController {
 
   static async codeItemList(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
@@ -194,7 +229,7 @@ export class MasterDataController {
 
   static async codeItemCreate(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { code_post_id, name, is_online, is_event, description, sales, cost, sort, status } = req.body;
 
       if (!code_post_id) { badRequest(res, 'code_post_id is required'); return; }
@@ -292,7 +327,7 @@ export class MasterDataController {
 
   static async codeBillingList(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
@@ -317,7 +352,7 @@ export class MasterDataController {
 
   static async codeBillingCreate(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { name, description, isPOS, sort, status } = req.body;
 
       if (!name) { badRequest(res, 'name is required'); return; }
@@ -400,7 +435,7 @@ export class MasterDataController {
 
   static async codeGlList(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
@@ -425,7 +460,7 @@ export class MasterDataController {
 
   static async codeGlCreate(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { name, alias, description, account_uid, groupcode, mastercode, controlname, leveltype, balancetype, sort, status } = req.body;
 
       if (!name) { badRequest(res, 'name is required'); return; }
@@ -522,7 +557,7 @@ export class MasterDataController {
   //  TYPE PAYMENT (type_payments)
   // ═══════════════════════════════════════════════════════════════
   private static async crudList(model: any, req: Request, res: Response): Promise<void> {
-    const pid = req.user?.lastProperty ?? 0n;
+    const pid = BigInt(req.user?.lastProperty ?? 0);
     const { page, limit, search } = parsePagination(req.query);
     const where: any = { property_id: pid, deleted_at: null };
     if (search) where.name = { contains: search, mode: 'insensitive' };
@@ -540,7 +575,7 @@ export class MasterDataController {
   }
   static async typePaymentStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n; const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status } = req.body;
+      const pid = BigInt(req.user?.lastProperty ?? 0); const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status } = req.body;
       if (!name) { badRequest(res, 'name required'); return; }
       const d = await prisma.type_payments.create({ data: { property_id: pid, code_post_id: BigInt(code_post_id), code_billing_id: code_billing_id ? BigInt(code_billing_id) : null, name, pos: pos ?? 0, front_office: front_office ?? 0, surcharge_type: surcharge_type ?? 0, surcharge: surcharge ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date() } });
       success(res, bigintToNumber(d), 'Created');
@@ -618,7 +653,7 @@ export class MasterDataController {
   static async holidayList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.holidays, req, res); }
   static async holidayShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.holidays.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }
   static async holidayStore(req: Request, res: Response): Promise<void> {
-    try { const pid = req.user?.lastProperty ?? 0n; const { name, start_date, end_date, sort, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.holidays.create({ data: { property_id: pid, name, start_date: new Date(start_date), end_date: new Date(end_date), sort: sort ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { name, start_date, end_date, sort, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.holidays.create({ data: { property_id: pid, name, start_date: new Date(start_date), end_date: new Date(end_date), sort: sort ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async holidayUpdate(req: Request, res: Response): Promise<void> {
     try { const id = idParam(req.params.id); const { name, start_date, end_date, sort, status } = req.body; const data: any = { updated_at: new Date() }; if (name !== undefined) data.name = name; if (start_date !== undefined) data.start_date = new Date(start_date); if (end_date !== undefined) data.end_date = new Date(end_date); if (sort !== undefined) data.sort = sort; if (status !== undefined) data.status = status; await prisma.holidays.update({ where: { id }, data }); success(res, null, 'Updated'); } catch (err: any) { error(res, 'Failed', 500); }

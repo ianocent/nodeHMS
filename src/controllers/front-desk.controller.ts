@@ -372,7 +372,9 @@ export class FrontDeskController {
 
   static async transactionShow(req: Request, res: Response): Promise<void> {
     try {
-      const id = idParamBig(req.params.id);
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Transaction not found'); return; }
+      const id = BigInt(raw);
       const data = await prisma.transactions.findUnique({ where: { id }, include: { type_payments: true, folios: { select: { folio_number: true } } } });
       if (!data) { notFound(res, 'Transaction not found'); return; }
       success(res, bigintToNumber(data), 'Success');
@@ -527,6 +529,10 @@ export class FrontDeskController {
   static async show(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (idParam === undefined || !/^\d+$/.test(String(idParam))) {
+        notFound(res, 'Not Found');
+        return;
+      }
       const id = BigInt(idParam);
 
       const folio = await prisma.folios.findUnique({

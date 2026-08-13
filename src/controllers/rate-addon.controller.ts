@@ -497,7 +497,8 @@ export class RateAddonController {
 
   /**
    * GET /api/bar-rates/:barId/links
-   * List linked rates (model_has_rates) for a bar rate
+   * List linked rates for a bar rate — parity with Laravel BarRelationController::link
+   * (bar is model_has_rates.rate_id, linked rates are model_id)
    */
   static async barRelationLink(req: Request, res: Response): Promise<void> {
     try {
@@ -511,39 +512,55 @@ export class RateAddonController {
         return;
       }
 
-      const linkedRates = await prisma.model_has_rates.findMany({
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+
+      const links = await prisma.model_has_rates.findMany({
         where: {
           model_type: 'App\\Models\\Rate',
-          model_id: barId
+          rate_id: barId,
+          status: 1,
         },
-        include: {
-          rates: true
-        }
       });
+      const linkedIds = links.map(l => l.model_id);
 
-      const propertyWhere: any = { deleted_at: null, status: 1 };
-      if (propertyId) propertyWhere.property_id = propertyId;
+      const where: any = { id: { in: linkedIds }, deleted_at: null };
+      if (propertyId) where.property_id = propertyId;
+      const [rates, total] = await Promise.all([
+        prisma.rates.findMany({
+          where,
+          skip: (page - 1) * limit,
+          take: limit,
+          orderBy: { name: 'asc' },
+          include: { code_posts: { select: { id: true, name: true } } },
+        }),
+        prisma.rates.count({ where }),
+      ]);
 
-      const availableRates = await prisma.rates.findMany({
-        where: propertyWhere,
-        select: { id: true, name: true, code: true },
-        orderBy: { name: 'asc' }
-      });
-
-      const links = linkedRates.map(lr => ({
-        rate_id: Number(lr.rate_id),
-        model_type: lr.model_type,
-        model_id: Number(lr.model_id),
-        status: Number(lr.status),
-        rate: lr.rates ? { id: Number(lr.rates.id), name: lr.rates.name, code: lr.rates.code } : null
+      const formatted = rates.map((r: any) => ({
+        ...r,
+        id: Number(r.id),
+        property_id: Number(r.property_id),
+        code_post_id: r.code_post_id !== null && r.code_post_id !== undefined ? Number(r.code_post_id) : null,
+        minimum_rate: r.minimum_rate !== null && r.minimum_rate !== undefined ? Number(r.minimum_rate) : null,
+        code_post: r.code_posts ? { id: Number(r.code_posts.id), name: r.code_posts.name } : null,
+        code_posts: undefined,
       }));
 
-      const available = availableRates.map(r => ({ value: Number(r.id), label: `${r.name} (${r.code})` }));
+      const codePosts = await prisma.code_posts.findMany({
+        where: { type: 'DEFAULT', deleted_at: null },
+        select: { id: true, name: true },
+      });
+      const codePostOptions = codePosts.map((c: any) => ({ value: Number(c.id), label: c.name }));
 
       const table = [
-        { label: 'Rate', key: 'rate', type: 'none', is_search: false },
+        { label: 'Code', key: 'code', type: 'none', is_search: true },
+        { label: 'Name', key: 'name', type: 'none', is_search: true },
+        { label: 'Start Date', key: 'start_date', type: 'none', is_search: false },
+        { label: 'End Date', key: 'end_date', type: 'none', is_search: false },
+        { label: 'Code Post', key: 'code_post_id', type: 'select', is_search: false, options: codePostOptions },
         { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false }
+        { label: 'Action', key: 'action', type: 'action', is_search: false },
       ];
 
       const permFlags = getPermissionFlags(req.user, 87);
@@ -551,15 +568,28 @@ export class RateAddonController {
         view: true,
         add: req.user?.superUser || permFlags.add,
         edit: req.user?.superUser || permFlags.edit,
-        delete: req.user?.superUser || permFlags.delete
+        delete: req.user?.superUser || permFlags.delete,
       };
 
       const master = {
         bar_rate: { id: Number(barRate.id), name: barRate.name, code: barRate.code },
-        available_rates: available
+        code_posts: codePostOptions,
       };
 
-      success(res, { links, available: availableRates.map(r => ({ id: Number(r.id), name: r.name, code: r.code })) }, 'Success', 200, { table, permission, master });
+      success(res, formatted, 'Success', 200, {
+        table,
+        permission,
+        master,
+        search_data: [],
+        pagging: {
+          current_page: page,
+          last_page: Math.ceil(total / limit),
+          per_page: limit,
+          total,
+          from: (page - 1) * limit + 1,
+          to: Math.min(page * limit, total),
+        },
+      });
     } catch (err: any) {
       console.error('Bar relation link error:', err);
       error(res, 'Failed to fetch bar links', 500);

@@ -95,6 +95,30 @@ export class EventController {
     } catch (err: any) { error(res, 'Failed to load master data', 500); }
   }
 
+  static async capacityList(req: Request, res: Response): Promise<void> {
+    try {
+      const { page, limit, search } = parsePagination(req.query);
+      const where: any = {};
+      if (search) where.description = { contains: search, mode: 'insensitive' };
+
+      const [data, total] = await Promise.all([
+        prisma.event_capacities.findMany({
+          where,
+          include: { event_venues: { select: { id: true, name: true } }, event_layouts: { select: { id: true, name: true } } },
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.event_capacities.count({ where }),
+      ]);
+
+      success(res, bigintToNumber(data), 'Success', 200, {
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Capacity list error:', err); error(res, 'Failed to list capacities', 500); }
+  }
+
   // ==================== LAYOUT ====================
   static async layoutList(req: Request, res: Response): Promise<void> {
     try {
@@ -147,7 +171,7 @@ export class EventController {
   static async eventList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
@@ -162,6 +186,49 @@ export class EventController {
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Event list error:', err); error(res, 'Failed to list events', 500); }
+  }
+
+  static async timeline(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const today = new Date();
+      const defaultStart = new Date(today); defaultStart.setDate(today.getDate() - 7);
+      const defaultEnd = new Date(today); defaultEnd.setDate(today.getDate() + 14);
+      const start = req.query.start ? new Date(String(req.query.start)) : defaultStart;
+      const end = req.query.end ? new Date(String(req.query.end)) : defaultEnd;
+      end.setHours(23, 59, 59, 999);
+
+      const events = await prisma.event_events.findMany({
+        where: { property_id: pid, deleted_at: null, event_start_time: { gte: start }, event_end_time: { lte: end } },
+        orderBy: { event_start_time: 'asc' },
+        include: { event_venues: { select: { name: true } } },
+      });
+
+      const dates: string[] = [];
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        dates.push(d.toISOString().slice(0, 10));
+      }
+      const timeline = dates.map((dateStr) => {
+        const dayStart = new Date(`${dateStr}T00:00:00`);
+        const dayEnd = new Date(`${dateStr}T23:59:59`);
+        const items = events
+          .filter((e) => e.event_start_time <= dayEnd && e.event_end_time >= dayStart)
+          .map((e) => ({
+            id: e.id,
+            event_no: e.event_no,
+            name: e.name,
+            start: e.event_start_time,
+            end: e.event_end_time,
+            status: e.status,
+            venue: e.event_venues?.name ?? null,
+            pax: e.pax,
+            guest: e.guest_name,
+          }));
+        return { date: dateStr, events: items };
+      });
+
+      success(res, { dates, timeline, default_start: defaultStart.toISOString().slice(0, 10), default_end: defaultEnd.toISOString().slice(0, 10) }, 'Success');
+    } catch (err: any) { console.error('Event timeline error:', err); error(res, 'Failed to load event timeline', 500); }
   }
 
   static async eventCreate(req: Request, res: Response): Promise<void> {

@@ -163,11 +163,34 @@ export class AccountingController {
   }
 
   // ─────────────────────────────────────────────
+  // GET /cms/accounting/{type}/create
+  // ─────────────────────────────────────────────
+  static async createForm(req: Request, res: Response): Promise<void> {
+    try {
+      const [folios, typePayments] = await Promise.all([
+        prisma.folios.findMany({ where: { deleted_at: null, status: 1 }, select: { id: true, folio_number: true }, orderBy: { id: 'desc' }, take: 50 }),
+        prisma.type_payments.findMany({ where: { deleted_at: null, status: 1 }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      ]);
+      success(res, { status: 1, type_accounting: String(req.params.type), date: new Date() }, 'Success', 200, {
+        master: {
+          folios: bigintToNumber(folios),
+          type_payments: bigintToNumber(typePayments),
+        },
+      });
+    } catch (err: any) {
+      console.error('Accounting create form error:', err);
+      error(res, 'Failed to load form data', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────
   // GET /cms/accounting/{type}/{id}
   // ─────────────────────────────────────────────
   static async show(req: Request, res: Response): Promise<void> {
     try {
-      const id = idParam(req.params.id);
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Accounting record not found'); return; }
+      const id = BigInt(idRaw);
 
       const record = await prisma.accountings.findUnique({
         where: { id },

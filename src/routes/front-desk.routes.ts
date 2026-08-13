@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { FrontDeskController } from '../controllers/front-desk.controller';
+import { PosController } from '../controllers/pos.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 
@@ -24,6 +25,7 @@ router.post('/transactions/:id/void', authMiddleware, FrontDeskController.transa
 // Singular aliases for transactions
 router.get('/transaction', authMiddleware, FrontDeskController.transactionList);
 router.post('/transaction', authMiddleware, FrontDeskController.transactionStore);
+router.get('/transaction/pos', authMiddleware, requirePermission(69, 'view'), PosController.listTransactions);
 router.get('/transaction/:id', authMiddleware, FrontDeskController.transactionShow);
 router.post('/transaction/:id/void', authMiddleware, FrontDeskController.transactionVoid);
 

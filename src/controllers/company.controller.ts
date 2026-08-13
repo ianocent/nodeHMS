@@ -45,12 +45,34 @@ export class CompanyController {
   }
 
   static async show(req: Request, res: Response): Promise<void> {
-    try { const id = idP(req.params.id); const d = await prisma.company_profiles.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bn(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id; if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; } const id = BigInt(raw); const d = await prisma.company_profiles.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bn(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+  }
+
+  static async createForm(req: Request, res: Response): Promise<void> {
+    try {
+      if (req.params.id !== undefined) {
+        const id = idP(req.params.id);
+        const d = await prisma.company_profiles.findUnique({ where: { id } });
+        if (!d) { notFound(res); return; }
+        success(res, bn(d), 'Success');
+        return;
+      }
+      const [countries, types] = await Promise.all([
+        prisma.countries.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.code_posts.findMany({ where: { type: 'COMPANY', deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      ]);
+      success(res, { status: 1 }, 'Success', 200, {
+        master: {
+          countries: countries.map(c => ({ value: Number(c.id), label: c.name })),
+          type_companies: types.map(t => ({ value: Number(t.id), label: t.name })),
+        },
+      });
+    } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
   }
 
   static async store(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { name, type_company, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
       if (!name) { badRequest(res, 'name required'); return; }
       const d = await prisma.company_profiles.create({
@@ -85,7 +107,7 @@ export class CompanyController {
     try { const data = await prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async contactStore(req: Request, res: Response): Promise<void> {
-    try { const pid = req.user?.lastProperty ?? 0n; const { company_profile_id, name, position, email, tel, mobile_phone, is_default } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, name, position, email, tel, mobile_phone, is_default } = req.body;
       const d = await prisma.company_profile_contact_persons.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), name, position, email, tel, mobile_phone, is_default: is_default ?? false, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -105,7 +127,7 @@ export class CompanyController {
     try { const data = await prisma.company_profile_departments.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async deptStore(req: Request, res: Response): Promise<void> {
-    try { const pid = req.user?.lastProperty ?? 0n; const { company_profile_id, department, country_id, city_id, address, postal_code } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, department, country_id, city_id, address, postal_code } = req.body;
       const d = await prisma.company_profile_departments.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), department, country_id: country_id ? BigInt(country_id) : null, city_id: city_id ? BigInt(city_id) : null, address, postal_code, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -125,7 +147,7 @@ export class CompanyController {
     try { const data = await prisma.company_profile_activities.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async activityStore(req: Request, res: Response): Promise<void> {
-    try { const pid = req.user?.lastProperty ?? 0n; const { company_profile_id, date, subject, objective, notes } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, date, subject, objective, notes } = req.body;
       const d = await prisma.company_profile_activities.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), date: new Date(date || Date.now()), subject, objective, notes, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -144,7 +166,7 @@ export class CompanyController {
     try { const data = await prisma.company_profile_documents.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async documentStore(req: Request, res: Response): Promise<void> {
-    try { const pid = req.user?.lastProperty ?? 0n; const { company_profile_id, file, description } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, file, description } = req.body;
       const d = await prisma.company_profile_documents.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), file, description, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -164,7 +186,7 @@ export class CompanyController {
   }
   static async guestStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const { company_profile_id, first_name, last_name, email, mobile_phone } = req.body;
       if (!company_profile_id) { badRequest(res, 'company_profile_id required'); return; }
       const d = await prisma.company_guests.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), first_name, last_name, email, mobile_phone, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
@@ -177,7 +199,7 @@ export class CompanyController {
   // ── Folio ──
   static async folioList(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const companyId = req.query.company_id as string;
       const where: any = { property_id: pid, deleted_at: null };
       if (companyId) where.company_profile_id = BigInt(companyId);
@@ -199,11 +221,37 @@ export class CompanyController {
     try { const data = await prisma.company_profile_ar_transactions.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async arTransactionStore(req: Request, res: Response): Promise<void> {
-    try { const pid = req.user?.lastProperty ?? 0n; const { company_profile_id, transaction_code, document, date, description, amount } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, transaction_code, document, date, description, amount } = req.body;
       const d = await prisma.company_profile_ar_transactions.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), transaction_code, document, date: new Date(date || Date.now()), description: description || '', amount: amount ?? 0, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async arTransactionDestroy(req: Request, res: Response): Promise<void> {
     try { const id = idP(req.params.id); await prisma.company_profile_ar_transactions.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
+  }
+
+  // ════════ Company Profile Billing Setup ════════
+  static async billingSetupList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
+      const s = req.query.search as string;
+      const where: any = { deleted_at: null };
+      if (s) where.OR = [{ billing: { contains: s, mode: 'insensitive' } }, { company_profiles: { is: { name: { contains: s, mode: 'insensitive' } } } }];
+      const [data, total] = await Promise.all([
+        prisma.company_profile_billing_setups.findMany({ where, include: { company_profiles: { select: { id: true, name: true } }, code_billings: { select: { id: true, name: true } } }, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),
+        prisma.company_profile_billing_setups.count({ where }),
+      ]);
+      success(res, bn(data), 'Success', 200, { pagging: { current_page: page, last_page: Math.ceil(total / lim), per_page: lim, total, from: (page - 1) * lim + 1, to: Math.min(page * lim, total) } });
+    } catch (err: any) { console.error('Billing setup list error:', err); error(res, 'Failed', 500); }
+  }
+  static async billingSetupStore(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const { company_profile_id, code_billing_id, billing } = req.body;
+      const d = await prisma.company_profile_billing_setups.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), code_billing_id: BigInt(code_billing_id), billing, status: 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id } });
+      success(res, bn(d), 'Created');
+    } catch (err: any) { console.error('Billing setup store error:', err); error(res, 'Failed', 500); }
+  }
+  static async billingSetupDestroy(req: Request, res: Response): Promise<void> {
+    try { const id = idP(req.params.id); await prisma.company_profile_billing_setups.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 }

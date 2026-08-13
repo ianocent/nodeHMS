@@ -30,30 +30,38 @@ const generic = new GenericController();
 
 // ── Allotment ──
 router.get('/allotment', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'allotment'; generic.list(req, res); });
+router.get('/allotment/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'allotment'; generic.createForm(req, res); });
 router.post('/allotment', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'allotment'; generic.create(req, res); });
 router.get('/allotment/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'allotment'; generic.show(req, res); });
+router.get('/allotment/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.editForm(req, res); });
 router.put('/allotment/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.update(req, res); });
 router.delete('/allotment/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'allotment'; generic.destroy(req, res); });
 router.post('/allotment/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.restore(req, res); });
 
 router.get('/allotments', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'allotment'; generic.list(req, res); });
+router.get('/allotments/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'allotment'; generic.createForm(req, res); });
 router.post('/allotments', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'allotment'; generic.create(req, res); });
 router.get('/allotments/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'allotment'; generic.show(req, res); });
+router.get('/allotments/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.editForm(req, res); });
 router.put('/allotments/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.update(req, res); });
 router.delete('/allotments/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'allotment'; generic.destroy(req, res); });
 router.post('/allotments/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.restore(req, res); });
 
 // ── Overbooking ──
 router.get('/overbooking', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.list(req, res); });
+router.get('/overbooking/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
 router.post('/overbooking', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
 router.get('/overbooking/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.show(req, res); });
+router.get('/overbooking/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
 router.put('/overbooking/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.update(req, res); });
 router.delete('/overbooking/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
 router.post('/overbooking/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
 
 router.get('/overbookings', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.list(req, res); });
+router.get('/overbookings/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
 router.post('/overbookings', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
 router.get('/overbookings/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.show(req, res); });
+router.get('/overbookings/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
 router.put('/overbookings/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.update(req, res); });
 router.delete('/overbookings/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
 router.post('/overbookings/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
@@ -65,6 +73,7 @@ router.get('/yield/create', authMiddleware, requirePermission(80, 'add'), async 
 });
 router.post('/yield', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'yield'; generic.create(req, res); });
 router.get('/yield/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'yield'; generic.show(req, res); });
+router.get('/yield/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.editForm(req, res); });
 router.get('/yield/:id/edit', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.show(req, res); });
 router.put('/yield/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.update(req, res); });
 router.delete('/yield/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'yield'; generic.destroy(req, res); });
@@ -76,6 +85,7 @@ router.get('/yields/create', authMiddleware, requirePermission(80, 'add'), async
 });
 router.post('/yields', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'yield'; generic.create(req, res); });
 router.get('/yields/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'yield'; generic.show(req, res); });
+router.get('/yields/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.editForm(req, res); });
 router.get('/yields/:id/edit', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.show(req, res); });
 router.put('/yields/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.update(req, res); });
 router.delete('/yields/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'yield'; generic.destroy(req, res); });
@@ -212,19 +222,37 @@ router.post('/room-statistic', authMiddleware, requirePermission(1120, 'edit'), 
     error(res, err.message || 'Failed to update room status', 500);
   }
 });
-
 // ── Profile Guest (alias for GuestController) ──
 // Lazy-import GuestController to avoid circular deps
 async function guestList(req: Request, res: Response): Promise<void> {
   const { GuestController } = await import('../controllers/guest.controller');
   await GuestController.list(req, res);
 }
+
 async function guestCreate(req: Request, res: Response): Promise<void> {
   const { GuestController } = await import('../controllers/guest.controller');
   await GuestController.create(req, res);
 }
+
+async function guestEdit(req: Request, res: Response): Promise<void> {
+  const { GuestController } = await import('../controllers/guest.controller');
+  await GuestController.edit(req, res);
+}
+
+async function guestUpdate(req: Request, res: Response): Promise<void> {
+  const { GuestController } = await import('../controllers/guest.controller');
+  await GuestController.update(req, res);
+}
+
+async function guestDelete(req: Request, res: Response): Promise<void> {
+  const { GuestController } = await import('../controllers/guest.controller');
+  await GuestController.destroy(req, res);
+}
 router.get('/profile/guest', authMiddleware, requirePermission(82, 'view'), guestList);
 router.get('/profile/guest/create', authMiddleware, requirePermission(82, 'add'), guestCreate);
+router.get('/profile/guest/:id/update', authMiddleware, requirePermission(82, 'edit'), guestEdit);
+router.put('/profile/guest/:id', authMiddleware, requirePermission(82, 'edit'), guestUpdate);
+router.delete('/profile/guest/:id', authMiddleware, requirePermission(82, 'delete'), guestDelete);
 
 // ── Guest Requests (backed by guest_profile_preferences with remark) ──
 router.get('/guest-request', authMiddleware, requirePermission(82, 'view'), async (req: Request, res: Response) => {
@@ -338,6 +366,20 @@ router.post('/guest-request', authMiddleware, requirePermission(82, 'add'), asyn
 });
 
 router.get('/guest-request/:id', authMiddleware, requirePermission(82, 'view'), async (req: Request, res: Response) => {
+  try {
+    const id = BigInt(req.params.id as string);
+    const record = await prisma.guest_profile_preferences.findUnique({
+      where: { id },
+      include: { guest_profiles: { select: { id: true, first_name: true, last_name: true } } },
+    });
+    if (!record || record.deleted_at) { notFound(res, 'Not Found'); return; }
+    success(res, bigintToNumber(record), 'Success');
+  } catch (err: any) {
+    error(res, err.message || 'Failed to fetch guest request', 500);
+  }
+});
+
+router.get('/guest-request/:id/update', authMiddleware, requirePermission(82, 'edit'), async (req: Request, res: Response) => {
   try {
     const id = BigInt(req.params.id as string);
     const record = await prisma.guest_profile_preferences.findUnique({

@@ -46,6 +46,13 @@ router.get('/reservation/pending', authMiddleware, requirePermission(80, 'view')
 router.post('/reservation/on-check', authMiddleware, requirePermission(80, 'view'), ReservationController.onCheck);
 router.post('/reservation/update-bulk', authMiddleware, requirePermission(80, 'edit'), ReservationController.updateBulk);
 
+// ── Reservation sub-feature statics (must precede /reservation/:id) ──
+router.get('/reservation/code-item', authMiddleware, requirePermission(80, 'view'), ReservationController.codeItemList);
+router.post('/reservation/code-item', authMiddleware, requirePermission(80, 'add'), ReservationController.codeItemList);
+router.get('/reservation/inclusive', authMiddleware, requirePermission(80, 'view'), ReservationController.inclusiveList);
+router.get('/reservation/masterInclusive', authMiddleware, requirePermission(80, 'view'), ReservationController.masterInclusiveList);
+router.get('/reservation/subfolio/:id', authMiddleware, requirePermission(80, 'view'), ReservationController.subfolioList);
+
 // ── Singular param routes ──
 router.get('/reservation/:id', authMiddleware, requirePermission(80, 'view'), ReservationController.show);
 router.get('/reservation/:id/edit', authMiddleware, requirePermission(80, 'edit'), ReservationController.edit);

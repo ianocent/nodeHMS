@@ -28,6 +28,7 @@ router.get('/room-type/:id/edit', authMiddleware, requirePermission(1120, 'edit'
 router.put('/room-type/:id', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeUpdate);
 router.delete('/room-type/:id', authMiddleware, requirePermission(1120, 'delete'), RoomController.typeDestroy);
 router.post('/room-type/:id/restore', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeRestore);
+router.get('/room-type/:id/update', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeEdit);
 router.get('/room-type/get-configuration/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.typeShow);
 
 // ── Rooms ──
@@ -54,6 +55,7 @@ router.get('/room/create', authMiddleware, requirePermission(1120, 'add'), RoomC
 router.post('/room', authMiddleware, requirePermission(1120, 'add'), RoomController.store);
 router.get('/room/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.show);
 router.get('/room/:id/edit', authMiddleware, requirePermission(1120, 'edit'), RoomController.edit);
+router.get('/room/:id/update', authMiddleware, requirePermission(1120, 'edit'), RoomController.edit);
 router.put('/room/:id', authMiddleware, requirePermission(1120, 'edit'), RoomController.update);
 router.delete('/room/:id', authMiddleware, requirePermission(1120, 'delete'), RoomController.destroy);
 router.delete('/room/:id/force', authMiddleware, requirePermission(1120, 'delete'), RoomController.delete);
@@ -62,7 +64,12 @@ router.get('/room/:id/configuration', authMiddleware, requirePermission(1120, 'v
 
 // ── Room Type Images ──
 router.get('/room-types/:roomTypeId/images', authMiddleware, requirePermission(1120, 'view'), RoomController.imageList);
+router.get('/room-type-images', authMiddleware, requirePermission(1120, 'view'), RoomController.imageList);
+router.get('/room-type-images/create', authMiddleware, requirePermission(1120, 'add'), RoomController.imageForm);
+router.post('/room-type-images', authMiddleware, requirePermission(1120, 'add'), RoomController.imageStore);
 router.post('/room-types/:roomTypeId/images', authMiddleware, requirePermission(1120, 'add'), RoomController.imageStore);
+router.get('/room-type-images/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.imageForm);
+router.get('/room-type-images/:id/update', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageForm);
 router.put('/room-type-images/:id', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageUpdate);
 router.delete('/room-type-images/:id', authMiddleware, requirePermission(1120, 'delete'), RoomController.imageDestroy);
 router.post('/room-type-images/:id/restore', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageRestore);

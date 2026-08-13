@@ -51,7 +51,7 @@ export class StatisticController {
 
   static async roomAvailability(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = Number(req.user?.lastProperty ?? 0);
       const date = req.query.date as string;
 
       const where: any = { property_id: pid };

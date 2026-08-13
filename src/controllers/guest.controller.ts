@@ -205,12 +205,12 @@ export class GuestController {
 
       const master = {
         statuses: STATUSES.map(s => ({ value: s.id, label: s.name })),
-        titles: titles.map(t => ({ value: t.id, label: t.name })),
+        titles: titles.map(t => ({ value: Number(t.id), label: t.name })),
         nrics: NRICS.map(n => ({ value: n.name, label: n.name })),
-        statusGuest: filteredStatusGuest.map(s => ({ value: s.id, label: s.name })),
+        statusGuest: filteredStatusGuest.map(s => ({ value: Number(s.id), label: s.name })),
         genders: GENDERS.map(g => ({ value: g.name, label: g.name })),
         regions: REGIONS.map(r => ({ value: r.name, label: r.name })),
-        statusBlacklist: blackList.map(b => ({ value: b.id, label: b.name }))
+        statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
       };
 
       success(res, { status: 1, status_profile: 'Normal' }, 'Success', 200, { master });
@@ -383,12 +383,12 @@ export class GuestController {
 
       const master = {
         statuses: STATUSES.map(s => ({ value: s.id, label: s.name })),
-        titles: titles.map(t => ({ value: t.id, label: t.name })),
+        titles: titles.map(t => ({ value: Number(t.id), label: t.name })),
         nrics: NRICS.map(n => ({ value: n.name, label: n.name })),
-        statusGuest: filteredStatusGuest.map(s => ({ value: s.id, label: s.name })),
+        statusGuest: filteredStatusGuest.map(s => ({ value: Number(s.id), label: s.name })),
         genders: GENDERS.map(g => ({ value: g.name, label: g.name })),
         regions: REGIONS.map(r => ({ value: r.name, label: r.name })),
-        statusBlacklist: blackList.map(b => ({ value: b.id, label: b.name }))
+        statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
       };
 
       success(res, { ...this.formatGuest(guest), guest_title: guestTitle ? Number(guestTitle) : null, guest_status: guestStatus ? Number(guestStatus) : null, master }, 'Success');
@@ -716,6 +716,23 @@ export class GuestController {
     return { ...guest, nationality, types: types.map(t => t.types), folios };
   }
 
+  static async folioList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const guestIdRaw = String(req.query.guest_id ?? req.query.guestId ?? '');
+      if (!/^\d+$/.test(guestIdRaw)) { success(res, [], 'Success', 200, { pagging: { current_page: 1, last_page: 1, per_page: limit, total: 0, from: 1, to: 0 } }); return; }
+      const where: any = { guest_profile_id: BigInt(guestIdRaw) };
+      const [data, total] = await Promise.all([
+        prisma.folios.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.folios.count({ where }),
+      ]);
+      success(res, bigintToNumber(data), 'Success', 200, {
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Guest folio list error:', err); error(res, 'Failed to list folios', 500); }
+  }
+
   // ==================== DOCUMENT ====================
   static async documentList(req: Request, res: Response): Promise<void> {
     try {
@@ -881,10 +898,10 @@ export class GuestController {
       last_name: guest.last_name,
       name: `${guest.first_name} ${guest.last_name}`,
       region: guest.region,
-      nationality_id: guest.nationality_id,
-      nationality: nationality,
-      city_id: guest.city_id,
-      country_id: guest.country_id,
+      nationality_id: guest.nationality_id !== null && guest.nationality_id !== undefined ? Number(guest.nationality_id) : null,
+      nationality: nationality ? bigintToNumber(nationality) : null,
+      city_id: guest.city_id !== null && guest.city_id !== undefined ? Number(guest.city_id) : null,
+      country_id: guest.country_id !== null && guest.country_id !== undefined ? Number(guest.country_id) : null,
       telp: guest.telp,
       mobile_phone: guest.mobile_phone,
       card_type: guest.card_type,
@@ -897,13 +914,13 @@ export class GuestController {
       address: guest.address,
       postal_code: guest.postal_code,
       car_reg_number: guest.car_reg_number,
-      guest_status: guest.guest_status,
-      guest_title: guest.guest_title,
-      status: guest.status,
+      guest_status: guest.guest_status !== null && guest.guest_status !== undefined ? Number(guest.guest_status) : null,
+      guest_title: guest.guest_title !== null && guest.guest_title !== undefined ? Number(guest.guest_title) : null,
+      status: guest.status !== null && guest.status !== undefined ? Number(guest.status) : null,
       image: guest.image,
-      property_id: guest.property_id,
-      types: types,
-      folios: folios
+      property_id: guest.property_id !== null && guest.property_id !== undefined ? Number(guest.property_id) : null,
+      types: types ? bigintToNumber(types) : [],
+      folios: folios ? bigintToNumber(folios) : []
     };
   }
 }
