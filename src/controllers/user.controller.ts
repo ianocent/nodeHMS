@@ -134,9 +134,9 @@ export class UserController {
       ]);
 
       const master = {
-        companies: companies.map((c: any) => ({ value: c.id, label: c.name })),
-        properties: properties.map((p: any) => ({ value: p.id, label: p.name })),
-        roles: roles.map((r: any) => ({ value: r.id, label: r.name })),
+        companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
+        roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
           { value: 1, label: 'Active' },
           { value: 0, label: 'Inactive' }
@@ -289,9 +289,9 @@ export class UserController {
       }
 
       const master = {
-        companies: companies.map((c: any) => ({ value: c.id, label: c.name })),
-        properties: properties.map((p: any) => ({ value: p.id, label: p.name })),
-        roles: roles.map((r: any) => ({ value: r.id, label: r.name })),
+        companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
+        roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
           { value: 1, label: 'Active' },
           { value: 0, label: 'Inactive' }
