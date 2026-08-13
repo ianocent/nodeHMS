@@ -1,0 +1,9 @@
+node_modules
+.env
+/generated/prisma
+dist
+*.log
+*.tsbuildinfo
+cookie.txt
+login_response.txt
+test-*.js

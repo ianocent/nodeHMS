@@ -1,0 +1,452 @@
+import { Request, Response } from 'express';
+import bcrypt from 'bcrypt';
+import crypto from 'crypto';
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
+import { success, badRequest, unauthorized, validationError } from '../utils/response';
+import { TokenService } from '../services/token.service';
+import { SUPER_ROLES } from '../config/permissions';
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+const prisma = new PrismaClient({ adapter });
+
+// bcrypt cost factor (matching Laravel default: 10)
+const BCRYPT_ROUNDS = 10;
+
+export class AuthController {
+  /**
+   * POST /api/login
+   * Replicates Laravel AuthController@login
+   */
+  static async login(req: Request, res: Response): Promise<void> {
+    try {
+      const { email, password } = req.body;
+
+      // Validation
+      if (!password) {
+        validationError(res, { password: ['The password field is required.'] });
+        return;
+      }
+
+      // Detect email vs username (like Laravel's FILTER_VALIDATE_EMAIL)
+      const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || '');
+      const where = isEmail
+        ? { email: email, status: 1 }
+        : { username: email || '', status: 1 };
+
+      // Find user
+      const user = await prisma.users.findFirst({ where });
+      if (!user) {
+        badRequest(res, 'Invalid input');
+        return;
+      }
+
+      // Verify password
+      const validPassword = await bcrypt.compare(password, user.password);
+      if (!validPassword) {
+        badRequest(res, 'Invalid input');
+        return;
+      }
+
+      // Auto-revoke old session (allow re-login without "User already logged in")
+      await TokenService.revokeAllUserTokens(user.id);
+
+      // Get user roles
+      const modelRoles = await prisma.model_has_roles.findMany({
+        where: {
+          model_type: 'App\\Models\\User',
+          model_id: user.id,
+        },
+        include: { roles: true },
+      });
+
+      const roleNames = modelRoles.map(mr => mr.roles.name);
+      const roleIds = modelRoles.map(mr => mr.roles.id);
+
+      if (roleNames.length === 0) {
+        badRequest(res, 'Role not found');
+        return;
+      }
+
+      // Generate token
+      const { plainTextToken, expiresAt } = await TokenService.createToken(
+        user.id,
+        user.email
+      );
+
+      // Build permission tree (simplified — full tree in formatData)
+      const permissions = await AuthController.buildPermissionTree(user.id, roleIds, roleNames);
+
+      // Check shift status (simplified)
+      const isShift = false;
+      const isNeedShift = false;
+
+      success(res, {
+        name: user.name,
+        role: roleNames,
+        username: user.username,
+        email: user.email,
+        access_token: plainTextToken,
+        expires_token: expiresAt.toISOString().replace('T', ' ').substring(0, 19),
+        force_change_password: user.force_change_password,
+        is_shift: isShift,
+        is_need_shift: isNeedShift,
+        bussinesDate: new Date().toISOString().substring(0, 10),
+        permissions,
+      }, 'Success');
+    } catch (err: any) {
+      console.error('Login error:', err);
+      badRequest(res, 'Login failed');
+    }
+  }
+
+  /**
+   * POST /api/logout
+   * Replicates Laravel AuthController@logout
+   */
+  static async logout(req: Request, res: Response): Promise<void> {
+    try {
+      const tokenHeader = req.headers['x-token'] as string | undefined;
+      if (!tokenHeader) {
+        unauthorized(res, 'Invalid token');
+        return;
+      }
+
+      // Find token
+      const tokenRecord = await TokenService.findToken(tokenHeader);
+      if (!tokenRecord) {
+        unauthorized(res, 'Invalid token');
+        return;
+      }
+
+      // Clear FCM token
+      await TokenService.clearFcmToken(tokenRecord.tokenable_id);
+
+      // Delete ALL user tokens (matches Laravel behavior)
+      await TokenService.revokeAllUserTokens(tokenRecord.tokenable_id);
+
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Logout error:', err);
+      badRequest(res, 'Logout failed');
+    }
+  }
+
+  /**
+   * POST /api/refresh
+   * Replicates Laravel Sanctum token refresh
+   * Returns new token, revokes old one
+   */
+  static async refresh(req: Request, res: Response): Promise<void> {
+    try {
+      const tokenHeader = req.headers['x-token'] as string | undefined;
+      if (!tokenHeader) {
+        unauthorized(res, 'Token not provided');
+        return;
+      }
+
+      // Find and validate current token
+      const tokenRecord = await TokenService.findToken(tokenHeader);
+      if (!tokenRecord) {
+        unauthorized(res, 'Invalid token');
+        return;
+      }
+
+      // Get user
+      const user = await prisma.users.findUnique({
+        where: { id: tokenRecord.tokenable_id },
+      });
+      if (!user || user.status === 0) {
+        unauthorized(res, 'User not found or inactive');
+        return;
+      }
+
+      // Get user roles
+      const modelRoles = await prisma.model_has_roles.findMany({
+        where: {
+          model_type: 'App\\Models\\User',
+          model_id: user.id,
+        },
+        include: { roles: true },
+      });
+
+      const roleNames = modelRoles.map(mr => mr.roles.name);
+      const roleIds = modelRoles.map(mr => mr.roles.id);
+
+      if (roleNames.length === 0) {
+        badRequest(res, 'Role not found');
+        return;
+      }
+
+      // Revoke old token
+      await TokenService.revokeToken(tokenRecord.id);
+
+      // Create new token
+      const { plainTextToken, expiresAt } = await TokenService.createToken(
+        user.id,
+        user.email
+      );
+
+      // Build permission tree
+      const permissions = await AuthController.buildPermissionTree(
+        user.id,
+        roleIds,
+        roleNames
+      );
+
+      success(res, {
+        name: user.name,
+        role: roleNames,
+        username: user.username,
+        email: user.email,
+        access_token: plainTextToken,
+        expires_token: expiresAt.toISOString().replace('T', ' ').substring(0, 19),
+        force_change_password: user.force_change_password,
+        is_shift: false,
+        is_need_shift: false,
+        bussinesDate: new Date().toISOString().substring(0, 10),
+        permissions,
+      }, 'Success');
+    } catch (err: any) {
+      console.error('Refresh error:', err);
+      badRequest(res, 'Token refresh failed');
+    }
+  }
+
+  /**
+   * POST /api/change-password
+   * Replicates Laravel AuthController@changePassword
+   */
+  static async changePassword(req: Request, res: Response): Promise<void> {
+    try {
+      const { current_password, new_password } = req.body;
+      const authUser = req.user;
+
+      if (!authUser) {
+        unauthorized(res);
+        return;
+      }
+
+      // Validation
+      if (!current_password || !new_password) {
+        validationError(res, {
+          current_password: current_password ? undefined : ['required'],
+          new_password: new_password ? undefined : ['required'],
+        });
+        return;
+      }
+
+      // Fetch fresh user
+      const user = await prisma.users.findUnique({ where: { id: authUser.id } });
+      if (!user) {
+        badRequest(res, 'Invalid input');
+        return;
+      }
+
+      // Verify current password
+      const valid = await bcrypt.compare(current_password, user.password);
+      if (!valid) {
+        badRequest(res, 'Invalid input');
+        return;
+      }
+
+      // Hash new password
+      const hashedPassword = await bcrypt.hash(new_password, BCRYPT_ROUNDS);
+
+      // Update user
+      await prisma.users.update({
+        where: { id: user.id },
+        data: {
+          password: hashedPassword,
+          password_changed_at: new Date(),
+          force_change_password: false,
+        },
+      });
+
+      // Get property for ability scope
+      const propertyId = authUser.lastProperty || 0;
+
+      // Revoke old tokens, create new one
+      await TokenService.revokeAllUserTokens(user.id);
+      const { plainTextToken, expiresAt } = await TokenService.createToken(
+        user.id,
+        user.email,
+        [`can-${propertyId}`]
+      );
+
+      success(res, {
+        name: user.name,
+        role: authUser.roles,
+        username: user.username,
+        email: user.email,
+        access_token: plainTextToken,
+        expires_token: expiresAt.toISOString().replace('T', ' ').substring(0, 19),
+        force_change_password: false,
+        is_shift: false,
+        is_need_shift: false,
+        bussinesDate: new Date().toISOString().substring(0, 10),
+      }, 'Success');
+    } catch (err: any) {
+      console.error('Change password error:', err);
+      badRequest(res, 'Change password failed');
+    }
+  }
+
+  /**
+   * POST /api/forget-password
+   * Replicates Laravel AuthController@forgetPassword
+   */
+  static async forgetPassword(req: Request, res: Response): Promise<void> {
+    try {
+      const { email } = req.body;
+
+      if (!email) {
+        validationError(res, { email: ['The email field is required.'] });
+        return;
+      }
+
+      const user = await prisma.users.findFirst({
+        where: { email, status: 1 },
+      });
+
+      if (!user) {
+        badRequest(res, 'Email not found');
+        return;
+      }
+
+      // Generate UUID token
+      const token = crypto.randomUUID();
+
+      // Save token to user (using password_change_token concept)
+      // Note: Laravel uses a dedicated column. We store in fcm_token temporarily
+      // In production, add a password_change_token column to users table
+      await prisma.users.update({
+        where: { id: user.id },
+        data: {
+          // TODO: add password_change_token column to users table
+          // For now, send token in response for testing
+          updated_at: new Date(),
+        },
+      });
+
+      // TODO: send email with reset link
+      // For now, return the token directly (development mode)
+      success(res, {
+        token,
+        message: `Password reset token: ${token}. In production, this would be emailed.`,
+      }, 'Success');
+    } catch (err: any) {
+      console.error('Forget password error:', err);
+      badRequest(res, 'Password reset failed');
+    }
+  }
+
+  /**
+   * Build permission tree matching Laravel User::formatData()['permissions']
+   * Returns menu tree with isaccess flags and CRUD booleans.
+   */
+  private static async buildPermissionTree(
+    userId: bigint,
+    roleIds: bigint[],
+    roleNames: string[]
+  ): Promise<any[]> {
+    const isSuperUser = roleNames.some(r => (SUPER_ROLES as readonly string[]).includes(r));
+
+    // Get CRUD permissions for all user roles
+    const crudRecords = await prisma.role_menu_crud.findMany({
+      where: { role_id: { in: roleIds } },
+    });
+
+    // Merge CRUD across roles
+    const crudMap = new Map<bigint, any>();
+    for (const r of crudRecords) {
+      const existing = crudMap.get(r.menu_id);
+      crudMap.set(r.menu_id, {
+        view: (existing?.view || r.view) as boolean,
+        add: (existing?.add || r.add) as boolean,
+        edit: (existing?.edit || r.edit) as boolean,
+        delete: (existing?.delete || r.delete) as boolean,
+        transaction_actions: r.transaction_actions ? JSON.parse(r.transaction_actions) : {},
+      });
+    }
+
+    // Get menus assigned to user (via model_has_menus)
+    const assignedMenus = await prisma.model_has_menus.findMany({
+      where: {
+        model_type: 'App\\Models\\User',
+        model_id: userId,
+      },
+    });
+    const assignedMenuIds = new Set(assignedMenus.map(m => m.menu_id));
+
+    // Get full menu tree (nested sets)
+    const allMenus = await prisma.menus.findMany({
+      orderBy: [{ left: 'asc' }],
+    });
+
+    // Build tree: parent-level nodes, each with access[] children
+    return AuthController.buildMenuTree(
+      allMenus,
+      null, // root nodes have parent_id = null
+      assignedMenuIds,
+      crudMap,
+      isSuperUser
+    );
+  }
+
+  /**
+   * Recursively build menu tree nodes.
+   * Replicates Laravel's formatData() recursion.
+   */
+  private static buildMenuTree(
+    menus: any[],
+    parentId: bigint | null,
+    assignedMenuIds: Set<bigint>,
+    crudMap: Map<bigint, any>,
+    isSuperUser: boolean
+  ): any[] {
+    return menus
+      .filter(m => m.parent_id === parentId)
+      .map(menu => {
+        const isAccess = isSuperUser || assignedMenuIds.has(menu.id);
+        const crud = crudMap.get(menu.id);
+
+        // Parse name (JSON field with en/id translations)
+        let label = menu.name;
+        try {
+          const parsed = typeof label === 'string' ? JSON.parse(label) : label;
+          label = parsed?.en || parsed?.id || menu.name;
+        } catch {}
+
+        const children = AuthController.buildMenuTree(
+          menus,
+          menu.id,
+          assignedMenuIds,
+          crudMap,
+          isSuperUser
+        );
+
+        return {
+          key: label.split(/[\s_]+/),
+          value: Number(menu.id),
+          label: label.split(/[\s_]+/),
+          isaccess: isAccess,
+          ...(children.length > 0 ? {
+            access: children.map(child => ({
+              label: child.label.join(' '),
+              value: child.value,
+              isaccess: child.isaccess,
+              crud: isSuperUser
+                ? { view: true, add: true, edit: true, delete: true }
+                : (crud
+                    ? { view: crud.view, add: crud.add, edit: crud.edit, delete: crud.delete }
+                    : { view: false, add: false, edit: false, delete: false }),
+              transaction_actions: crud?.transaction_actions || {},
+            })),
+          } : {}),
+        };
+      });
+  }
+}

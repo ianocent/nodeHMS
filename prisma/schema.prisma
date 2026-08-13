@@ -1,0 +1,4210 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model accountings {
+  id                 BigInt         @id @default(autoincrement()) 
+  type_accounting    String?
+  outstanding        Decimal        @default(0.0000)
+  number_note        String?
+  type               String?
+  date               DateTime       
+  doc_date           DateTime       
+  code               String?
+  type_payment_id    BigInt?        
+  transaction_id     BigInt?        
+  code_item_id       BigInt?
+  company_profile_id BigInt
+  description        String?
+  amount             Decimal?
+  total              Decimal        @default(0.0000)
+  pb1                Decimal        @default(0.0000)
+  svr_chrg           Decimal        @default(0.0000)
+  surcharge          Decimal        @default(0.0000)
+  tax3               Decimal        @default(0.0000)
+  closing            Decimal        @default(0.0000)
+  overwrite_reason   String?
+  time               DateTime?      
+  bill_to            String?
+  model_type         String?
+  model_id           BigInt?
+  void_code          String?        
+  reference          String?
+  source             String?
+  pos                String?
+  receipt            String?
+  card_name          String?
+  last_digit_card    Int?
+  remark             String?        
+  voucher            String?
+  booking            String?
+  property_id        BigInt         
+  folio_id           BigInt?        
+  is_posting         Int            @default(0) 
+  is_endshift        Int            @default(0) 
+  is_void            Int            @default(0) 
+  is_transfer        Int            @default(0) 
+  is_consolidate     Int            @default(0) 
+  is_split           Int            @default(0) 
+  is_has_inclusive   Int            @default(0) 
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?        
+  updated_by         BigInt?        
+  deleted_by         BigInt?        
+  status             Int            @default(0) 
+  status_accounting  Int            @default(0) 
+  properties         properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios             folios?        @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  type_payments      type_payments? @relation(fields: [type_payment_id], references: [id], onDelete: NoAction, onUpdate: SetNull)
+
+  @@index([folio_id])
+  @@index([property_id])
+  @@index([type_payment_id])
+}
+
+model allocation_accountings {
+  id            Int       @id @default(autoincrement())
+  date          DateTime  
+  unique        String?
+  property_id   BigInt
+  accounting_id BigInt
+  allocated     Decimal
+  amount        Decimal
+  created_at    DateTime?
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  created_by    BigInt?   
+  updated_by    BigInt?   
+  deleted_by    BigInt?   
+}
+
+model allotments {
+  id                BigInt            @id @default(autoincrement()) 
+  property_id       BigInt            
+  start_date        DateTime          
+  end_date          DateTime          
+  description       String?           
+  release_allotment Int               @default(0)
+  model_type        String?
+  model_id          BigInt?           
+  created_at        DateTime?
+  updated_at        DateTime?
+  deleted_at        DateTime?
+  created_by        BigInt?           
+  updated_by        BigInt?           
+  deleted_by        BigInt?           
+  status            Int               @default(0)
+  properties        properties        @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_allotments   room_allotments[]
+
+  @@index([model_id, model_type])
+  @@index([property_id])
+}
+
+model auto_transfers {
+  id              Int      @id @default(autoincrement())
+  property_id     Int
+  folio_id        Int
+  target_folio_id Int
+  date            DateTime @default(now())
+}
+
+model baggages {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  date         DateTime   
+  name         String?
+  tag_no       String?
+  remark       String?
+  sort         Int        @default(0)
+  file         String?
+  phone_number String?
+  file_path    String?
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int        @default(0)
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model batch_report {
+  id          BigInt    @id @default(autoincrement()) 
+  property_id BigInt?   
+  batch_list  String?   
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      Int?      @default(0)
+  batch_name  String?
+
+  @@index([property_id])
+}
+
+model billing_tos {
+  id            BigInt        @id @default(autoincrement()) 
+  property_id   BigInt        
+  folio_id      BigInt        
+  billing_code  BigInt        
+  model_type    String
+  model_id      BigInt        
+  created_at    DateTime?
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  created_by    BigInt?       
+  updated_by    BigInt?       
+  deleted_by    BigInt?       
+  properties    properties    @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios        folios        @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  code_billings code_billings @relation(fields: [billing_code], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([billing_code])
+  @@index([folio_id])
+  @@index([model_id, model_type])
+  @@index([property_id])
+}
+
+model cancelation_rule_dates {
+  id                  BigInt            @id @default(autoincrement()) 
+  property_id         BigInt            
+  uuid                String
+  cancelation_rule_id BigInt            
+  start_date          DateTime          
+  end_date            DateTime          
+  created_at          DateTime          @default(now())
+  updated_at          DateTime          @default(now())
+  deleted_at          DateTime?
+  created_by          BigInt?           
+  updated_by          BigInt?           
+  deleted_by          BigInt?           
+  status              Int?              @default(0)
+  cancelation_rules   cancelation_rules @relation(fields: [cancelation_rule_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([cancelation_rule_id])
+}
+
+model cancelation_rules {
+  id                     BigInt                   @id @default(autoincrement()) 
+  property_id            BigInt                   
+  uuid                   String
+  room_type_id           BigInt                   
+  code                   String
+  description            String?                  
+  type_date              String
+  type_refund            String?
+  value                  Decimal                  @default(0.00)
+  value_days             Int                      @default(0)
+  created_at             DateTime                 @default(now())
+  updated_at             DateTime                 @default(now())
+  deleted_at             DateTime?
+  created_by             BigInt?                  
+  updated_by             BigInt?                  
+  deleted_by             BigInt?                  
+  status                 Int?                     @default(0)
+  cancelation_rule_dates cancelation_rule_dates[]
+}
+
+model car_parks {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  room         Int?
+  remark       String?
+  car_park_lot String?
+  vehicle_no   String?
+  folio        String?
+  sort         Int        @default(0)
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int        @default(0)
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model channel_manager_interfaces {
+  id                         BigInt                       @id @default(autoincrement())
+  property_id                Int
+  hotel_type                 String
+  hotel_name                 String
+  time_zone                  String                       @default("Asia/Jakarta")
+  language_code              String                       @default("en")
+  currency_code              String                       @default("IDR")
+  hotel_info                 String?                      
+  hotel_description          String?                      
+  last_sync                  DateTime?
+  data                       String?                      
+  created_at                 DateTime?
+  updated_at                 DateTime?
+  deleted_at                 DateTime?
+  created_by                 BigInt?                      
+  updated_by                 BigInt?                      
+  deleted_by                 BigInt?                      
+  status                     Int                          @default(0)
+  channel_manager_rate_plans channel_manager_rate_plans[]
+  channel_manager_room_types channel_manager_room_types[]
+}
+
+model channel_manager_rate_plans {
+  id                           Int                        @id @default(autoincrement())
+  property_id                  BigInt                     
+  data                         String?                    
+  rate_id                      BigInt                     
+  channel_manager_interface_id BigInt
+  meal_plan_id                 Int
+  last_sync                    DateTime?
+  created_at                   DateTime?
+  updated_at                   DateTime?
+  deleted_at                   DateTime?
+  created_by                   BigInt?                    
+  updated_by                   BigInt?                    
+  deleted_by                   BigInt?                    
+  status                       Int                        @default(0)
+  properties                   properties                 @relation(fields: [property_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rates                        rates                      @relation(fields: [rate_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  channel_manager_interfaces   channel_manager_interfaces @relation(fields: [channel_manager_interface_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([channel_manager_interface_id])
+  @@index([property_id])
+  @@index([rate_id])
+}
+
+model channel_manager_room_types {
+  id                                                             Int                        @id @default(autoincrement())
+  property_id                                                    Int
+  channel_manager_interface_id                                   BigInt
+  data                                                           String?                    
+  last_sync                                                      DateTime?
+  room_type_id                                                   BigInt                     
+  max_occupancy                                                  Int
+  max_child_occupancy                                            Int
+  quantity                                                       Int
+  room_type                                                      BigInt                     
+  size_measurement                                               Float                      
+  size_measurement_unit                                          String
+  latitude                                                       Decimal?
+  longitude                                                      Decimal?
+  address_line                                                   String?
+  city_name                                                      String?
+  country_name                                                   String?
+  postal_code                                                    String?
+  description                                                    String?                    
+  room_description                                               String?                    
+  created_at                                                     DateTime?
+  updated_at                                                     DateTime?
+  deleted_at                                                     DateTime?
+  created_by                                                     BigInt?                    
+  updated_by                                                     BigInt?                    
+  deleted_by                                                     BigInt?                    
+  status                                                         Int                        @default(0)
+  room_types_channel_manager_room_types_room_type_idToroom_types room_types                 @relation("channel_manager_room_types_room_type_idToroom_types", fields: [room_type_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  room_types_channel_manager_room_types_room_typeToroom_types    room_types                 @relation("channel_manager_room_types_room_typeToroom_types", fields: [room_type], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  channel_manager_interfaces                                     channel_manager_interfaces @relation(fields: [channel_manager_interface_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([channel_manager_interface_id])
+  @@index([room_type])
+  @@index([room_type_id])
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model cities {
+  id                          BigInt                        @id @default(autoincrement()) 
+  name                        String
+  state_id                    BigInt?                       
+  state_code                  String?
+  country_id                  BigInt                        
+  country_code                String?
+  latitude                    Decimal?
+  longitude                   Decimal?
+  created_at                  DateTime                      @default(dbgenerated("'2013-12-31 23:31:01'"))
+  updated_at                  DateTime                      @default(now())
+  flag                        Boolean                       @default(true)
+  status                      Boolean                       @default(true)
+  wikiDataId                  String?
+  states                      states?                       @relation(fields: [state_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  countries                   countries                     @relation(fields: [country_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  company_profile_departments company_profile_departments[]
+  properties                  properties[]
+
+  @@index([state_id])
+  @@index([country_id])
+}
+
+model code_billings {
+  id                             BigInt                           @id @default(autoincrement()) 
+  property_id                    BigInt                           
+  name                           String
+  description                    String?
+  isPOS                          Int                              @default(0) 
+  created_at                     DateTime?
+  updated_at                     DateTime?
+  deleted_at                     DateTime?
+  created_by                     BigInt?                          
+  updated_by                     BigInt?                          
+  deleted_by                     BigInt?                          
+  sort                           Int                              @default(0)
+  status                         Int                              @default(0)
+  billing_tos                    billing_tos[]
+  properties                     properties                       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  code_posts                     code_posts[]
+  company_profile_billing_setups company_profile_billing_setups[]
+
+  @@index([property_id])
+}
+
+model code_gls {
+  id                BigInt              @id @default(autoincrement()) 
+  property_id       BigInt              
+  name              String
+  alias             String?
+  description       String?
+  account_uid       String?             
+  groupcode         String?
+  mastercode        String?
+  controlname       String?
+  leveltype         String?
+  balancetype       String?
+  created_at        DateTime?
+  updated_at        DateTime?
+  deleted_at        DateTime?
+  created_by        BigInt?             
+  updated_by        BigInt?             
+  deleted_by        BigInt?             
+  sort              Int                 @default(0)
+  status            Int                 @default(0)
+  properties        properties          @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  stocks            stocks[]
+  work_order_stocks work_order_stocks[]
+
+  @@index([property_id])
+}
+
+model code_items {
+  id               BigInt             @id @default(autoincrement()) 
+  property_id      BigInt             
+  code_post_id     BigInt             
+  name             String
+  is_online        Boolean            @default(false)
+  is_event         Boolean            @default(false)
+  description      String?
+  sales            Decimal            @default(0.0000)
+  cost             Decimal            @default(0.0000)
+  process_on       String?
+  calculator       String?
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?            
+  updated_by       BigInt?            
+  deleted_by       BigInt?            
+  sort             Int                @default(0)
+  status           Int                @default(0)
+  code_posts       code_posts         @relation(fields: [code_post_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  properties       properties         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_inventories room_inventories[]
+
+  @@index([code_post_id])
+  @@index([property_id])
+}
+
+model code_posts {
+  id                               BigInt             @id @default(autoincrement()) 
+  property_id                      BigInt             
+  type                             String             @default("DEFAULT")
+  code_billing_id                  BigInt?            
+  code_gl_id                       BigInt?            
+  name                             String
+  uuid                             String?
+  pay_commission                   Int                @default(0)
+  is_pos                           Int                @default(0)
+  local_tax                        Int                @default(0)
+  local_tax_percentage             Decimal            @default(0.0000)
+  service_charge                   Int                @default(0)
+  service_charge_percentage        Decimal            @default(0.0000)
+  service_charge_include_local_tax Int                @default(0)
+  tax                              Int                @default(0)
+  tax_percentage                   Decimal            @default(0.0000)
+  tax_include_local_tax            Int                @default(0)
+  created_at                       DateTime?
+  updated_at                       DateTime?
+  deleted_at                       DateTime?
+  created_by                       BigInt?            
+  updated_by                       BigInt?            
+  deleted_by                       BigInt?            
+  sort                             Int                @default(0)
+  status                           Int                @default(0)
+  code_items                       code_items[]
+  code_billings                    code_billings?     @relation(fields: [code_billing_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  properties                       properties         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  pos_matrix_sales                 pos_matrix_sales[]
+  rates                            rates[]
+  type_payments                    type_payments[]
+
+  @@index([code_billing_id])
+  @@index([code_gl_id])
+  @@index([property_id])
+}
+
+model companies {
+  id                  BigInt                @id @default(autoincrement()) 
+  name                String
+  email               String?
+  ip                  String?
+  contract_expired    DateTime?             
+  join_date           DateTime?             
+  npwp                String?
+  lat                 String?
+  long                String?
+  no_tlp              String?
+  image               String?
+  pic_name            String?
+  created_at          DateTime              @default(now())
+  updated_at          DateTime              @default(now())
+  deleted_at          DateTime?
+  created_by          BigInt?               
+  updated_by          BigInt?               
+  deleted_by          BigInt?               
+  sort                Int?                  @default(0)
+  status              Int?                  @default(0)
+  model_has_companies model_has_companies[]
+
+  @@index([created_by])
+  @@index([updated_by])
+}
+
+model company_contract_rate {
+  id                 BigInt    @id @default(autoincrement()) 
+  rate_code          Int?
+  description        String?
+  notes              String?   
+  created_at         DateTime? @default(now())
+  updated_at         DateTime? @default(now())
+  deleted_at         DateTime?
+  created_by         BigInt?   
+  updated_by         BigInt?   
+  deleted_by         BigInt?   
+  status             Int?
+  company_profile_id BigInt    
+  property_id        BigInt    
+}
+
+model company_guests {
+  id                 BigInt    @id @default(autoincrement()) 
+  first_name         String?
+  last_name          String?
+  email              String?
+  mobile_phone       String?
+  created_at         DateTime? @default(now())
+  updated_at         DateTime? @default(now())
+  deleted_at         DateTime?
+  created_by         BigInt?   
+  updated_by         BigInt?   
+  deleted_by         BigInt?   
+  status             Int?
+  company_profile_id BigInt    
+  property_id        BigInt    
+}
+
+model company_profile_activities {
+  id                 BigInt     @id @default(autoincrement()) 
+  property_id        BigInt     
+  date               DateTime   
+  subject            String?
+  objective          String?
+  notes              String?    
+  remarks            String?    
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?    
+  updated_by         BigInt?    
+  deleted_by         BigInt?    
+  status             Int        @default(0)
+  company_profile_id BigInt     
+  properties         properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model company_profile_ar_transactions {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  company_profile_id BigInt           
+  transaction_code   String?
+  document           String?
+  date               DateTime         
+  description        String
+  amount             Decimal
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?          
+  updated_by         BigInt?          
+  deleted_by         BigInt?          
+  status             Int              @default(0)
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([company_profile_id])
+  @@index([property_id])
+}
+
+model company_profile_billing_logs {
+  id                 BigInt    @id @default(autoincrement())
+  amount             Decimal?
+  company_profile_id BigInt?
+  transaction_id     BigInt?
+  date               DateTime? 
+  created_at         DateTime?
+  created_by         BigInt?
+}
+
+model company_profile_billing_setups {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  company_profile_id BigInt           
+  code_billing_id    BigInt           
+  billing            String
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?          
+  updated_by         BigInt?          
+  deleted_by         BigInt?          
+  status             Int              @default(0)
+  code_billings      code_billings    @relation(fields: [code_billing_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([code_billing_id])
+  @@index([company_profile_id])
+  @@index([property_id])
+}
+
+model company_profile_contact_persons {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  company_profile_id BigInt           
+  name               String?
+  email              String?
+  position           String?
+  department         BigInt?
+  tel                String?
+  mobile_phone       String?
+  fax                String?
+  dob                DateTime?        
+  notes              String?          
+  is_default         Boolean          @default(false)
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?          
+  updated_by         BigInt?          
+  deleted_by         BigInt?          
+  status             Int              @default(0)
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([company_profile_id])
+  @@index([property_id])
+}
+
+model company_profile_customed_onlines {
+  id                   BigInt           @id @default(autoincrement()) 
+  property_id          BigInt           
+  company_profile_id   BigInt           
+  based_online_code    String?
+  start_date           DateTime         
+  end_date             DateTime         
+  customed_online_comm Float?
+  created_at           DateTime?
+  updated_at           DateTime?
+  deleted_at           DateTime?
+  created_by           BigInt?          
+  updated_by           BigInt?          
+  deleted_by           BigInt?          
+  status               Int              @default(0)
+  company_profiles     company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties           properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([company_profile_id])
+  @@index([property_id])
+}
+
+model company_profile_departments {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  company_profile_id BigInt           
+  department         String?
+  country_id         BigInt?          
+  city_id            BigInt?          
+  postal_code        String?
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?          
+  updated_by         BigInt?          
+  deleted_by         BigInt?          
+  status             Int              @default(0)
+  address            String?
+  cities             cities?          @relation(fields: [city_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  countries          countries?       @relation(fields: [country_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([city_id])
+  @@index([company_profile_id])
+  @@index([country_id])
+  @@index([property_id])
+}
+
+model company_profile_documents {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  company_profile_id BigInt           
+  file               String?
+  description        String?
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?          
+  updated_by         BigInt?          
+  deleted_by         BigInt?          
+  status             Int              @default(0)
+  file_path          String?
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([company_profile_id])
+  @@index([property_id])
+}
+
+model company_profile_statistics {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  company_profile_id BigInt           
+  room_night         Int
+  room_revenue       Decimal
+  other_revenue      Decimal
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?          
+  updated_by         BigInt?          
+  deleted_by         BigInt?          
+  status             Int              @default(0)
+  arr                String?
+  month              DateTime?        
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([company_profile_id])
+  @@index([property_id])
+}
+
+model company_profiles {
+  id                                                 BigInt                             @id @default(autoincrement()) 
+  property_id                                        BigInt                             
+  uuid                                               String?
+  code_billing_id                                    String
+  name                                               String?
+  description                                        String?
+  type_company                                       String?
+  account                                            String?
+  short_code                                         String?
+  status_company                                     String?
+  telp                                               String?
+  mobile_phone                                       String?
+  business_regional                                  String?
+  IATA                                               String?
+  email                                              String?
+  billing_address                                    String?
+  billing_region                                     String?
+  billing_country                                    String?
+  billing_city                                       String?
+  billing_postal_code                                String?
+  mailing_address                                    String?
+  mailing_region                                     String?
+  mailing_country                                    String?
+  mailing_city                                       String?
+  mailing_postal_code                                String?
+  term                                               String?
+  credit_limit                                       Decimal                            @default(0.0000)
+  remaining                                          Decimal                            @default(0.0000)
+  is_stop_credit                                     Boolean                            @default(false)
+  gst                                                Boolean                            @default(false)
+  commission_rate                                    Float?
+  is_pay_commission                                  Boolean?                           @default(false)
+  is_company_booking_engine                          Boolean                            @default(false)
+  is_charge_back                                     Boolean?                           @default(false)
+  is_surcharge_opt_out                               Boolean?                           @default(false)
+  based_online_commission                            Float?
+  remarks                                            String?
+  sync_commission_type                               String?
+  sync_mkt_segment_1                                 String?
+  sync_mkt_segment_2                                 String?
+  sync_mkt_segment_3                                 String?
+  sync_mkt_segment_4                                 String?
+  created_at                                         DateTime?
+  updated_at                                         DateTime?
+  deleted_at                                         DateTime?
+  created_by                                         BigInt?                            
+  updated_by                                         BigInt?                            
+  deleted_by                                         BigInt?                            
+  status                                             Int                                @default(0)
+  blacklist                                          Int                                @default(0)
+  website                                            String?
+  fax                                                String?
+  staff_in_charge                                    String?
+  source                                             String?
+  billing                                            String?
+  default_event_type                                 String?
+  comm_payable                                       BigInt?                            
+  comm_code                                          String?
+  company_profile_ar_transactions                    company_profile_ar_transactions[]
+  company_profile_billing_setups                     company_profile_billing_setups[]
+  company_profile_contact_persons                    company_profile_contact_persons[]
+  company_profile_customed_onlines                   company_profile_customed_onlines[]
+  company_profile_departments                        company_profile_departments[]
+  company_profile_documents                          company_profile_documents[]
+  company_profile_statistics                         company_profile_statistics[]
+  properties                                         properties                         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  event_events                                       event_events[]
+  folios_folios_company_profile_idTocompany_profiles folios[]                           @relation("folios_company_profile_idTocompany_profiles")
+  folios_folios_booking_agent_idTocompany_profiles   folios[]                           @relation("folios_booking_agent_idTocompany_profiles")
+  model_has_company_profiles                         model_has_company_profiles[]
+
+  @@index([code_billing_id])
+  @@index([property_id])
+  @@index([name])
+  @@index([type_company])
+}
+
+model content_banners {
+  id          BigInt    @id @default(autoincrement()) 
+  property_id BigInt    
+  name        String?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now())
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      Int       @default(0)
+  image       String?   
+  description String?
+  uuid        String?
+  url         String?
+  sync        String?   
+
+  @@index([property_id])
+}
+
+model content_breakdowns {
+  id           Int       @id @default(autoincrement())
+  content_id   BigInt
+  property_id  BigInt
+  adult        Int?      @default(0)
+  child        Int?      @default(0)
+  descriptions String?   
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @default(now())
+  deleted_at   DateTime?
+  created_by   BigInt?   
+  updated_by   BigInt?   
+  deleted_by   BigInt?   
+  status       Int?      @default(0)
+}
+
+model content_optional_items {
+  id              BigInt    @id @default(autoincrement()) 
+  property_id     BigInt    
+  uuid            String?   
+  content_room_id BigInt    
+  item_code_id    BigInt    
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @default(now())
+  deleted_at      DateTime?
+  created_by      BigInt?   
+  updated_by      BigInt?   
+  deleted_by      BigInt?   
+  status          Int?      @default(0)
+  sort            Int?
+
+  @@index([content_room_id])
+}
+
+model content_room_breakdowns {
+  id              Int           @id @default(autoincrement())
+  content_room_id BigInt        
+  property_id     BigInt
+  adult           Int?          @default(0)
+  child           Int?          @default(0)
+  description     String?       
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @default(now())
+  deleted_at      DateTime?
+  created_by      BigInt?       
+  updated_by      BigInt?       
+  deleted_by      BigInt?       
+  status          Int?          @default(0)
+  content_rooms   content_rooms @relation(fields: [content_room_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([content_room_id])
+}
+
+model content_room_facilities {
+  id              Int           @id @default(autoincrement())
+  uuid            String?       
+  content_room_id BigInt        
+  property_id     BigInt
+  name            String?       
+  image           String?       
+  sort            Int           @default(0)
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @default(now())
+  deleted_at      DateTime?
+  created_by      BigInt?       
+  updated_by      BigInt?       
+  deleted_by      BigInt?       
+  status          Int?          @default(0)
+  content_rooms   content_rooms @relation(fields: [content_room_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([content_room_id])
+}
+
+model content_room_images {
+  id              Int           @id @default(autoincrement())
+  uuid            String?       
+  content_room_id BigInt        
+  property_id     BigInt
+  name            String?       
+  image           String?       
+  sort            Int           @default(0)
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @default(now())
+  deleted_at      DateTime?
+  created_by      BigInt?       
+  updated_by      BigInt?       
+  deleted_by      BigInt?       
+  status          Int?          @default(0)
+  content_rooms   content_rooms @relation(fields: [content_room_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([content_room_id])
+}
+
+model content_rooms {
+  id                      BigInt                    @id @default(autoincrement()) 
+  property_id             BigInt                    
+  name                    String?
+  created_at              DateTime                  @default(now())
+  updated_at              DateTime                  @default(now())
+  deleted_at              DateTime?
+  created_by              BigInt?                   
+  updated_by              BigInt?                   
+  deleted_by              BigInt?                   
+  status                  Int                       @default(0)
+  description             String?
+  max_pax                 Int                       @default(1)
+  type_discount           String
+  value_discount          Decimal                   @default(0.0000)
+  room_type_id            BigInt?
+  data                    String?                   
+  content_room_breakdowns content_room_breakdowns[]
+  content_room_facilities content_room_facilities[]
+  content_room_images     content_room_images[]
+
+  @@index([property_id])
+}
+
+model contents {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  name         String?
+  keyword      String?    
+  created_at   DateTime   @default(now())
+  updated_at   DateTime   @default(now())
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int        @default(0)
+  image        String?    
+  description  String?
+  url          String?
+  group        String?
+  room_type_id BigInt?
+  language     String?
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: NoAction)
+
+  @@index([property_id])
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model countries {
+  id                          BigInt                        @id @default(autoincrement()) 
+  name                        String
+  iso3                        String?
+  numeric_code                String?
+  iso2                        String?
+  phonecode                   String?
+  capital                     String?
+  currency                    String?
+  currency_name               String?
+  currency_symbol             String?
+  tld                         String?
+  native                      String?
+  region                      String?
+  region_id                   BigInt?                       
+  subregion                   String?
+  subregion_id                BigInt?                       
+  nationality                 String?
+  timezones                   String?                       
+  translations                String?                       
+  latitude                    Decimal?
+  longitude                   Decimal?
+  emoji                       String?
+  emojiU                      String?
+  created_at                  DateTime?
+  updated_at                  DateTime                      @default(now())
+  flag                        Boolean?                      @default(true)
+  status                      Boolean                       @default(true)
+  wikiDataId                  String?
+  cities                      cities[]
+  company_profile_departments company_profile_departments[]
+  regions                     regions?                      @relation(fields: [region_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  subregions                  subregions?                   @relation(fields: [subregion_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  states                      states[]
+
+  @@index([region_id])
+  @@index([subregion_id])
+}
+
+model credit_limit_histories {
+  id                 BigInt   @id @default(autoincrement())
+  remaining          Decimal
+  type               String?
+  amount             Decimal
+  datetime           DateTime @default(now())
+  company_profile_id BigInt
+  property_id        BigInt
+  transaction_id     BigInt
+}
+
+model debugs {
+  id   Int    @id @default(autoincrement())
+  data String 
+}
+
+model deposit_events {
+  id              BigInt    @id @default(autoincrement()) 
+  property_id     BigInt    
+  folio_id        BigInt    
+  date            DateTime? 
+  type_payment_id BigInt    
+  amount          Int?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @default(dbgenerated("'0000-00-00 00:00:00'"))
+  deleted_at      DateTime?
+  created_by      BigInt?   
+  updated_by      BigInt?   
+  deleted_by      BigInt?   
+  status          Int?      @default(0) 
+
+  @@index([folio_id])
+  @@index([property_id])
+  @@index([type_payment_id])
+}
+
+model deposit_payments {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  folio_id     BigInt     
+  date         DateTime?  
+  payment_type BigInt     
+  amount       Int?
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int?       @default(0) 
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios       folios     @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([folio_id])
+  @@index([property_id])
+  @@index([payment_type])
+}
+
+model doorlock_configs {
+  id           BigInt    @id @default(autoincrement()) 
+  property_id  BigInt    
+  assign_at    DateTime?
+  checkin      DateTime?
+  checkout     DateTime?
+  roomcode     String?
+  roomtypecode String?
+  floorcode    String?
+  buildingcode String?
+  holder       String?
+  idno         String?
+  port         String?
+  breakfast    Boolean?  @default(false)
+  overite      Boolean?  @default(false)
+  is_assign    Boolean?  @default(false)
+  created_at   DateTime?
+  updated_at   DateTime?
+
+  @@index([created_at])
+  @@index([checkin])
+  @@index([checkout])
+  @@index([is_assign])
+  @@index([property_id])
+  @@index([roomcode])
+  @@index([property_id, is_assign])
+  @@index([property_id, roomcode])
+}
+
+model doorlock_duplicate_counters {
+  id          BigInt     @id @default(autoincrement()) 
+  property_id BigInt     
+  folio_id    BigInt     
+  count       Int
+  created_at  DateTime?
+  updated_at  DateTime?
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios      folios     @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([created_at])
+  @@index([folio_id])
+  @@index([property_id])
+  @@index([property_id, folio_id])
+}
+
+model dynamic_rate_configs {
+  id                     BigInt                 @id @default(autoincrement()) 
+  property_id            BigInt                 
+  name                   String
+  forecast_method        String?                @default("moving_average")
+  gdp_growth_rate        Decimal?               @default(0.0000)
+  inflation_rate         Decimal?               @default(0.0000)
+  adjustment_sensitivity Decimal?               @default(1.0000)
+  min_adjustment_percent Decimal?               @default(-100.0000)
+  max_adjustment_percent Decimal?               @default(100.0000)
+  lookback_days          Int?                   @default(90)
+  forecast_days          Int?                   @default(30)
+  target_occupancy       Decimal?               @default(70.0000)
+  seasonality_factors    Json?
+  is_active              Int?                   @default(1)
+  auto_apply             Int?                   @default(0)
+  created_at             DateTime?
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  created_by             BigInt?                
+  updated_by             BigInt?                
+  deleted_by             BigInt?                
+  sort                   Int?                   @default(0)
+  status                 Int?                   @default(0)
+  properties             properties             @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  dynamic_rate_results   dynamic_rate_results[]
+
+  @@index([property_id])
+}
+
+model dynamic_rate_results {
+  id                       BigInt               @id @default(autoincrement()) 
+  property_id              BigInt               
+  dynamic_rate_config_id   BigInt               
+  room_type_id             BigInt               
+  date                     DateTime             
+  historical_adr           Decimal?             @default(0.00)
+  forecasted_occupancy     Decimal?             @default(0.0000)
+  base_rate                Decimal?             @default(0.00)
+  suggested_rate_one_adult Decimal?             @default(0.00)
+  suggested_rate_two_adult Decimal?             @default(0.00)
+  adjustment_percent       Decimal?             @default(0.0000)
+  gdp_impact               Decimal?             @default(0.0000)
+  inflation_impact         Decimal?             @default(0.0000)
+  seasonality_factor       Decimal?             @default(1.0000)
+  occupancy_factor         Decimal?             @default(1.0000)
+  confidence_score         Decimal?             @default(0.0000)
+  forecast_method_used     String?
+  is_applied               Int?                 @default(0)
+  applied_at               DateTime?
+  created_at               DateTime?
+  updated_at               DateTime?
+  deleted_at               DateTime?
+  created_by               BigInt?              
+  updated_by               BigInt?              
+  deleted_by               BigInt?              
+  sort                     Int?                 @default(0)
+  status                   Int?                 @default(0)
+  properties               properties           @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  dynamic_rate_configs     dynamic_rate_configs @relation(fields: [dynamic_rate_config_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types               room_types           @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([property_id, dynamic_rate_config_id, room_type_id, date])
+  @@index([dynamic_rate_config_id])
+  @@index([room_type_id])
+}
+
+model email_builders {
+  id            BigInt    @id @default(autoincrement()) 
+  property_id   BigInt?   
+  template_name String?
+  subject       String?
+  body          String?   
+  created_at    DateTime?
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  created_by    BigInt?   
+  updated_by    BigInt?   
+  deleted_by    BigInt?   
+  status        Int?      @default(0)
+
+  @@index([property_id])
+}
+
+model email_groups {
+  id          BigInt    @id @default(autoincrement()) 
+  property_id BigInt?   
+  group_name  String?
+  group_list  String?   
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      Int?      @default(0)
+
+  @@index([property_id])
+}
+
+model event_capacities {
+  id            Int           @id @default(autoincrement())
+  property_id   BigInt?       
+  status        Int           @default(1) 
+  pax           Int
+  venue_id      Int
+  layout_id     Int
+  description   String?       
+  created_at    DateTime      @default(now())
+  updated_at    DateTime      @default(now())
+  event_venues  event_venues  @relation(fields: [venue_id], references: [id], onDelete: Cascade)
+  event_layouts event_layouts @relation(fields: [layout_id], references: [id], onDelete: Cascade)
+
+  @@index([layout_id])
+  @@index([venue_id])
+}
+
+model event_deposit_actuals {
+  id           Int          @id @default(autoincrement())
+  property_id  BigInt?      
+  event_id     Int
+  portion      String
+  date         DateTime     
+  amount       Decimal      @default(0.00)
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @default(now())
+  event_events event_events @relation(fields: [event_id], references: [id], onDelete: Cascade)
+
+  @@index([event_id])
+}
+
+model event_deposit_plans {
+  id           Int          @id @default(autoincrement())
+  property_id  BigInt?      
+  event_id     Int
+  portion      String
+  date         DateTime     
+  amount       Decimal      @default(0.00)
+  created_at   DateTime     @default(now())
+  updated_at   DateTime     @default(now())
+  event_events event_events @relation(fields: [event_id], references: [id], onDelete: Cascade)
+
+  @@index([event_id])
+}
+
+model event_event_items {
+  id           Int      @id @default(autoincrement())
+  event_id     Int
+  code_item_id Int
+  quantity     Int?
+  amount       Decimal  @default(0.00)
+  total_amount Decimal?
+  created_at   DateTime @default(now())
+  updated_at   DateTime @default(now())
+  @@index([event_id])
+}
+
+model event_events {
+  id                    Int                     @id @default(autoincrement())
+  property_id           BigInt?                 
+  event_no              String
+  name                  String
+  event_start_time      DateTime
+  event_end_time        DateTime
+  guest_name            String?
+  guest_phone           String?
+  guest_email           String?
+  company_profile_id    BigInt?                 
+  sales_in_charge       BigInt?
+  package_id            Int?
+  venue_id              Int?
+  layout_id             Int?
+  pax                   Int?
+  folio_id              BigInt?                 
+  status                event_events_status     @default(Tentative)
+  description           String?                 
+  total_amount          Decimal                 @default(0.00)
+  created_at            DateTime                @default(now())
+  updated_at            DateTime                @default(now())
+  deleted_at            DateTime?
+  event_deposit_actuals event_deposit_actuals[]
+  event_deposit_plans   event_deposit_plans[]
+  company_profiles      company_profiles?       @relation(fields: [company_profile_id], references: [id])
+  folios                folios?                 @relation(fields: [folio_id], references: [id])
+  event_packages        event_packages?         @relation(fields: [package_id], references: [id], onDelete: Cascade)
+  event_venues          event_venues?           @relation(fields: [venue_id], references: [id], onDelete: Cascade)
+  event_layouts         event_layouts?          @relation(fields: [layout_id], references: [id], onDelete: Cascade)
+  event_instructions    event_instructions[]
+
+  @@index([company_profile_id])
+  @@index([folio_id])
+  @@index([layout_id])
+  @@index([package_id])
+  @@index([property_id])
+  @@index([venue_id])
+}
+
+model event_instructions {
+  id              Int          @id @default(autoincrement())
+  event_id        Int
+  banquet         String?      
+  fo              String?      
+  kitchen         String?      
+  housekeeping    String?      
+  steward         String?      
+  engineering     String?      
+  restaurant      String?      
+  security        String?      
+  bar             String?      
+  mcm             String?      
+  sales_marketing String?      
+  order_taken_by  String?      
+  created_at      DateTime     @default(now())
+  updated_at      DateTime     @default(now())
+  event_events    event_events @relation(fields: [event_id], references: [id], onDelete: Cascade)
+
+  @@index([event_id])
+}
+
+model event_inventories {
+  id           Int      @id @default(autoincrement())
+  property_id  BigInt?  
+  code_post_id Int
+  description  String
+  sales        Decimal  @default(0.00)
+  quantity     Int      @default(0)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @default(now())
+}
+
+model event_layouts {
+  id                   Int                    @id @default(autoincrement())
+  property_id          BigInt?                
+  name                 String
+  description          String?                
+  image                String?                
+  status               Boolean                @default(true)
+  created_at           DateTime               @default(now())
+  updated_at           DateTime               @default(now())
+  event_capacities     event_capacities[]
+  event_events         event_events[]
+  event_packages       event_packages[]
+  event_venues_layouts event_venues_layouts[]
+}
+
+model event_management_items {
+  id                  BigInt  @id @default(autoincrement()) 
+  code_item_id        BigInt  
+  event_management_id BigInt  
+  property_id         BigInt  
+  qty                 Int
+  frequency           String
+  description         String?
+  cost_on             Decimal @default(0.0000)
+  cost                Decimal @default(0.0000)
+}
+
+model event_managements {
+  id           BigInt   @id @default(autoincrement()) 
+  property_id  BigInt   
+  name         String
+  start_date   DateTime 
+  end_date     DateTime 
+  folio_id     BigInt   
+  number_guest Int
+  description  String?  
+  status       Int      @default(0) 
+}
+
+model event_package_items {
+  id             Int            @id @default(autoincrement())
+  property_id    BigInt?        
+  package_id     Int
+  code_item_id   Int
+  quantity       Int?
+  amount         Decimal        @default(0.00)
+  total_amount   Decimal?
+  created_at     DateTime       @default(now())
+  updated_at     DateTime       @default(now())
+  event_packages event_packages @relation(fields: [package_id], references: [id], onDelete: Cascade)
+
+  @@index([package_id])
+}
+
+model event_packages {
+  id                  Int                   @id @default(autoincrement())
+  property_id         BigInt?               
+  name                String
+  capacity_id         Int?
+  max_capacity        Int?
+  venue_id            Int?
+  layout_id           Int?
+  description         String?               
+  price               Decimal               @default(0.00)
+  status              Boolean               @default(true)
+  created_at          DateTime              @default(now())
+  updated_at          DateTime              @default(now())
+  deleted_at          DateTime?
+  event_events        event_events[]
+  event_package_items event_package_items[]
+  event_venues        event_venues?         @relation(fields: [venue_id], references: [id], onDelete: Cascade)
+  event_layouts       event_layouts?        @relation(fields: [layout_id], references: [id], onDelete: Cascade)
+
+  @@index([capacity_id])
+  @@index([layout_id])
+  @@index([venue_id])
+}
+
+model event_venues {
+  property_id          Int
+  id                   Int                    @id @default(autoincrement())
+  name                 String
+  description          String?                
+  status               Boolean                @default(true)
+  created_at           DateTime               @default(now())
+  updated_at           DateTime               @default(now())
+  event_capacities     event_capacities[]
+  event_events         event_events[]
+  event_packages       event_packages[]
+  event_venues_layouts event_venues_layouts[]
+}
+
+model event_venues_layouts {
+  venue_id      Int
+  layout_id     Int
+  event_venues  event_venues  @relation(fields: [venue_id], references: [id], onDelete: Cascade)
+  event_layouts event_layouts @relation(fields: [layout_id], references: [id], onDelete: Cascade)
+
+  @@id([venue_id, layout_id])
+  @@index([layout_id])
+}
+
+model failed_jobs {
+  id         BigInt   @id @default(autoincrement()) 
+  uuid       String   @unique(map: "uuid")
+  connection String   
+  queue      String   
+  payload    String   
+  exception  String   
+  failed_at  DateTime @default(now())
+}
+
+model folios {
+  id                                                           BigInt                        @id @default(autoincrement()) 
+  folio_number                                                 String?                       @unique(map: "folio_number")
+  parent                                                       BigInt                        @default(0)
+  property_id                                                  BigInt                        
+  type_reservation                                             String
+  guest_profile_id                                             BigInt?                       
+  company_profile_id                                           BigInt                        
+  first_name                                                   String?
+  company_name                                                 String?
+  last_name                                                    String?
+  title                                                        String?
+  telp                                                         String?
+  email                                                        String?
+  remark                                                       String?                       
+  remark_ins                                                   String?                       
+  is_gh                                                        Int                           @default(0)
+  check_in_instruction                                         String?                       
+  check_out_instruction                                        String?                       
+  posting_instruction                                          String?                       
+  image                                                        String?                       
+  booking_agent_id                                             BigInt?                       
+  dept_branch                                                  String?
+  contact_person_id                                            BigInt?                       
+  is_pending                                                   Boolean                       @default(false)
+  cash_on_arrival                                              Boolean                       @default(false)
+  guaranted                                                    Boolean                       @default(false)
+  print_status                                                 Boolean                       @default(false)
+  use_allotment                                                Boolean                       @default(false)
+  is_walk_in                                                   Boolean                       @default(false)
+  is_house_use                                                 Boolean                       @default(false)
+  is_booking_engine                                            Boolean                       @default(false)
+  complimentary                                                Boolean                       @default(false)
+  is_compliment_tour_leader                                    Boolean
+  check_in_date                                                DateTime?                     
+  check_out_date                                               DateTime?                     
+  data                                                         String?                       
+  created_at                                                   DateTime?
+  updated_at                                                   DateTime?
+  deleted_at                                                   DateTime?
+  created_by                                                   BigInt?                       
+  updated_by                                                   BigInt?                       
+  status                                                       Int                           @default(0)
+  card_type                                                    String?
+  card_number                                                  String?
+  card_expiry                                                  String?
+  status_profile                                               String?
+  status_reservation                                           Int?
+  gender                                                       String?
+  birth_of_date                                                DateTime?                     
+  mobile_phone                                                 String?
+  nationality_id                                               Int?
+  is_subscribe                                                 Boolean?
+  is_do_not_contact                                            Boolean?
+  is_day_use                                                   Boolean                       @default(false)
+  address                                                      String?                       
+  city_id                                                      Int?
+  country_id                                                   Int?
+  postal_code                                                  String?
+  is_do_not_disturb                                            Boolean?                      @default(false)
+  is_incognito                                                 Boolean?                      @default(false)
+  is_long_stay                                                 Boolean?                      @default(false)
+  is_posting                                                   Boolean?                      @default(false)
+  is_dnd                                                       Boolean?                      @default(false)
+  is_virtual                                                   Boolean                       @default(false)
+  is_pos_trx                                                   Boolean                       @default(false)
+  res_date                                                     DateTime?                     
+  res_time                                                     DateTime?
+  cut_off_date                                                 DateTime?                     
+  limit_1                                                      String?
+  limit_2                                                      String?
+  flight_or_car                                                String?
+  loyalty_card                                                 String?
+  loyalty_card_number                                          String?
+  booking_no                                                   String?
+  promo_code                                                   String?
+  is_payment_booking_engine                                    Boolean                       @default(false)
+  is_request_cancel                                            Boolean                       @default(false)
+  is_notification                                              Boolean                       @default(false)
+  total_amount                                                 BigInt                        @default(0)
+  booking_engine_uuid                                          String?
+  date_arrival                                                 DateTime?
+  accountings                                                  accountings[]
+  billing_tos                                                  billing_tos[]
+  deposit_payments                                             deposit_payments[]
+  doorlock_duplicate_counters                                  doorlock_duplicate_counters[]
+  event_events                                                 event_events[]
+  properties                                                   properties                    @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  company_profiles_folios_company_profile_idTocompany_profiles company_profiles              @relation("folios_company_profile_idTocompany_profiles", fields: [company_profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  company_profiles_folios_booking_agent_idTocompany_profiles   company_profiles?             @relation("folios_booking_agent_idTocompany_profiles", fields: [booking_agent_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  messages                                                     messages[]
+  reservations                                                 reservations[]
+  staah_reservations                                           staah_reservations[]
+  transaction_breakdowns                                       transaction_breakdowns[]
+  transaction_temps                                            transaction_temps[]
+  transactions                                                 transactions[]
+  wake_up_calls                                                wake_up_calls[]
+
+  @@index([booking_agent_id])
+  @@index([company_profile_id])
+  @@index([contact_person_id])
+  @@index([guest_profile_id])
+  @@index([guest_profile_id, status_reservation, property_id, deleted_at])
+  @@index([is_house_use, complimentary, check_in_date, check_out_date])
+  @@index([id, status_reservation, type_reservation, property_id, deleted_at])
+  @@index([is_payment_booking_engine])
+  @@index([property_id])
+  @@index([status_reservation])
+}
+
+model guest_profile_documents {
+  id               BigInt         @id @default(autoincrement()) 
+  property_id      BigInt         
+  guest_profile_id BigInt         
+  file             String?
+  description      String?
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?        
+  updated_by       BigInt?        
+  deleted_by       BigInt?        
+  status           Int            @default(0)
+  file_path        String?
+  guest_profiles   guest_profiles @relation(fields: [guest_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties       properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([guest_profile_id])
+  @@index([property_id])
+}
+
+model guest_profile_family_members {
+  id                                                                               BigInt         @id @default(autoincrement()) 
+  property_id                                                                      BigInt         
+  guest_profile_id                                                                 BigInt         
+  has_guest_profile_id                                                             BigInt         
+  relationship                                                                     String?
+  created_at                                                                       DateTime?
+  updated_at                                                                       DateTime?
+  deleted_at                                                                       DateTime?
+  created_by                                                                       BigInt?        
+  updated_by                                                                       BigInt?        
+  deleted_by                                                                       BigInt?        
+  status                                                                           Int            @default(0)
+  guest_profiles_guest_profile_family_members_guest_profile_idToguest_profiles     guest_profiles @relation("guest_profile_family_members_guest_profile_idToguest_profiles", fields: [guest_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  guest_profiles_guest_profile_family_members_has_guest_profile_idToguest_profiles guest_profiles @relation("guest_profile_family_members_has_guest_profile_idToguest_profiles", fields: [has_guest_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties                                                                       properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([guest_profile_id])
+  @@index([has_guest_profile_id])
+  @@index([property_id])
+}
+
+model guest_profile_histories {
+  id               BigInt         @id @default(autoincrement()) 
+  property_id      BigInt         
+  id_guest_profile BigInt         
+  is_arrival       Boolean        @default(false)
+  remark           String?        
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?        
+  updated_by       BigInt?        
+  deleted_by       BigInt?        
+  status           Int            @default(0)
+  guest_profiles   guest_profiles @relation(fields: [id_guest_profile], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties       properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([id_guest_profile])
+  @@index([property_id])
+}
+
+model guest_profile_loyalty_cards {
+  id               BigInt         @id @default(autoincrement()) 
+  property_id      BigInt         
+  guest_profile_id BigInt         
+  card_type        String?
+  card_number      String?
+  join_date        String?
+  card_expiry      DateTime?      
+  is_default       Boolean?       @default(false)
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?        
+  updated_by       BigInt?        
+  deleted_by       BigInt?        
+  status           Int            @default(0)
+  guest_profiles   guest_profiles @relation(fields: [guest_profile_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties       properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([guest_profile_id])
+  @@index([property_id])
+}
+
+model guest_profile_preferences {
+  id               BigInt     @id @default(autoincrement()) 
+  property_id      BigInt     
+  preference       String?
+  remark           String?    
+  request_status   String     @default("pending")
+  completed_at     DateTime?
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?    
+  updated_by       BigInt?    
+  deleted_by       BigInt?    
+  status           Int        @default(0)
+  id_guest_profile BigInt     
+  properties       properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  guest_profiles   guest_profiles @relation(fields: [id_guest_profile], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model guest_profile_request_notes {
+  id               BigInt         @id @default(autoincrement()) 
+  property_id      BigInt         
+  id_guest_profile BigInt         
+  date             DateTime?      
+  note             String?        
+  username         String?
+  frequency        String?
+  time             String?
+  arrival          Boolean        @default(false)
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?        
+  updated_by       BigInt?        
+  deleted_by       BigInt?        
+  status           Int            @default(0)
+  guest_profiles   guest_profiles @relation(fields: [id_guest_profile], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties       properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([id_guest_profile])
+  @@index([property_id])
+  @@index([id_guest_profile, property_id, deleted_at, status, id])
+}
+
+model guest_profiles {
+  id                                                                                             BigInt                         @id @default(autoincrement()) 
+  property_id                                                                                    BigInt                         
+  account                                                                                        String
+  uuid                                                                                           String?
+  short_code                                                                                     String?
+  status_profile                                                                                 Int?                           @default(0)
+  first_name                                                                                     String?
+  last_name                                                                                      String?
+  region                                                                                         String?
+  nationality_id                                                                                 Int?
+  city_id                                                                                        Int?
+  telp                                                                                           String?
+  image                                                                                          String?                        
+  mobile_phone                                                                                   String?
+  card_type                                                                                      String?
+  card_number                                                                                    String?
+  card_expiry                                                                                    String?
+  email                                                                                          String?
+  gender                                                                                         String?
+  birth_of_date                                                                                  DateTime?                      
+  is_subscribe                                                                                   Boolean                        @default(false)
+  blacklist                                                                                      Int?
+  fax                                                                                            String?
+  address                                                                                        String?
+  postal_code                                                                                    String?
+  car_reg_number                                                                                 String?
+  created_at                                                                                     DateTime?
+  updated_at                                                                                     DateTime?
+  deleted_at                                                                                     DateTime?
+  created_by                                                                                     BigInt?                        
+  updated_by                                                                                     BigInt?                        
+  deleted_by                                                                                     BigInt?                        
+  status                                                                                         Int                            @default(0)
+  country_id                                                                                     Int?
+  guest_profile_documents                                                                        guest_profile_documents[]
+  guest_profile_family_members_guest_profile_family_members_guest_profile_idToguest_profiles     guest_profile_family_members[] @relation("guest_profile_family_members_guest_profile_idToguest_profiles")
+  guest_profile_family_members_guest_profile_family_members_has_guest_profile_idToguest_profiles guest_profile_family_members[] @relation("guest_profile_family_members_has_guest_profile_idToguest_profiles")
+  guest_profile_histories                                                                        guest_profile_histories[]
+  guest_profile_loyalty_cards                                                                    guest_profile_loyalty_cards[]
+  guest_profile_preferences                                                                      guest_profile_preferences[]
+  guest_profile_request_notes                                                                    guest_profile_request_notes[]
+  properties                                                                                     properties                     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  other_guests                                                                                   other_guests[]
+
+  @@index([property_id])
+  @@index([id, property_id, deleted_at])
+}
+
+model holidays {
+  id          BigInt     @id @default(autoincrement()) 
+  property_id BigInt     
+  name        String
+  start_date  DateTime   
+  end_date    DateTime   
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?    
+  updated_by  BigInt?    
+  deleted_by  BigInt?    
+  sort        Int        @default(0)
+  status      Int        @default(0)
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model hotel_competitors {
+  id                         BigInt                   @id @default(autoincrement()) 
+  property_id                BigInt                   
+  date                       DateTime                 
+  master_hotel_competitor_id BigInt                   
+  room_available             Int
+  room_sold                  Int
+  arr                        Decimal
+  total_revenue              Decimal
+  created_at                 DateTime?
+  updated_at                 DateTime?
+  deleted_at                 DateTime?
+  created_by                 BigInt?                  
+  updated_by                 BigInt?                  
+  deleted_by                 BigInt?                  
+  sort                       Int?                     @default(0)
+  status                     Int?                     @default(1)
+  master_hotel_competitors   master_hotel_competitors @relation(fields: [master_hotel_competitor_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([master_hotel_competitor_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model housekeeper_history {
+  id                              BigInt                            @id @default(autoincrement()) 
+  property_id                     BigInt?                           
+  room_id                         BigInt?
+  created_at                      DateTime?
+  updated_at                      DateTime?
+  deleted_at                      DateTime?
+  created_by                      BigInt?                           
+  updated_by                      BigInt?                           
+  deleted_by                      BigInt?                           
+  status                          Int?                              @default(0)
+  user_id                         BigInt?
+  date                            DateTime?                         
+  start_clean_time                DateTime?
+  end_clean_time                  DateTime?
+  hk_checklist                    String?                           
+  hkspv_checklist                 String?                           
+  need_rec_cleaning               Boolean?                          @default(false)
+  reclean_notes                   String?                           
+  done_inspection                 DateTime?
+  inspected_by                    BigInt?
+  inspected_time                  DateTime?
+  inspection_time                 DateTime?
+  properties                      properties?                       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  housekeeping_history_checklists housekeeping_history_checklists[]
+
+  @@index([date])
+  @@index([date, room_id, done_inspection])
+  @@index([done_inspection])
+  @@index([property_id])
+  @@index([room_id, date, done_inspection])
+  @@index([room_id])
+}
+
+model housekeeper_history_user {
+  id                     BigInt    @id @default(autoincrement()) 
+  property_id            BigInt?   
+  created_at             DateTime?
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  created_by             BigInt?   
+  updated_by             BigInt?   
+  deleted_by             BigInt?   
+  status                 Int?      @default(0)
+  user_id                BigInt?
+  housekeeper_history_id BigInt?   
+
+  @@index([housekeeper_history_id, user_id])
+  @@index([housekeeper_history_id])
+  @@index([user_id])
+  @@index([property_id])
+}
+
+model housekeeping_history_checklists {
+  id                     BigInt              @id @default(autoincrement()) 
+  housekeeper_history_id BigInt              
+  housekeeping_setup_id  BigInt              
+  qty_required           Int                 @default(1)
+  qty_checked            Int                 @default(0)
+  is_checked             Boolean             @default(false)
+  created_at             DateTime?
+  updated_at             DateTime?
+  housekeeper_history    housekeeper_history @relation(fields: [housekeeper_history_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  housekeeping_setups    housekeeping_setups @relation(fields: [housekeeping_setup_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([housekeeping_setup_id])
+  @@index([housekeeper_history_id])
+}
+
+model housekeeping_setup_room_types {
+  id                    BigInt              @id @default(autoincrement()) 
+  property_id           BigInt              
+  housekeeping_setup_id BigInt              
+  room_type_id          BigInt              
+  qty                   Int                 @default(1)
+  is_required           Boolean             @default(true)
+  created_at            DateTime?
+  updated_at            DateTime?
+  room_types            room_types          @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  housekeeping_setups   housekeeping_setups @relation(fields: [housekeeping_setup_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([housekeeping_setup_id, room_type_id])
+  @@index([room_type_id])
+}
+
+model housekeeping_setup_rooms {
+  id                    BigInt              @id @default(autoincrement()) 
+  property_id           BigInt              
+  housekeeping_setup_id BigInt              
+  room_id               BigInt              
+  qty                   Int                 @default(1)
+  is_required           Boolean             @default(true)
+  created_at            DateTime?
+  updated_at            DateTime?
+  rooms                 rooms               @relation(fields: [room_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  housekeeping_setups   housekeeping_setups @relation(fields: [housekeeping_setup_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([housekeeping_setup_id, room_id])
+  @@index([room_id])
+}
+
+model housekeeping_setups {
+  id                              BigInt                            @id @default(autoincrement()) 
+  property_id                     BigInt                            
+  code                            String
+  item_name                       String
+  category                        String?
+  used_by                         housekeeping_setups_used_by?      @default(both)
+  mandatory_inspection            Boolean?                          @default(true)
+  description                     String?                           
+  is_required                     Boolean                           @default(true)
+  used_by_hk                      Boolean?                          @default(true)
+  used_by_hkspv                   Boolean?                          @default(true)
+  sort                            Int                               @default(0)
+  status                          Boolean                           @default(true)
+  created_at                      DateTime?
+  updated_at                      DateTime?
+  deleted_at                      DateTime?
+  created_by                      BigInt?                           
+  updated_by                      BigInt?                           
+  deleted_by                      BigInt?                           
+  housekeeping_history_checklists housekeeping_history_checklists[]
+  housekeeping_setup_room_types   housekeeping_setup_room_types[]
+  housekeeping_setup_rooms        housekeeping_setup_rooms[]
+
+  @@unique([code, property_id])
+  @@index([category])
+  @@index([property_id])
+  @@index([sort])
+}
+
+model jobs {
+  id           BigInt    @id @default(autoincrement()) 
+  queue        String
+  payload      String    
+  attempts     Int       
+  reserved_at  DateTime?
+  available_at DateTime  @default(dbgenerated("'0000-00-00 00:00:00'"))
+  created_at   DateTime  @default(dbgenerated("'0000-00-00 00:00:00'"))
+}
+
+model last_user_folios {
+  id          Int      @id @default(autoincrement())
+  user_id     BigInt
+  property_id BigInt
+  folio_id    BigInt
+  datetime    DateTime
+}
+
+model ledgers {
+  id               BigInt    @id @default(autoincrement()) 
+  folio_id         Int?
+  property_id      Int?
+  code_billing_id  BigInt?
+  profileable_id   Int?
+  profileable_type String?
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?   
+  updated_by       BigInt?   
+  deleted_by       BigInt?   
+  sort             Int?      @default(0)
+  status           Int?      @default(0)
+}
+
+model log_audits {
+  id          Int       @id @default(autoincrement())
+  property_id Int       
+  date        DateTime  
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now())
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      BigInt?   @default(0)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model logs {
+  id           BigInt    @id @default(autoincrement()) 
+  batch_uuid   String?
+  subject_type String?
+  subject_id   BigInt?   
+  causer_type  String?
+  causer_id    BigInt?   
+  name         String
+  log_name     String?
+  description  String    
+  event        String?
+  properties   String?   
+  created_at   DateTime?
+  updated_at   DateTime?
+
+  @@index([created_at])
+  @@index([causer_type, causer_id])
+  @@index([log_name])
+  @@index([subject_type, subject_id])
+}
+
+model lost_and_founds {
+  id                     BigInt     @id @default(autoincrement()) 
+  property_id            BigInt     
+  ref_no                 String?
+  report_date            DateTime?  
+  item                   String?
+  room                   Int?
+  room_founder           Int?
+  owner_item             String?
+  item_status            String?
+  hotel_location         String?
+  folio                  String?
+  contact_number         String?
+  founder_of_item        String?
+  folio_founder          String?
+  contact_number_founder String?
+  item_description       String?    
+  instruction            String?    
+  additional_information String?    
+  photo_1                String?    
+  photo_2                String?    
+  photo_3                String?    
+  photo_4                String?    
+  photo_5                String?    
+  status_lost            String?
+  created_at             DateTime?
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  created_by             BigInt?    
+  updated_by             BigInt?    
+  deleted_by             BigInt?    
+  status                 Int        @default(0)
+  properties             properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model map_logs {
+  id         Int       @id @default(autoincrement())
+  company_id Int?
+  date       DateTime? 
+  data       String?   
+  count      Int?
+}
+
+model master_hotel_competitors {
+  id                BigInt              @id @default(autoincrement()) 
+  name              String
+  latitude          String?
+  longitude         String?
+  radius            String?
+  property_id       BigInt?             
+  description       String?
+  created_at        DateTime?
+  updated_at        DateTime?
+  deleted_at        DateTime?
+  created_by        BigInt?             
+  updated_by        BigInt?             
+  deleted_by        BigInt?             
+  sort              Int?                @default(0)
+  status            Int?                @default(0)
+  hotel_competitors hotel_competitors[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model menus {
+  id              BigInt            @id @default(autoincrement()) 
+  parent_id       BigInt?           
+  model_type      String?
+  model_id        BigInt?           
+  name            String            
+  url             String?
+  visibility      String?
+  uri_table       String?
+  type_table      String?
+  target          Int               @default(0)
+  media           String?           
+  data            String?           
+  created_at      DateTime?
+  updated_at      DateTime?
+  deleted_at      DateTime?
+  created_by      BigInt?           
+  updated_by      BigInt?           
+  deleted_by      BigInt?           
+  left            Int               @default(0)
+  right           Int               @default(0)
+  child_type      String?
+  sort            Int               @default(0)
+  status          Int               @default(0)
+  model_has_menus model_has_menus[]
+  role_menu_crud  role_menu_crud[]
+
+  @@index([model_type, model_id])
+  @@index([parent_id, left, right])
+}
+
+model messages {
+  id          BigInt     @id @default(autoincrement()) 
+  property_id BigInt     
+  folio_id    BigInt     
+  message     String     
+  from_name   String
+  is_open     Boolean    @default(false)
+  date        DateTime   
+  status      Int        @default(0)
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?    
+  updated_by  BigInt?    
+  closed_by   BigInt?    
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios      folios     @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([folio_id])
+  @@index([property_id])
+}
+
+model migrations {
+  id        Int    @id @default(autoincrement()) 
+  migration String
+  batch     Int
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
+model model_has_code_items {
+  model_type   String
+  code_item_id BigInt?
+  model_id     BigInt    
+  data         String?   
+  is_posting   Int       @default(0)
+  reason       String?
+  start_date   DateTime? 
+  end_date     DateTime? 
+  sales        Decimal?
+  process_on   String?
+  code_post_id Int?
+  name         String?
+  upsales      String?
+  description  String?   
+
+  @@index([model_id])
+  @@index([model_type])
+  @@ignore
+}
+
+model model_has_companies {
+  company_id BigInt    
+  model_type String
+  model_id   BigInt    
+  companies  companies @relation(fields: [company_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([company_id, model_id, model_type])
+  @@index([model_id])
+  @@index([model_type])
+}
+
+model model_has_company_profiles {
+  company_profile_id BigInt           
+  model_type         String
+  model_id           BigInt           
+  notes              String?          
+  company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([company_profile_id, model_id, model_type])
+  @@index([model_id])
+  @@index([model_type])
+}
+
+model model_has_menus {
+  menu_id    BigInt 
+  model_type String
+  model_id   BigInt 
+  menus      menus  @relation(fields: [menu_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([menu_id, model_id, model_type])
+  @@index([model_id, model_type])
+}
+
+model model_has_packages {
+  package_id BigInt   
+  model_type String
+  model_id   BigInt   
+  notes      String?  
+  packages   packages @relation(fields: [package_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([package_id, model_id, model_type])
+  @@index([model_id])
+  @@index([model_type])
+}
+
+model model_has_permissions {
+  permission_id BigInt      
+  model_type    String
+  model_id      BigInt      
+  permissions   permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([permission_id, model_id, model_type])
+  @@index([model_id, model_type])
+}
+
+model model_has_promotions {
+  promotion_id BigInt     
+  model_type   String
+  model_id     BigInt     
+  promotions   promotions @relation(fields: [promotion_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([promotion_id, model_id, model_type])
+  @@index([model_id])
+  @@index([model_type])
+}
+
+model model_has_properties {
+  property_id BigInt     
+  model_type  String
+  model_id    BigInt     
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([property_id, model_id, model_type])
+  @@index([model_id, model_type])
+}
+
+model model_has_rate_inclusives {
+  rate_inclusive_id BigInt          
+  model_type        String
+  model_id          BigInt          
+  rate_inclusives   rate_inclusives @relation(fields: [rate_inclusive_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([rate_inclusive_id, model_id, model_type])
+  @@index([model_id, model_type])
+}
+
+model model_has_rates {
+  rate_id     BigInt 
+  model_type  String
+  model_id    BigInt 
+  status      BigInt @default(0) 
+  temp_status BigInt @default(0) 
+  rates       rates  @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([rate_id, model_id, model_type])
+  @@index([model_id])
+  @@index([model_type])
+}
+
+model model_has_roles {
+  role_id    BigInt 
+  model_type String
+  model_id   BigInt 
+  roles      roles  @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([role_id, model_id, model_type])
+  @@index([model_id, model_type])
+}
+
+model model_has_rosters {
+  roster_id  BigInt  
+  model_type String
+  model_id   BigInt  
+  rosters    rosters @relation(fields: [roster_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([roster_id, model_id, model_type])
+  @@index([model_id, model_type])
+}
+
+model model_has_types {
+  type_id    BigInt 
+  model_type String
+  model_id   BigInt 
+  types      types  @relation(fields: [type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([type_id, model_id, model_type])
+  @@index([type_id])
+  @@index([model_id, model_type, type_id])
+  @@index([model_id, model_type])
+}
+
+model other_guests {
+  id                 BigInt         @id @default(autoincrement()) 
+  property_id        BigInt         
+  guest_profile_id   BigInt         
+  folio_id           Int            
+  status_other_guest Int?
+  check_in_date      DateTime?      
+  check_out_date     DateTime?      
+  stay               Int?
+  status             Int?           @default(0)
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?        
+  updated_by         BigInt?        
+  deleted_by         BigInt?        
+  guest_profiles     guest_profiles @relation(fields: [guest_profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  properties         properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([guest_profile_id])
+  @@index([property_id])
+}
+
+model overbookings {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  date         DateTime   
+  room_type_id BigInt     
+  overbooking  Int
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int        @default(0)
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types   room_types @relation(fields: [room_type_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([room_type_id])
+}
+
+model packages {
+  id                 BigInt               @id @default(autoincrement()) 
+  property_id        BigInt               
+  sort               String?              @default("0")
+  package_type       String
+  code               String
+  description        String?              
+  created_at         DateTime             @default(now())
+  updated_at         DateTime             @default(now())
+  deleted_at         DateTime?
+  created_by         BigInt?              
+  updated_by         BigInt?              
+  status             Int?                 @default(0)
+  model_has_packages model_has_packages[]
+  properties         properties           @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model password_reset_tokens {
+  id         BigInt    @id @default(autoincrement()) 
+  email      String
+  token      String
+  created_at DateTime?
+  updated_at DateTime?
+}
+
+model payment_matrices {
+  id                  BigInt    @id @default(autoincrement()) 
+  property_id         BigInt    
+  payment_xendit_type String
+  payment_type_id     BigInt    
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @default(now())
+  deleted_at          DateTime?
+  created_by          BigInt?   
+  updated_by          BigInt?   
+  deleted_by          BigInt?   
+  status              Int?      @default(0)
+}
+
+model permissions {
+  id                    BigInt                  @id @default(autoincrement()) 
+  name                  String
+  guard_name            String
+  display_name          String?
+  created_at            DateTime?
+  updated_at            DateTime?
+  deleted_at            DateTime?
+  created_by            BigInt?                 
+  updated_by            BigInt?                 
+  deleted_by            BigInt?                 
+  status                Int                     @default(0)
+  model_has_permissions model_has_permissions[]
+  role_permissions      role_permissions[]
+
+  @@unique([name, guard_name])
+}
+
+model personal_access_tokens {
+  id             BigInt    @id @default(autoincrement()) 
+  tokenable_type String
+  tokenable_id   BigInt    
+  name           String
+  token          String    @unique(map: "personal_access_tokens_token_unique")
+  abilities      String?   
+  expires_at     DateTime?
+  last_used_at   DateTime?
+  created_at     DateTime?
+  updated_at     DateTime?
+
+  @@index([tokenable_type, tokenable_id])
+}
+
+model phone_book_groups {
+  id                      BigInt              @id @default(autoincrement()) 
+  property_id             BigInt              
+  parent_id               BigInt?             
+  group                   Int                 @default(0)
+  name                    String?
+  sort                    Int?                @default(0)
+  created_at              DateTime?
+  updated_at              DateTime?
+  deleted_at              DateTime?
+  created_by              BigInt?             
+  updated_by              BigInt?             
+  deleted_by              BigInt?             
+  status                  Int                 @default(0)
+  phone_book_groups       phone_book_groups?  @relation("phone_book_groupsTophone_book_groups", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  other_phone_book_groups phone_book_groups[] @relation("phone_book_groupsTophone_book_groups")
+  properties              properties          @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  phone_books             phone_books[]
+
+  @@index([parent_id])
+  @@index([property_id])
+}
+
+model phone_books {
+  id                  BigInt            @id @default(autoincrement()) 
+  property_id         BigInt            
+  phone_book_group_id BigInt            
+  name                String?
+  address             String?
+  telp                String?
+  fax                 String?
+  email               String?
+  sort                Int               @default(0)
+  contact_name        String?
+  remark              String?           
+  created_at          DateTime?
+  updated_at          DateTime?
+  deleted_at          DateTime?
+  created_by          BigInt?           
+  updated_by          BigInt?           
+  deleted_by          BigInt?           
+  status              Int               @default(0)
+  phone_book_groups   phone_book_groups @relation(fields: [phone_book_group_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties          properties        @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([phone_book_group_id])
+  @@index([property_id])
+}
+
+model pos_matrix_sales {
+  id             BigInt      @id @default(autoincrement())
+  property_id    BigInt
+  code_post_id   BigInt?     
+  sales_category String?
+  sales_shift    String?
+  menu_group     String?
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?     
+  updated_by     BigInt?     
+  deleted_by     BigInt?     
+  status         Int?        @default(0)
+  code_posts     code_posts? @relation(fields: [code_post_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([code_post_id])
+}
+
+model post_code_budgets {
+  id           Int     @id @default(autoincrement())
+  property_id  BigInt  
+  year         Int
+  code_post_id BigInt  
+  month        Int
+  budget       Decimal
+}
+
+model promotions {
+  id                       BigInt                 @id @default(autoincrement()) 
+  property_id              BigInt?                
+  promotion_type           String?
+  promotion_code           String?
+  description              String?
+  from_stay_date           DateTime?              
+  to_stay_date             DateTime?              
+  from_validity_date       DateTime?              
+  to_validity_date         DateTime?              
+  no_of_night_discount     Int?                   @default(0)
+  discount_percentage      Int?                   @default(0)
+  discount_flat            Int?                   @default(0)
+  min_night                Int?                   @default(0)
+  apply_to_every_min_night Boolean                @default(false)
+  rules                    String?                @default("0")
+  created_at               DateTime?
+  updated_at               DateTime?
+  deleted_at               DateTime?
+  created_by               BigInt?                
+  updated_by               BigInt?                
+  deleted_by               BigInt?                
+  sort                     Int?                   @default(0)
+  status                   Int?                   @default(0)
+  model_has_promotions     model_has_promotions[]
+  properties               properties?            @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model properties {
+  id                                       BigInt                             @id @default(autoincrement()) 
+  client_uid                               String?                            
+  auth_token                               String?                            
+  url_chart_of_account                     String?
+  ip_pos                                   String?
+  port_pos_night_audit                     String?
+  port_pos_gl_code                         String?
+  port_pos_posting_code                    String?
+  region                                   String?
+  latitude                                 String?
+  longitude                                String?
+  country_id                               BigInt?                            
+  city_id                                  BigInt?                            
+  name                                     String
+  alias                                    String?
+  bank_account_no                          String?
+  bank_name                                String?
+  slug                                     String?
+  whatsapp                                 String?
+  sync                                     String?                            
+  telp                                     BigInt?
+  fax                                      BigInt?
+  email                                    String?
+  email_confirmation_bcc                   String?
+  image                                    String?
+  logo                                     String?                            
+  address                                  String?                            
+  subscribe_type                           Boolean                            @default(false)
+  contract_expired                         DateTime                           
+  join_date                                DateTime                           
+  is_tax                                   Int                                @default(0)
+  is_tax_exclude_room                      Int                                @default(0)
+  is_tax_exclude_restaurant                Int                                @default(0)
+  ip_doorlock                              String?
+  ip_whitelist                             String?
+  market_segment_1                         Boolean                            @default(true)
+  market_segment_2                         Boolean                            @default(true)
+  market_segment_3                         Boolean                            @default(true)
+  market_segment_4                         Boolean                            @default(true)
+  source                                   Boolean                            @default(true)
+  created_at                               DateTime?
+  updated_at                               DateTime?
+  deleted_at                               DateTime?
+  created_by                               BigInt?                            
+  updated_by                               BigInt?                            
+  deleted_by                               BigInt?                            
+  sort                                     Int                                @default(0)
+  status                                   Int                                @default(0)
+  pb1_account_uid                          BigInt?
+  service_charge_account_uid               BigInt?
+  tax_account_uid                          BigInt?
+  surcharge_account_uid                    BigInt?
+  advance_deposit_current_day_account_uid  BigInt?
+  advance_deposit_previous_day_account_uid BigInt?
+  guest_ledger_current_day_account_uid     BigInt?
+  guest_ledger_previous_day_account_uid    BigInt?
+  day_use_item_code                        BigInt?
+  accountings                              accountings[]
+  allotments                               allotments[]
+  baggages                                 baggages[]
+  billing_tos                              billing_tos[]
+  car_parks                                car_parks[]
+  channel_manager_rate_plans               channel_manager_rate_plans[]
+  code_billings                            code_billings[]
+  code_gls                                 code_gls[]
+  code_items                               code_items[]
+  code_posts                               code_posts[]
+  company_profile_activities               company_profile_activities[]
+  company_profile_ar_transactions          company_profile_ar_transactions[]
+  company_profile_billing_setups           company_profile_billing_setups[]
+  company_profile_contact_persons          company_profile_contact_persons[]
+  company_profile_customed_onlines         company_profile_customed_onlines[]
+  company_profile_departments              company_profile_departments[]
+  company_profile_documents                company_profile_documents[]
+  company_profile_statistics               company_profile_statistics[]
+  company_profiles                         company_profiles[]
+  contents                                 contents[]
+  deposit_payments                         deposit_payments[]
+  doorlock_duplicate_counters              doorlock_duplicate_counters[]
+  dynamic_rate_configs                     dynamic_rate_configs[]
+  dynamic_rate_results                     dynamic_rate_results[]
+  folios                                   folios[]
+  guest_profile_documents                  guest_profile_documents[]
+  guest_profile_family_members             guest_profile_family_members[]
+  guest_profile_histories                  guest_profile_histories[]
+  guest_profile_loyalty_cards              guest_profile_loyalty_cards[]
+  guest_profile_preferences                guest_profile_preferences[]
+  guest_profile_request_notes              guest_profile_request_notes[]
+  guest_profiles                           guest_profiles[]
+  holidays                                 holidays[]
+  housekeeper_history                      housekeeper_history[]
+  lost_and_founds                          lost_and_founds[]
+  messages                                 messages[]
+  model_has_properties                     model_has_properties[]
+  other_guests                             other_guests[]
+  overbookings                             overbookings[]
+  packages                                 packages[]
+  phone_book_groups                        phone_book_groups[]
+  phone_books                              phone_books[]
+  promotions                               promotions[]
+  cities                                   cities?                            @relation(fields: [city_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rate_extra_bed_inclusives                rate_extra_bed_inclusives[]
+  rate_inclusives                          rate_inclusives[]
+  rate_rates                               rate_rates[]
+  rates                                    rates[]
+  reservation_items                        reservation_items[]
+  reservations                             reservations[]
+  room_allotments                          room_allotments[]
+  room_inventories                         room_inventories[]
+  room_type_image                          room_type_image[]
+  room_types                               room_types[]
+  rooms                                    rooms[]
+  rosters                                  rosters[]
+  schedule_employees                       schedule_employees[]
+  shift_postings                           shift_postings[]
+  shifts                                   shifts[]
+  staah_interfaces                         staah_interfaces[]
+  staah_room_content_breakdowns            staah_room_content_breakdowns[]
+  stocks                                   stocks[]
+  transaction_breakdowns                   transaction_breakdowns[]
+  transaction_temps                        transaction_temps[]
+  transactions                             transactions[]
+  type_payments                            type_payments[]
+  types                                    types[]
+  wake_up_calls                            wake_up_calls[]
+  work_order_stocks                        work_order_stocks[]
+  work_orders                              work_orders[]
+
+  @@index([city_id])
+}
+
+model rate_configs {
+  id          Int       @id @default(autoincrement())
+  uuid        String?   
+  rate_id     BigInt    
+  property_id BigInt
+  name        String?   
+  description String?   
+  image       String?   
+  sort        Int       @default(0)
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now())
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      Int?      @default(0)
+
+  @@index([rate_id])
+}
+
+model rate_day_uses {
+  id          BigInt    @id @default(autoincrement()) 
+  property_id BigInt    
+  rate_id     BigInt?   
+  name        String
+  time        Int       @default(0)
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  sort        Int       @default(0)
+  status      Int       @default(0)
+  rates       rates?    @relation(fields: [rate_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([sort])
+  @@index([status])
+  @@index([rate_id])
+}
+
+model rate_extra_bed_inclusives {
+  id          BigInt     @id @default(autoincrement()) 
+  property_id BigInt     
+  rate_id     BigInt     
+  description String?
+  stock       String?
+  frequency   String?
+  cost        Decimal    @default(0.0000)
+  cost_on     String?
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?    
+  updated_by  BigInt?    
+  deleted_by  BigInt?    
+  sort        Int        @default(0)
+  status      Int        @default(0)
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rates       rates      @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([rate_id])
+}
+
+model rate_inclusives {
+  id                        BigInt                      @id @default(autoincrement()) 
+  property_id               BigInt                      
+  rate_id                   BigInt                      
+  description               String?
+  stock                     String?
+  frequency                 String?
+  cost                      Decimal                     @default(0.0000)
+  cost_on                   String?
+  created_at                DateTime?
+  updated_at                DateTime?
+  deleted_at                DateTime?
+  created_by                BigInt?                     
+  updated_by                BigInt?                     
+  deleted_by                BigInt?                     
+  sort                      Int                         @default(0)
+  status                    Int                         @default(0)
+  model_has_rate_inclusives model_has_rate_inclusives[]
+  properties                properties                  @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rates                     rates                       @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([rate_id])
+}
+
+model rate_link_listings {
+  id               Int       @id @default(autoincrement())
+  property_id      BigInt?   
+  room_type_id     BigInt?   
+  rate_id          BigInt?   
+  amount           Int?
+  type             String?
+  offsetAdult1     Int?
+  offsetAdult2     Int?
+  offsetExtraAdult Int?
+  offsetExtraChild Int?
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?   
+  updated_by       BigInt?   
+  deleted_by       BigInt?   
+  sort             Int?      @default(0)
+  status           String?
+}
+
+model rate_rates {
+  id             BigInt     @id @default(autoincrement()) 
+  property_id    BigInt     
+  rate_id        BigInt     
+  room_type_id   BigInt     
+  date           DateTime   
+  one_adult      Decimal    @default(0.0000)
+  two_adult      Decimal    @default(0.0000)
+  extra_adult    Decimal    @default(0.0000)
+  extra_child    Decimal    @default(0.0000)
+  min_night      Int        @default(0)
+  max_night      Int        @default(0)
+  stop_arrival   Int        @default(0)
+  stop_departure Int        @default(0)
+  stop_sell      Int        @default(0)
+  min_los        Int        @default(0)
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?    
+  updated_by     BigInt?    
+  deleted_by     BigInt?    
+  sort           Int        @default(0)
+  status         Int        @default(0)
+  properties     properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rates          rates      @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types     room_types @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([rate_id, room_type_id, date])
+  @@index([rate_id, room_type_id, date, property_id])
+  @@index([property_id])
+  @@index([rate_id])
+  @@index([room_type_id])
+}
+
+model rates {
+  id                         BigInt                       @id @default(autoincrement()) 
+  property_id                BigInt                       
+  module                     String                       @default("rate")
+  code_post_id               BigInt                       
+  code_post_extra_bed_id     BigInt?                      
+  name                       String?
+  code                       String
+  online                     Int                          @default(0)
+  staah                      Boolean                      @default(false)
+  print_rate                 Int                          @default(0)
+  min_advance_booking        Int                          @default(0)
+  max_advance_booking        Int                          @default(0)
+  sync_online                Int                          @default(0)
+  sync_staah                 Boolean                      @default(true)
+  is_day_use                 Boolean                      @default(false)
+  minimum_rate               Decimal                      @default(0.0000)
+  grouping                   String?
+  description                String?
+  rate_type                  String?
+  start_date                 DateTime                     
+  end_date                   DateTime                     
+  term_condition             String?                      
+  cancellation_policy        String?                      
+  notes                      String?                      
+  created_at                 DateTime?
+  updated_at                 DateTime?
+  deleted_at                 DateTime?
+  created_by                 BigInt?                      
+  updated_by                 BigInt?                      
+  deleted_by                 BigInt?                      
+  sort                       Int                          @default(0)
+  status                     Int                          @default(0)
+  channel_manager_rate_plans channel_manager_rate_plans[]
+  model_has_rates            model_has_rates[]
+  rate_day_uses              rate_day_uses[]
+  rate_extra_bed_inclusives  rate_extra_bed_inclusives[]
+  rate_inclusives            rate_inclusives[]
+  rate_rates                 rate_rates[]
+  code_posts                 code_posts                   @relation(fields: [code_post_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  properties                 properties                   @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  reservations               reservations[]
+  staah_rate_mappings        staah_rate_mappings[]
+  staah_reservations         staah_reservations[]
+
+  @@index([id, property_id, deleted_at])
+  @@index([online, sync_online])
+  @@index([code_post_id])
+  @@index([property_id])
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model regions {
+  id           BigInt       @id @default(autoincrement()) 
+  name         String
+  translations String?      
+  created_at   DateTime?
+  updated_at   DateTime     @default(now())
+  flag         Boolean      @default(true)
+  wikiDataId   String?
+  countries    countries[]
+  subregions   subregions[]
+}
+
+model report_pax_room_solds {
+  id                     BigInt    @id @default(autoincrement())
+  date                   DateTime? 
+  last_year_room_sold    Int?
+  last_year_forecast_rev Decimal?
+  last_year_pax          Int?
+}
+
+model report_permissions {
+  id          BigInt @id @default(autoincrement()) 
+  role_id     BigInt 
+  property_id BigInt 
+  status      Int    @default(0) 
+
+  @@index([property_id])
+  @@index([role_id])
+  @@index([status])
+}
+
+model report_revenue_breakfast {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  last_year Decimal?
+}
+
+model report_revenue_dine_in {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  last_year Decimal?
+}
+
+model report_revenue_fb_other {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  last_year Decimal?
+}
+
+model report_revenue_fb_others {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  last_year Decimal?
+}
+
+model report_revenue_minimarts {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  last_year Decimal?
+}
+
+model report_revenue_room_banquet_others {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  code      String?
+  last_year Decimal?
+}
+
+model report_revenue_room_services {
+  id        Int       @id @default(autoincrement())
+  date      DateTime? 
+  last_year Decimal?
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model requests {
+  id          Int       @id @default(autoincrement())
+  request_id  String
+  property_id Int
+  method      String?
+  data        String?   
+  start_date  DateTime? 
+  end_date    DateTime? 
+  created_at  DateTime?
+  status      Int       @default(0) 
+
+  @@index([status])
+}
+
+model reservation_items {
+  id             BigInt     @id @default(autoincrement()) 
+  property_id    BigInt     
+  reservation_id BigInt     
+  type           String?
+  date           DateTime   
+  code_post_id   BigInt?
+  code_item_id   BigInt?
+  description    String?
+  amount         Decimal?
+  total          Decimal?
+  type_amount    String?    @default("PLUS")
+  pb1            Decimal?
+  svr_chrg       Decimal?
+  surcharge      Decimal?
+  tax3           Decimal?
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?    
+  updated_by     BigInt?    
+  deleted_by     BigInt?    
+  status         Int        @default(0) 
+  properties     properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model reservation_rate_histories {
+  id             BigInt    @id @default(autoincrement()) 
+  property_id    BigInt    
+  folio_id       BigInt    
+  date           DateTime  
+  rate_id        BigInt?   
+  rate_name      String?
+  amount         Decimal?
+  service_charge Decimal?
+  pb1            Decimal?
+  tax3           Decimal?
+  total          Decimal?
+  room_id        BigInt?   
+  room_name      String?
+  room_type_id   BigInt?   
+  room_type_name String?
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?   
+  updated_by     BigInt?   
+  deleted_by     BigInt?   
+
+  @@index([room_name])
+  @@index([room_type_name])
+}
+
+model reservations {
+  id                       BigInt               @id @default(autoincrement()) 
+  package_id               BigInt?              
+  quantity                 Int                  @default(1)
+  is_extra_day_use         Int                  @default(0)
+  quantity_extra_day_use   Int                  @default(0)
+  is_24_hour               Int                  @default(0) 
+  property_id              BigInt               
+  company_profile_id       BigInt?              
+  company_profile_name     String?
+  rate_id                  BigInt?              
+  folio_id                 BigInt               
+  adult                    Int?
+  child                    Int?
+  add_bed                  Int?
+  room_type_id             BigInt?              
+  room_type_name           String?
+  room_type_id_next        BigInt?              
+  room_id                  BigInt?              
+  room_name                String?
+  room_status_name         String?
+  maid_status_name         String?
+  room_id_next             BigInt?              
+  check_in_date            DateTime?            
+  check_out_date           DateTime?            
+  rate_name                String?
+  promo_code               String?
+  date                     DateTime             
+  eta                      DateTime?
+  etd                      DateTime?
+  ata                      DateTime?
+  atd                      DateTime?
+  status_reservation       Int?                 @default(0)
+  data                     String?              
+  amountt                  Decimal              @default(0.0000)
+  service_charge           Decimal?             @default(0.0000)
+  pb1                      Decimal?             @default(0.0000)
+  tax3                     Decimal?             @default(0.0000)
+  total                    Decimal?             @default(0.0000)
+  amount_extra_bed         Decimal              @default(0.0000)
+  service_charge_extra_bed Decimal              @default(0.0000)
+  pb1_extra_bed            Decimal              @default(0.0000)
+  tax3_extra_bed           Decimal              @default(0.0000)
+  total_extra_bed          Decimal              @default(0.0000)
+  remark                   String?              
+  is_posting               Int                  @default(0) 
+  created_at               DateTime?
+  updated_at               DateTime?
+  deleted_at               DateTime?
+  created_by               BigInt?              
+  updated_by               BigInt?              
+  deleted_by               BigInt?              
+  status                   Int                  @default(0)
+  amount                   Decimal              @default(0.0000)
+  night                    Int                  
+  properties               properties           @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rates                    rates?               @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios                   folios               @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types               room_types?          @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  staah_reservations       staah_reservations[]
+
+  @@index([company_profile_id])
+  @@index([date])
+  @@index([folio_id])
+  @@index([date, property_id])
+  @@index([deleted_at])
+  @@index([package_id])
+  @@index([property_id])
+  @@index([rate_id])
+  @@index([room_id])
+  @@index([room_id_next])
+  @@index([room_type_id])
+  @@index([room_type_id_next])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model role_menu_crud {
+  role_id             BigInt    
+  menu_id             BigInt    
+  view                Boolean   @default(false)
+  add                 Boolean   @default(false)
+  edit                Boolean   @default(false)
+  delete              Boolean   @default(false)
+  transaction_actions String?   
+  created_at          DateTime? @default(now())
+  updated_at          DateTime? @default(now())
+  roles               roles     @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  menus               menus     @relation(fields: [menu_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([role_id, menu_id])
+  @@index([menu_id])
+}
+
+model role_permissions {
+  permission_id BigInt      
+  role_id       BigInt      
+  permissions   permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  roles         roles       @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([permission_id, role_id])
+  @@index([role_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model role_templates {
+  id                 BigInt    @id @default(autoincrement()) 
+  property_id        BigInt?   
+  key                String
+  label              String
+  name               String
+  code               String
+  description        String?
+  dashboard          String?   
+  grants             String?   
+  transaction_grants String?   
+  color_ring         String?
+  color_bg           String?
+  color_badge_bg     String?
+  color_badge_text   String?
+  is_active          Boolean   @default(true)
+  sort               Int       @default(0)
+  created_at         DateTime? @default(now())
+  updated_at         DateTime? @default(now())
+  created_by         BigInt?   
+  updated_by         BigInt?   
+
+  @@unique([key, property_id])
+}
+
+model roles {
+  id               BigInt             @id @default(autoincrement()) 
+  property_id      BigInt             
+  name             String
+  guard_name       String
+  display_name     String?
+  list_dashboard   String?            
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?            
+  updated_by       BigInt?            
+  deleted_by       BigInt?            
+  status           Int                @default(0)
+  model_has_roles  model_has_roles[]
+  role_menu_crud   role_menu_crud[]
+  role_permissions role_permissions[]
+  tasks            tasks[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model room_allotments {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  allotment_id BigInt     
+  room_type_id BigInt     
+  data         String     
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int        @default(0)
+  allotments   allotments @relation(fields: [allotment_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types   room_types @relation(fields: [room_type_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([allotment_id])
+  @@index([property_id])
+  @@index([room_type_id])
+}
+
+model room_availabilities {
+  id          Int       @id @default(autoincrement())
+  property_id Int       
+  room_id     Int       
+  date        DateTime  
+  reason      String?   
+  uniqueCode  String?   
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @default(now())
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      BigInt?   @default(0)
+}
+
+model room_change_histories {
+  id                BigInt   @id @default(autoincrement())
+  property_id       BigInt
+  folio_id          BigInt
+  folio_number      String
+  check_in_date     DateTime 
+  check_out_date    DateTime 
+  from_room_id      BigInt
+  from_room_type_id BigInt
+  to_room_id        BigInt
+  to_room_type_id   BigInt
+  user_id           BigInt
+  datetime          DateTime @default(now())
+  reason            String?  
+}
+
+model room_inventories {
+  id           BigInt      @id @default(autoincrement()) 
+  property_id  BigInt      
+  room_id      BigInt      
+  code_item_id BigInt?     
+  qty          Int         @default(0)
+  remark       String?
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?     
+  updated_by   BigInt?     
+  deleted_by   BigInt?     
+  sort         Int         @default(0)
+  status       Int         @default(0)
+  code_items   code_items? @relation(fields: [code_item_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  properties   properties  @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rooms        rooms       @relation(fields: [room_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([code_item_id])
+  @@index([property_id])
+  @@index([room_id])
+}
+
+model room_type_image {
+  id           BigInt     @id @default(autoincrement()) 
+  property_id  BigInt     
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?    
+  updated_by   BigInt?    
+  deleted_by   BigInt?    
+  status       Int        @default(0)
+  room_type_id BigInt?
+  image        String?    
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+}
+
+model room_types {
+  id                                                                             BigInt                          @id @default(autoincrement()) 
+  property_id                                                                    BigInt                          
+  name                                                                           String
+  description                                                                    String?
+  specification                                                                  String?
+  is_physical                                                                    Boolean                         @default(true)
+  rate                                                                           Decimal                         @default(0.0000)
+  min_rate                                                                       Decimal                         @default(0.0000)
+  created_at                                                                     DateTime?
+  updated_at                                                                     DateTime?
+  deleted_at                                                                     DateTime?
+  created_by                                                                     BigInt?                         
+  updated_by                                                                     BigInt?                         
+  deleted_by                                                                     BigInt?                         
+  sort                                                                           Int                             @default(0)
+  status                                                                         Int                             @default(0)
+  channel_manager_room_types_channel_manager_room_types_room_type_idToroom_types channel_manager_room_types[]    @relation("channel_manager_room_types_room_type_idToroom_types")
+  channel_manager_room_types_channel_manager_room_types_room_typeToroom_types    channel_manager_room_types[]    @relation("channel_manager_room_types_room_typeToroom_types")
+  dynamic_rate_results                                                           dynamic_rate_results[]
+  housekeeping_setup_room_types                                                  housekeeping_setup_room_types[]
+  overbookings                                                                   overbookings[]
+  rate_rates                                                                     rate_rates[]
+  reservations                                                                   reservations[]
+  room_allotments                                                                room_allotments[]
+  properties                                                                     properties                      @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rooms                                                                          rooms[]
+  shift_postings                                                                 shift_postings[]
+  staah_reservations                                                             staah_reservations[]
+  staah_room_content_breakdowns                                                  staah_room_content_breakdowns[]
+  staah_room_mappings                                                            staah_room_mappings[]
+  yields                                                                         yields[]
+
+  @@index([property_id])
+}
+
+model rooms {
+  id                       BigInt                     @id @default(autoincrement()) 
+  property_id              BigInt                     
+  room_type_id             BigInt                     
+  room_id                  BigInt?                    
+  name                     String
+  description              String?
+  is_physical              Boolean                    @default(true)
+  phone_ext                String?
+  map_id                   String?
+  max_pax                  Int                        @default(0)
+  total_bed                Int                        @default(0)
+  with_tv                  Int                        @default(0)
+  with_shower              Int                        @default(0)
+  cleaning_time            DateTime                   @default(dbgenerated("'00:00:00'"))
+  linen_days               Int                        @default(0)
+  remark                   String?
+  room_status              Int                        @default(0)
+  maid_status              Int                        @default(0)
+  address_code             String?
+  last_check_in_date       DateTime?                  
+  last_check_in_time       DateTime?
+  last_check_out_date      DateTime?                  
+  last_check_out_time      DateTime?
+  created_at               DateTime?
+  updated_at               DateTime?
+  deleted_at               DateTime?
+  created_by               BigInt?                    
+  updated_by               BigInt?                    
+  deleted_by               BigInt?                    
+  sort                     Int                        @default(0)
+  status                   Int                        @default(0)
+  housekeeping_setup_rooms housekeeping_setup_rooms[]
+  room_inventories         room_inventories[]
+  properties               properties                 @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rooms                    rooms?                     @relation("roomsTorooms", fields: [room_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  other_rooms              rooms[]                    @relation("roomsTorooms")
+  room_types               room_types                 @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  work_orders              work_orders[]
+
+  @@index([is_physical])
+  @@index([is_physical, maid_status])
+  @@index([is_physical, room_status])
+  @@index([is_physical, room_type_id])
+  @@index([maid_status])
+  @@index([name])
+  @@index([room_status])
+  @@index([room_type_id])
+  @@index([property_id])
+  @@index([room_id])
+}
+
+model roster_list {
+  id          BigInt    @id @default(autoincrement()) 
+  property_id BigInt?   
+  name        String?
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?   
+  updated_by  BigInt?   
+  deleted_by  BigInt?   
+  status      Int?      @default(0)
+  shift_id    Int?
+  date_from   DateTime? 
+  date_to     DateTime? 
+
+  @@index([property_id])
+}
+
+model rosters {
+  id                 BigInt               @id @default(autoincrement()) 
+  property_id        BigInt?              
+  roster_list_id     Int?
+  shift_id           Int?
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  created_by         BigInt?              
+  updated_by         BigInt?              
+  deleted_by         BigInt?              
+  status             Int?                 @default(0)
+  user_id            BigInt               
+  date               DateTime?            
+  is_assigned        Int?
+  model_has_rosters  model_has_rosters[]
+  properties         properties?          @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  schedule_employees schedule_employees[]
+
+  @@unique([property_id, user_id, date, shift_id])
+  @@index([date])
+  @@index([date, shift_id])
+  @@index([shift_id])
+  @@index([property_id])
+}
+
+model schedule_employees {
+  id          BigInt      @id @default(autoincrement()) 
+  property_id BigInt?     
+  roster_id   BigInt?     
+  date        DateTime?   
+  user_id     BigInt?     
+  status      Int?        @default(0)
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?     
+  updated_by  BigInt?     
+  deleted_by  BigInt?     
+  properties  properties? @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rosters     rosters?    @relation(fields: [roster_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users       users?      @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([roster_id])
+  @@index([user_id])
+}
+
+model settings {
+  id          BigInt  @id @default(autoincrement()) 
+  property_id BigInt  
+  key         String
+  value       String? 
+}
+
+model shift_postings {
+  id               BigInt     @id @default(autoincrement()) 
+  property_id      BigInt     
+  user_id          BigInt     
+  folio_number     String
+  name             String
+  company          String
+  check_in_date    DateTime   
+  check_out_date   DateTime   
+  room_type_id     BigInt     
+  item_description String
+  price            Decimal
+  confirmation     String
+  status_posting   Int
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?    
+  updated_by       BigInt?    
+  deleted_by       BigInt?    
+  status           Int        @default(0)
+  properties       properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users            users      @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types       room_types @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([room_type_id])
+  @@index([user_id])
+}
+
+model shift_roster {
+  id             BigInt    @id @default(autoincrement()) 
+  property_id    BigInt?   
+  name           String?
+  time_start     DateTime?
+  time_end       DateTime?
+  time_ranges    Json?
+  overtime_start DateTime?
+  overtime_end   DateTime?
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?   
+  updated_by     BigInt?   
+  deleted_by     BigInt?   
+  status         Int?      @default(0)
+  description    String?
+  users          String?   
+
+  @@index([time_end])
+  @@index([time_start, time_end])
+  @@index([time_start])
+  @@index([property_id])
+}
+
+model shift_user_list {
+  id              BigInt    @id @default(autoincrement()) 
+  property_id     BigInt?   
+  shift_roster_id BigInt?   
+  roster_list_id  BigInt?   
+  roster_date     DateTime? 
+  date            DateTime? 
+  created_at      DateTime?
+  updated_at      DateTime?
+  deleted_at      DateTime?
+  created_by      BigInt?   
+  updated_by      BigInt?   
+  deleted_by      BigInt?   
+  status          Int?      @default(0)
+  user_id         BigInt?   
+
+  @@index([shift_roster_id, property_id])
+  @@index([shift_roster_id])
+  @@index([user_id])
+  @@index([roster_date])
+  @@index([roster_date, shift_roster_id])
+  @@index([property_id])
+}
+
+model shifts {
+  id          BigInt     @id @default(autoincrement()) 
+  property_id BigInt     
+  user_id     BigInt     
+  start       DateTime
+  end         DateTime?
+  date        DateTime   
+  is_posting  Boolean    @default(false)
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?    
+  updated_by  BigInt?    
+  deleted_by  BigInt?    
+  status      Int        @default(0)
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users       users      @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([user_id])
+}
+
+model staah_interfaces {
+  id                            BigInt                          @id @default(autoincrement()) 
+  property_id                   BigInt                          
+  hotel_id                      String                          @unique(map: "hotel_id")
+  time_zone                     String                          @default("Asia/Jakarta")
+  hotel_type                    String                          @default("Hotel")
+  language_code                 String                          @default("en")
+  currency_code                 String                          @default("IDR")
+  hotel_info                    String?                         
+  hotel_description             String?                         
+  status                        String                          @default("active")
+  data                          Json?
+  last_sync_at                  DateTime?
+  created_at                    DateTime?
+  updated_at                    DateTime?
+  deleted_at                    DateTime?
+  properties                    properties                      @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  staah_rate_mappings           staah_rate_mappings[]
+  staah_reservations            staah_reservations[]
+  staah_room_content_breakdowns staah_room_content_breakdowns[]
+  staah_room_mappings           staah_room_mappings[]
+  staah_sync_logs               staah_sync_logs[]
+
+  @@index([property_id])
+}
+
+model staah_ota_company_mappings {
+  id                 BigInt    @id @default(autoincrement()) 
+  property_id        BigInt    
+  staah_interface_id BigInt?   
+  channel_id         String
+  company_profile_id BigInt    
+  status             Boolean   @default(true)
+  created_at         DateTime?
+  updated_at         DateTime?
+
+  @@unique([property_id, channel_id])
+  @@index([company_profile_id])
+  @@index([staah_interface_id])
+  @@index([property_id])
+}
+
+model staah_rate_mappings {
+  id                 BigInt           @id @default(autoincrement()) 
+  staah_interface_id BigInt           
+  rate_id            BigInt           
+  staah_rate_plan_id String?
+  meal_plan_id       Int              @default(15)
+  status             String           @default("active")
+  data               Json?
+  last_sync_at       DateTime?
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  staah_interfaces   staah_interfaces @relation(fields: [staah_interface_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rates              rates            @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([rate_id])
+  @@index([staah_interface_id])
+}
+
+model staah_reservations {
+  id                 BigInt           @id @default(autoincrement()) 
+  staah_interface_id BigInt           
+  hotel_id           String
+  booking_id         String
+  notification_id    String?
+  status             String?
+  guest_name         String?
+  guest_email        String?
+  guest_phone        String?
+  check_in_date      DateTime?        
+  check_out_date     DateTime?        
+  room_id            String?
+  rate_plan_id       String?
+  room_type_id       BigInt?          
+  rate_id            BigInt?          
+  folio_id           BigInt?          
+  reservation_id     BigInt?          
+  payload            Json?
+  mapped_data        Json?
+  message            String?          
+  processed_at       DateTime?
+  created_at         DateTime?
+  updated_at         DateTime?
+  staah_interfaces   staah_interfaces @relation(fields: [staah_interface_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types         room_types?      @relation(fields: [room_type_id], references: [id], onUpdate: NoAction)
+  rates              rates?           @relation(fields: [rate_id], references: [id], onUpdate: NoAction)
+  folios             folios?          @relation(fields: [folio_id], references: [id], onUpdate: NoAction)
+  reservations       reservations?    @relation(fields: [reservation_id], references: [id], onUpdate: NoAction)
+
+  @@unique([staah_interface_id, booking_id])
+  @@index([booking_id])
+  @@index([folio_id])
+  @@index([hotel_id])
+  @@index([notification_id])
+  @@index([rate_id])
+  @@index([rate_plan_id])
+  @@index([reservation_id])
+  @@index([room_id])
+  @@index([room_type_id])
+  @@index([status])
+}
+
+model staah_room_content_breakdowns {
+  id                 BigInt           @id @default(autoincrement()) 
+  property_id        BigInt           
+  staah_interface_id BigInt           
+  room_type_id       BigInt           
+  description        String
+  adult              Int
+  child              Int
+  status             Int              @default(1) 
+  created_at         DateTime?
+  updated_at         DateTime?
+  deleted_at         DateTime?
+  properties         properties       @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types         room_types       @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  staah_interfaces   staah_interfaces @relation(fields: [staah_interface_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([staah_interface_id, room_type_id])
+  @@index([room_type_id])
+  @@index([staah_interface_id])
+}
+
+model staah_room_mappings {
+  id                    BigInt           @id @default(autoincrement()) 
+  staah_interface_id    BigInt           
+  room_type_id          BigInt           
+  staah_room_id         String?
+  max_occupancy         Int              @default(2)
+  max_child_occupancy   Int              @default(1)
+  quantity              Int              @default(1)
+  size_measurement      Decimal?
+  size_measurement_unit String           @default("sqm")
+  latitude              Decimal?
+  longitude             Decimal?
+  address_line          String?
+  city_name             String?
+  country_name          String           @default("ID")
+  postal_code           String?
+  description           String?          
+  room_description      String?          
+  status                String           @default("active")
+  data                  Json?
+  last_sync_at          DateTime?
+  created_at            DateTime?
+  updated_at            DateTime?
+  deleted_at            DateTime?
+  staah_interfaces      staah_interfaces @relation(fields: [staah_interface_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types            room_types       @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([room_type_id])
+  @@index([staah_interface_id])
+}
+
+model staah_sync_logs {
+  id                 BigInt            @id @default(autoincrement()) 
+  staah_interface_id BigInt?           
+  type               String
+  direction          String            @default("push")
+  status             String            @default("pending")
+  hotel_id           String?
+  booking_id         String?
+  room_id            String?           
+  rate_plan_id       String?           
+  date_from          DateTime?         
+  date_to            DateTime?         
+  payload            Json?
+  response           Json?
+  message            String?           
+  synced_at          DateTime?
+  created_at         DateTime?
+  updated_at         DateTime?
+  staah_interfaces   staah_interfaces? @relation(fields: [staah_interface_id], references: [id], onUpdate: NoAction)
+
+  @@index([booking_id])
+  @@index([hotel_id])
+  @@index([staah_interface_id])
+  @@index([status])
+  @@index([type])
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model states {
+  id           BigInt    @id @default(autoincrement()) 
+  name         String
+  country_id   BigInt    
+  country_code String
+  fips_code    String?
+  iso2         String?
+  type         String?
+  latitude     Decimal?
+  longitude    Decimal?
+  created_at   DateTime?
+  updated_at   DateTime  @default(now())
+  flag         Boolean   @default(true)
+  wikiDataId   String?
+  cities       cities[]
+  countries    countries @relation(fields: [country_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([country_id])
+}
+
+model statistic_messages {
+  id          Int      @id @default(autoincrement())
+  property_id Int
+  date        DateTime 
+  text        String   
+}
+
+model statistic_rate_codes {
+  id          Int      @id @default(autoincrement())
+  property_id Int
+  date        DateTime 
+  text        String   
+}
+
+model stocks {
+  id                BigInt              @id @default(autoincrement()) 
+  property_id       BigInt?             
+  code              String?
+  stock             Int?
+  post_gl_id        BigInt?             
+  created_at        DateTime?
+  updated_at        DateTime?
+  deleted_at        DateTime?
+  created_by        BigInt?             
+  updated_by        BigInt?             
+  deleted_by        BigInt?             
+  status            Int                 @default(0)
+  properties        properties?         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  code_gls          code_gls?           @relation(fields: [post_gl_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  work_order_stocks work_order_stocks[]
+
+  @@index([post_gl_id])
+  @@index([property_id])
+}
+
+model stop_sells {
+  id           BigInt    @id @default(autoincrement()) 
+  property_id  BigInt    
+  room_type_id BigInt    
+  date         DateTime  
+  type         String
+  created_at   DateTime?
+  updated_at   DateTime?
+  deleted_at   DateTime?
+  created_by   BigInt?   
+  updated_by   BigInt?   
+  deleted_by   BigInt?   
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model subregions {
+  id           BigInt      @id @default(autoincrement()) 
+  name         String
+  translations String?     
+  region_id    BigInt      
+  created_at   DateTime?
+  updated_at   DateTime    @default(now())
+  flag         Boolean     @default(true)
+  wikiDataId   String?
+  countries    countries[]
+  regions      regions     @relation(fields: [region_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([region_id])
+}
+
+model system_balances {
+  id          Int       @id @default(autoincrement())
+  property_id BigInt
+  code_id     BigInt    @default(0)
+  date        DateTime? 
+  name        String?
+  type        String?
+  debit       Decimal?
+  credit      Decimal?
+
+  @@index([code_id])
+  @@index([date])
+  @@index([property_id])
+  @@index([type])
+}
+
+model task_reads {
+  id         BigInt    @id @default(autoincrement()) 
+  task_id    BigInt    
+  user_id    BigInt    
+  read_at    DateTime?
+  created_at DateTime? @default(now())
+  updated_at DateTime? @default(now())
+  tasks      tasks     @relation(fields: [task_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([task_id, user_id])
+  @@index([user_id, read_at])
+}
+
+model tasks {
+  id                            BigInt          @id @default(autoincrement()) 
+  created_by                    BigInt          
+  to_user_id                    BigInt?         
+  to_role_id                    BigInt?         
+  department                    String?
+  room_number                   String?
+  type                          String
+  status                        tasks_status?   @default(Open)
+  created_on                    DateTime?       
+  duration                      DateTime?       
+  message                       String?         
+  priority                      tasks_priority? @default(Medium)
+  is_read                       Int?            @default(0) 
+  read_at                       DateTime?
+  created_at                    DateTime?       @default(now())
+  updated_at                    DateTime?       @default(now())
+  deleted_at                    DateTime?
+  parent_id                     BigInt?         
+  task_reads                    task_reads[]
+  users_tasks_created_byTousers users           @relation("tasks_created_byTousers", fields: [created_by], references: [id], onUpdate: NoAction)
+  tasks                         tasks?          @relation("tasksTotasks", fields: [parent_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  other_tasks                   tasks[]         @relation("tasksTotasks")
+  roles                         roles?          @relation(fields: [to_role_id], references: [id], onUpdate: NoAction)
+  users_tasks_to_user_idTousers users?          @relation("tasks_to_user_idTousers", fields: [to_user_id], references: [id], onUpdate: NoAction)
+
+  @@index([created_by])
+  @@index([created_on])
+  @@index([department])
+  @@index([parent_id])
+  @@index([priority])
+  @@index([status])
+  @@index([to_role_id])
+  @@index([to_user_id])
+  @@index([type])
+}
+
+model third_party_logs {
+  id   Int     @id @default(autoincrement())
+  name String?
+  text String? 
+}
+
+model transaction_breakdowns {
+  id                BigInt         @id @default(autoincrement()) 
+  property_id       BigInt         
+  transaction_id    BigInt         
+  type              String?
+  uuid              String?
+  date              DateTime       
+  code              String?
+  type_payment_id   BigInt?        
+  rate_inclusive_id BigInt?        
+  code_item_id      BigInt?
+  description       String?
+  amount            Decimal        @default(0.0000)
+  total             Decimal        @default(0.0000)
+  type_amount       String?        @default("PLUS")
+  pb1               Decimal        @default(0.0000)
+  svr_chrg          Decimal        @default(0.0000)
+  surcharge         Decimal        @default(0.0000)
+  tax3              Decimal        @default(0.0000)
+  closing           Decimal        @default(0.0000)
+  overwrite_reason  String?
+  time              DateTime?      
+  bill_to           String?
+  model_type        String?
+  model_id          BigInt?
+  void_code         String?        
+  reference         String?
+  pos               String?
+  receipt           String?
+  card_name         String?
+  last_digit_card   Int?
+  remark            String?        
+  voucher           String?
+  booking           String?
+  folio_id          BigInt         
+  is_posting        Int            @default(0) 
+  is_endshift       Int            @default(0) 
+  is_void           Int            @default(0) 
+  is_transfer       Int            @default(0) 
+  is_consolidate    Int            @default(0) 
+  is_split          Int            @default(0) 
+  is_has_inclusive  Int            @default(0) 
+  data              String?        
+  frequency         String?
+  created_at        DateTime?
+  updated_at        DateTime?
+  deleted_at        DateTime?
+  created_by        BigInt?        
+  updated_by        BigInt?        
+  deleted_by        BigInt?        
+  status            Int            @default(0) 
+  properties        properties     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios            folios         @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  type_payments     type_payments? @relation(fields: [type_payment_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  transactions      transactions   @relation(fields: [transaction_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([folio_id])
+  @@index([property_id])
+  @@index([transaction_id])
+  @@index([type_payment_id])
+}
+
+model transaction_pos_details {
+  id             BigInt  @id @default(autoincrement()) 
+  transaction_id BigInt  
+  data           String? 
+}
+
+model transaction_temps {
+  id               BigInt     @id @default(autoincrement()) 
+  property_id      BigInt     
+  type             String
+  type_amount      String?
+  folio_id         BigInt     
+  date             DateTime   
+  code             BigInt
+  code_item_id     BigInt?
+  description      String?
+  overwrite_reason String?
+  time             String?
+  bill_to          Int?
+  amount           Decimal    @default(0.0000)
+  gst              Decimal?
+  pb1              Decimal?
+  svr_chrg         Decimal?
+  rate             Decimal?
+  surcharge        Decimal?
+  tax3             Decimal?
+  total            Decimal?
+  reference        String?
+  pos              String?
+  receipt          String?
+  last_digit_card  String?
+  card_name        String?
+  remark           String?
+  voucher          String?
+  booking          String?
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?    
+  updated_by       BigInt?    
+  deleted_by       BigInt?    
+  status           Int?       @default(0)
+  properties       properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios           folios     @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([folio_id])
+  @@index([property_id])
+}
+
+model transactions {
+  id                     BigInt                   @id @default(autoincrement()) 
+  type                   String?
+  uuid                   String?
+  date                   DateTime                 
+  code                   String?
+  code_name              String?
+  type_payment_id        BigInt?                  
+  type_payment_name      String?
+  code_item_id           BigInt?
+  code_item_name         String?
+  description            String?
+  amount                 Decimal                  @default(0.0000)
+  total                  Decimal                  @default(0.0000)
+  type_amount            String?                  @default("PLUS")
+  pb1                    Decimal                  @default(0.0000)
+  svr_chrg               Decimal                  @default(0.0000)
+  surcharge              Decimal                  @default(0.0000)
+  tax3                   Decimal                  @default(0.0000)
+  overwrite_reason       String?
+  time                   DateTime?                
+  bill_to                String?
+  model_type             String?
+  model_id               BigInt?
+  void_code              String?                  
+  reference              String?
+  pos                    String?
+  receipt                String?
+  card_name              String?
+  last_digit_card        Int?
+  remark                 String?                  
+  voucher                String?
+  booking                String?
+  property_id            BigInt                   
+  folio_id               BigInt                   
+  pos_matrix_sales_id    BigInt?                  
+  is_posting             Int                      @default(0) 
+  is_event_deposit       Int                      @default(0) 
+  is_endshift            Int                      @default(0) 
+  is_end_of_day          Int                      @default(0) 
+  is_void                Int                      @default(0) 
+  is_transfer            Int                      @default(0) 
+  is_consolidate         Int                      @default(0) 
+  is_split               Int                      @default(0) 
+  is_has_inclusive       Int                      @default(0) 
+  is_pos_deposit         Int                      @default(0) 
+  source                 String                   @default("hms")
+  created_at             DateTime?
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  created_by             BigInt?                  
+  updated_by             BigInt?                  
+  deleted_by             BigInt?                  
+  status                 Int                      @default(0) 
+  transaction_breakdowns transaction_breakdowns[]
+  properties             properties               @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios                 folios                   @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  type_payments          type_payments?           @relation(fields: [type_payment_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([code])
+  @@index([code_item_id])
+  @@index([date])
+  @@index([folio_id])
+  @@index([model_id])
+  @@index([model_type])
+  @@index([property_id])
+  @@index([type])
+  @@index([type_payment_id])
+}
+
+model type_payments {
+  id                     BigInt                   @id @default(autoincrement()) 
+  property_id            BigInt                   
+  code_post_id           BigInt                   
+  code_billing_id        BigInt?                  
+  name                   String
+  uuid                   String?
+  company_id             Int?
+  pos                    Int?
+  front_office           Int?
+  card_no                Boolean?
+  card_name              Boolean?
+  voucher                Boolean?
+  is_company_ar          Boolean?
+  is_payment_ar          Boolean?
+  booking_no             Int?
+  surcharge_type         Int                      @default(0)
+  surcharge              Decimal                  @default(0.0000)
+  created_at             DateTime?
+  updated_at             DateTime?
+  deleted_at             DateTime?
+  created_by             BigInt?                  
+  updated_by             BigInt?                  
+  deleted_by             BigInt?                  
+  sort                   Int                      @default(0)
+  status                 Int                      @default(0)
+  accountings            accountings[]
+  transaction_breakdowns transaction_breakdowns[]
+  transactions           transactions[]
+  code_posts             code_posts               @relation(fields: [code_post_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  properties             properties               @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([code_post_id])
+  @@index([property_id])
+}
+
+model types {
+  id              BigInt            @id @default(autoincrement()) 
+  property_id     BigInt            
+  group           String?
+  name            String
+  image           String?           
+  text            String?           
+  description     String?
+  created_at      DateTime?
+  updated_at      DateTime?
+  deleted_at      DateTime?
+  created_by      BigInt?           
+  updated_by      BigInt?           
+  deleted_by      BigInt?           
+  sort            Int               @default(0)
+  status          Int               @default(0)
+  model_has_types model_has_types[]
+  properties      properties        @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([group, name, deleted_at, property_id])
+  @@index([group, id])
+  @@index([id, name, group, property_id, deleted_at])
+  @@index([group])
+  @@index([property_id])
+}
+
+model users {
+  id                                         BigInt               @id @default(autoincrement()) 
+  property_id                                BigInt?              
+  name                                       String
+  username                                   String               @unique(map: "users_username_unique")
+  email                                      String               @unique(map: "users_email_unique")
+  phone                                      String?
+  last_login_at                              DateTime?
+  email_verified_at                          DateTime?
+  password                                   String
+  password_changed_at                        DateTime?
+  remember_token                             String?
+  created_at                                 DateTime?
+  updated_at                                 DateTime?
+  deleted_at                                 DateTime?
+  created_by                                 BigInt?              
+  updated_by                                 BigInt?              
+  deleted_by                                 BigInt?              
+  status                                     Int                  @default(0)
+  force_change_password                      Boolean              @default(false)
+  last_property                              BigInt?              
+  pin_enshift                                Int?
+  fcm_token                                  String?
+  schedule_employees                         schedule_employees[]
+  shift_postings                             shift_postings[]
+  shifts                                     shifts[]
+  task_reads                                 task_reads[]
+  tasks_tasks_created_byTousers              tasks[]              @relation("tasks_created_byTousers")
+  tasks_tasks_to_user_idTousers              tasks[]              @relation("tasks_to_user_idTousers")
+  work_orders_work_orders_reported_byTousers work_orders[]        @relation("work_orders_reported_byTousers")
+  work_orders_work_orders_assign_toTousers   work_orders[]        @relation("work_orders_assign_toTousers")
+
+  @@index([name])
+}
+
+model wake_up_calls {
+  id          BigInt     @id @default(autoincrement()) 
+  property_id BigInt     
+  folio_id    BigInt     
+  date        DateTime   
+  time        DateTime?
+  description String?    
+  result      String?    
+  status      Int        @default(0)
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?    
+  updated_by  BigInt?    
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  folios      folios     @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([folio_id])
+  @@index([property_id])
+}
+
+model work_order_stocks {
+  id            BigInt       @id @default(autoincrement()) 
+  property_id   BigInt?      
+  work_order_id BigInt?      
+  stock_id      BigInt?      
+  description   String?      
+  qty           Int?
+  post_gl_id    BigInt?      
+  created_at    DateTime?
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  created_by    BigInt?      
+  updated_by    BigInt?      
+  deleted_by    BigInt?      
+  status        Int          @default(0) 
+  properties    properties?  @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  work_orders   work_orders? @relation(fields: [work_order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  stocks        stocks?      @relation(fields: [stock_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  code_gls      code_gls?    @relation(fields: [post_gl_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([post_gl_id])
+  @@index([property_id])
+  @@index([stock_id])
+  @@index([work_order_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model work_orders {
+  id                                   BigInt              @id @default(autoincrement()) 
+  property_id                          BigInt?             
+  reported_by                          BigInt?             
+  unique_code                          String?
+  area                                 String?
+  work_type                            String?
+  date                                 DateTime?           
+  estimated_time                       DateTime?           
+  room_id                              BigInt?             
+  work_description                     String?             
+  notes                                String?             
+  assign_to                            BigInt?             
+  start_date                           DateTime?           
+  end_date                             DateTime?           
+  start_time                           String?
+  end_time                             String?
+  status_work_order                    Int?
+  status                               Int                 @default(1)
+  created_at                           DateTime?
+  updated_at                           DateTime?
+  deleted_at                           DateTime?
+  created_by                           BigInt?             
+  updated_by                           BigInt?             
+  deleted_by                           BigInt?             
+  images                               String?             
+  work_order_stocks                    work_order_stocks[]
+  properties                           properties?         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_work_orders_reported_byTousers users?              @relation("work_orders_reported_byTousers", fields: [reported_by], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rooms                                rooms?              @relation(fields: [room_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_work_orders_assign_toTousers   users?              @relation("work_orders_assign_toTousers", fields: [assign_to], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([assign_to])
+  @@index([property_id])
+  @@index([room_id])
+  @@index([reported_by])
+}
+
+model yields {
+  id             BigInt      @id @default(autoincrement()) 
+  property_id    BigInt      
+  is_general     Int         
+  room_type_id   BigInt?     
+  start_date     DateTime    
+  end_date       DateTime    
+  min_rate       Decimal
+  occupancy_from Int
+  occupancy_to   Int
+  status         Int         @default(0) 
+  room_types     room_types? @relation(fields: [room_type_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([room_type_id])
+}
+
+enum housekeeping_setups_used_by {
+  hk
+  hkspv
+  both
+}
+
+enum tasks_status {
+  Open
+  In_Progress @map("In Progress")
+  Closed
+  Cancelled
+}
+
+enum tasks_priority {
+  Low
+  Medium
+  High
+  Urgent
+}
+
+enum event_events_status {
+  Tentative
+  Canceled
+  To_Be_Announced @map("To Be Announced")
+  Definitely
+  Fix
+}
