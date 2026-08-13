@@ -6,7 +6,6 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, badRequest, unauthorized, validationError } from '../utils/response';
 import { TokenService } from '../services/token.service';
-import { SUPER_ROLES } from '../config/permissions';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -50,8 +49,25 @@ export class AuthController {
         return;
       }
 
-      // Auto-revoke old session (allow re-login without "User already logged in")
-      await TokenService.revokeAllUserTokens(user.id);
+      // Laravel: reject login if an active token was used within the last 30 minutes
+      // (matches AuthController@login "User already logged in" check)
+      const recentSession = await prisma.personal_access_tokens.count({
+        where: {
+          tokenable_type: 'App\\Models\\User',
+          tokenable_id: user.id,
+          last_used_at: { gt: new Date(Date.now() - 30 * 60 * 1000) },
+        },
+      });
+      if (recentSession > 0) {
+        badRequest(res, 'User already logged in');
+        return;
+      }
+
+      // Record last login (matches Laravel $user->last_login_at = now())
+      await prisma.users.update({
+        where: { id: user.id },
+        data: { last_login_at: new Date() },
+      });
 
       // Get user roles
       const modelRoles = await prisma.model_has_roles.findMany({
@@ -71,7 +87,7 @@ export class AuthController {
       }
 
       // Generate token
-      const { plainTextToken, expiresAt } = await TokenService.createToken(
+      const { plainTextToken, createdAt } = await TokenService.createToken(
         user.id,
         user.email
       );
@@ -79,9 +95,10 @@ export class AuthController {
       // Build permission tree (simplified — full tree in formatData)
       const permissions = await AuthController.buildPermissionTree(user.id, roleIds, roleNames);
 
-      // Check shift status (simplified)
-      const isShift = false;
-      const isNeedShift = false;
+      // Shift + business date (matches Laravel is_shift / is_need_shift / bussinesDate)
+      const businessDate = await AuthController.getBusinessDate(user.last_property);
+      const isShift = await AuthController.getShiftStatus(user.id, user.last_property, businessDate);
+      const isNeedShift = await AuthController.getNeedShift(roleIds);
 
       success(res, {
         name: user.name,
@@ -89,11 +106,11 @@ export class AuthController {
         username: user.username,
         email: user.email,
         access_token: plainTextToken,
-        expires_token: expiresAt.toISOString().replace('T', ' ').substring(0, 19),
+        expires_token: createdAt.toISOString().replace('T', ' ').substring(0, 19),
         force_change_password: user.force_change_password,
         is_shift: isShift,
         is_need_shift: isNeedShift,
-        bussinesDate: new Date().toISOString().substring(0, 10),
+        bussinesDate: businessDate,
         permissions,
       }, 'Success');
     } catch (err: any) {
@@ -108,7 +125,9 @@ export class AuthController {
    */
   static async logout(req: Request, res: Response): Promise<void> {
     try {
-      const tokenHeader = req.headers['x-token'] as string | undefined;
+      // Laravel reads the token from Authorization: Bearer (request->bearerToken);
+      // X-Token is accepted as a fallback for the native apps
+      const tokenHeader = AuthController.getTokenHeader(req);
       if (!tokenHeader) {
         unauthorized(res, 'Invalid token');
         return;
@@ -141,7 +160,8 @@ export class AuthController {
    */
   static async refresh(req: Request, res: Response): Promise<void> {
     try {
-      const tokenHeader = req.headers['x-token'] as string | undefined;
+      // Laravel reads the token from Authorization: Bearer; X-Token fallback
+      const tokenHeader = AuthController.getTokenHeader(req);
       if (!tokenHeader) {
         unauthorized(res, 'Token not provided');
         return;
@@ -184,7 +204,7 @@ export class AuthController {
       await TokenService.revokeToken(tokenRecord.id);
 
       // Create new token
-      const { plainTextToken, expiresAt } = await TokenService.createToken(
+      const { plainTextToken, createdAt } = await TokenService.createToken(
         user.id,
         user.email
       );
@@ -196,17 +216,22 @@ export class AuthController {
         roleNames
       );
 
+      // Shift + business date (same fields as login response)
+      const businessDate = await AuthController.getBusinessDate(user.last_property);
+      const isShift = await AuthController.getShiftStatus(user.id, user.last_property, businessDate);
+      const isNeedShift = await AuthController.getNeedShift(roleIds);
+
       success(res, {
         name: user.name,
         role: roleNames,
         username: user.username,
         email: user.email,
         access_token: plainTextToken,
-        expires_token: expiresAt.toISOString().replace('T', ' ').substring(0, 19),
+        expires_token: createdAt.toISOString().replace('T', ' ').substring(0, 19),
         force_change_password: user.force_change_password,
-        is_shift: false,
-        is_need_shift: false,
-        bussinesDate: new Date().toISOString().substring(0, 10),
+        is_shift: isShift,
+        is_need_shift: isNeedShift,
+        bussinesDate: businessDate,
         permissions,
       }, 'Success');
     } catch (err: any) {
@@ -267,30 +292,118 @@ export class AuthController {
 
       // Get property for ability scope
       const propertyId = authUser.lastProperty || 0;
+      const property = await prisma.properties.findUnique({
+        where: { id: propertyId },
+        select: { name: true, logo: true },
+      });
+
+      // Get user roles
+      const modelRoles = await prisma.model_has_roles.findMany({
+        where: {
+          model_type: 'App\\Models\\User',
+          model_id: user.id,
+        },
+        include: { roles: true },
+      });
+      const roleNames = modelRoles.map(mr => mr.roles.name);
+      const roleIds = modelRoles.map(mr => mr.roles.id);
 
       // Revoke old tokens, create new one
       await TokenService.revokeAllUserTokens(user.id);
-      const { plainTextToken, expiresAt } = await TokenService.createToken(
+      const { plainTextToken, createdAt } = await TokenService.createToken(
         user.id,
         user.email,
         [`can-${propertyId}`]
       );
 
+      // Business date + shift status (matches Laravel changePassword response)
+      const businessDate = await AuthController.getBusinessDate(propertyId === 0 ? null : propertyId);
+      const isShift = await AuthController.getShiftStatus(user.id, propertyId === 0 ? null : propertyId, businessDate);
+      const isNeedShift = await AuthController.getNeedShift(roleIds);
+
       success(res, {
         name: user.name,
-        role: authUser.roles,
+        role: roleNames,
         username: user.username,
         email: user.email,
         access_token: plainTextToken,
-        expires_token: expiresAt.toISOString().replace('T', ' ').substring(0, 19),
+        expires_token: createdAt.toISOString().replace('T', ' ').substring(0, 19),
         force_change_password: false,
-        is_shift: false,
-        is_need_shift: false,
-        bussinesDate: new Date().toISOString().substring(0, 10),
+        is_shift: isShift,
+        is_need_shift: isNeedShift,
+        bussinesDate: businessDate,
+        property_name: property?.name ?? '',
+        property_image: property?.logo ? `/storage/${property.logo}` : null,
       }, 'Success');
     } catch (err: any) {
       console.error('Change password error:', err);
       badRequest(res, 'Change password failed');
+    }
+  }
+
+  /**
+   * POST /api/force-logout/:email
+   * Replicates Laravel AuthController@forceLogout — revokes ALL tokens of a user.
+   */
+  static async forceLogout(req: Request, res: Response): Promise<void> {
+    try {
+      const email = String(req.params.email || '').trim();
+      const user = await prisma.users.findFirst({ where: { email } });
+
+      if (!user) {
+        badRequest(res, 'User not found');
+        return;
+      }
+
+      await TokenService.revokeAllUserTokens(user.id);
+
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Force logout error:', err);
+      badRequest(res, 'Force logout failed');
+    }
+  }
+
+  /**
+   * GET/POST /api/force-bulk-logout
+   * Replicates Laravel AuthController@forceBulkLogout — revokes tokens of all
+   * users sharing the same last_property (except the caller).
+   */
+  static async forceBulkLogout(req: Request, res: Response): Promise<void> {
+    try {
+      const tokenHeader = AuthController.getTokenHeader(req);
+      const tokenRecord = tokenHeader ? await TokenService.findToken(tokenHeader) : null;
+
+      if (!tokenRecord) {
+        unauthorized(res, 'Invalid token');
+        return;
+      }
+
+      const user = await prisma.users.findUnique({
+        where: { id: tokenRecord.tokenable_id },
+      });
+
+      if (!user) {
+        unauthorized(res, 'Invalid token');
+        return;
+      }
+
+      const users = await prisma.users.findMany({
+        where: {
+          last_property: user.last_property,
+          id: { not: user.id },
+        },
+        select: { id: true },
+      });
+
+      for (const u of users) {
+        await TokenService.revokeAllUserTokens(u.id);
+      }
+
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Force bulk logout error:', err);
+      badRequest(res, 'Force bulk logout failed');
     }
   }
 
@@ -344,6 +457,77 @@ export class AuthController {
   }
 
   /**
+   * Read the Sanctum token from X-Token header or Authorization: Bearer.
+   * Matches Laravel's request->bearerToken() with native-app fallback.
+   */
+  private static getTokenHeader(req: Request): string | undefined {
+    const xToken = req.headers['x-token'] as string | undefined;
+    if (xToken) return xToken;
+
+    const authHeader = req.headers['authorization'] as string | undefined;
+    if (authHeader?.startsWith('Bearer ')) return authHeader.slice(7);
+
+    return undefined;
+  }
+
+  /**
+   * Business date: latest log_audits.date for the property + 1 day.
+   * Matches LogAudit::getBusinessDate($request).
+   */
+  private static async getBusinessDate(lastProperty: bigint | null): Promise<string> {
+    const logAudit = await prisma.log_audits.findFirst({
+      where: lastProperty ? { property_id: Number(lastProperty) } : undefined,
+      orderBy: { date: 'desc' },
+    });
+
+    if (logAudit) {
+      const [y, m, d] = logAudit.date.toISOString().substring(0, 10).split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().substring(0, 10);
+    }
+
+    return new Date().toISOString().substring(0, 10);
+  }
+
+  /**
+   * is_shift: user has an open shift for the business date.
+   * Matches Laravel $user->shifts()->where('date', $date)->whereNull('end').
+   */
+  private static async getShiftStatus(
+    userId: bigint,
+    propertyId: bigint | null,
+    businessDate: string
+  ): Promise<boolean> {
+    const start = new Date(businessDate + 'T00:00:00Z');
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+    const count = await prisma.shifts.count({
+      where: {
+        user_id: userId,
+        ...(propertyId ? { property_id: propertyId } : {}),
+        date: { gte: start, lt: end },
+        end: null,
+        deleted_at: null,
+      },
+    });
+    return count > 0;
+  }
+
+  /**
+   * is_need_shift: any of the user's roles is assigned a menu with
+   * visibility = 'transaction'. Matches Laravel $role?->menu?->where('visibility', 'transaction').
+   */
+  private static async getNeedShift(roleIds: bigint[]): Promise<boolean> {
+    const count = await prisma.model_has_menus.count({
+      where: {
+        model_type: 'App\\Models\\Role',
+        model_id: { in: roleIds },
+        menus: { visibility: 'transaction' },
+      },
+    });
+    return count > 0;
+  }
+
+  /**
    * Build permission tree matching Laravel User::formatData()['permissions']
    * Returns menu tree with isaccess flags and CRUD booleans.
    */
@@ -352,8 +536,6 @@ export class AuthController {
     roleIds: bigint[],
     roleNames: string[]
   ): Promise<any[]> {
-    const isSuperUser = roleNames.some(r => (SUPER_ROLES as readonly string[]).includes(r));
-
     // Get CRUD permissions for all user roles
     const crudRecords = await prisma.role_menu_crud.findMany({
       where: { role_id: { in: roleIds } },
@@ -381,19 +563,22 @@ export class AuthController {
     });
     const assignedMenuIds = new Set(assignedMenus.map(m => m.menu_id));
 
-    // Get full menu tree (nested sets)
-    const allMenus = await prisma.menus.findMany({
+    // Get full menu tree (nested sets) — excluding menus Laravel hides
+    // (formatData: where('id', '!=', [15, 5, 6, 14]))
+    const allMenus = (await prisma.menus.findMany({
       orderBy: [{ left: 'asc' }],
-    });
+    })).filter(m => ![5, 6, 14, 15].includes(Number(m.id)));
 
     // Build tree: parent-level nodes, each with access[] children
-    return AuthController.buildMenuTree(
+    const tree = AuthController.buildMenuTree(
       allMenus,
       null, // root nodes have parent_id = null
       assignedMenuIds,
-      crudMap,
-      isSuperUser
+      crudMap
     );
+
+    // Laravel filters out menu 52 from the final output
+    return tree.filter(p => Number(p.value) !== 52);
   }
 
   /**
@@ -404,47 +589,56 @@ export class AuthController {
     menus: any[],
     parentId: bigint | null,
     assignedMenuIds: Set<bigint>,
-    crudMap: Map<bigint, any>,
-    isSuperUser: boolean
+    crudMap: Map<bigint, any>
   ): any[] {
     return menus
       .filter(m => m.parent_id === parentId)
       .map(menu => {
-        const isAccess = isSuperUser || assignedMenuIds.has(menu.id);
+        // isaccess = menu assigned to user (Laravel: in_array($id, $assignedMenuIds))
+        const isAccess = assignedMenuIds.has(menu.id);
         const crud = crudMap.get(menu.id);
 
-        // Parse name (JSON field with en/id translations)
+        // Parse name (JSON field with en/id translations) — Laravel uses name['en']
         let label = menu.name;
         try {
           const parsed = typeof label === 'string' ? JSON.parse(label) : label;
           label = parsed?.en || parsed?.id || menu.name;
         } catch {}
 
+        // Laravel: str($name['en'])->title()->replace(['-', '_'], ' ') then explode('.')
+        const titled = String(label).replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const words = titled.split('.');
+
         const children = AuthController.buildMenuTree(
           menus,
           menu.id,
           assignedMenuIds,
-          crudMap,
-          isSuperUser
+          crudMap
         );
 
         return {
-          key: label.split(/[\s_]+/),
+          key: words,
           value: Number(menu.id),
-          label: label.split(/[\s_]+/),
+          label: words,
           isaccess: isAccess,
           ...(children.length > 0 ? {
-            access: children.map(child => ({
-              label: child.label.join(' '),
-              value: child.value,
-              isaccess: child.isaccess,
-              crud: isSuperUser
-                ? { view: true, add: true, edit: true, delete: true }
-                : (crud
-                    ? { view: crud.view, add: crud.add, edit: crud.edit, delete: crud.delete }
-                    : { view: false, add: false, edit: false, delete: false }),
-              transaction_actions: crud?.transaction_actions || {},
-            })),
+            access: children.map(child => {
+              const childCrud = crudMap.get(BigInt(child.value));
+              return {
+                label: Array.isArray(child.label) ? child.label[child.label.length - 1] : child.label,
+                value: child.value,
+                isaccess: child.isaccess,
+                crud: childCrud
+                  ? {
+                      view: !!childCrud.view,
+                      add: !!childCrud.add,
+                      edit: !!childCrud.edit,
+                      delete: !!childCrud.delete,
+                    }
+                  : { view: false, add: false, edit: false, delete: false },
+                transaction_actions: childCrud?.transaction_actions || {},
+              };
+            }),
           } : {}),
         };
       });

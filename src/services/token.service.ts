@@ -23,7 +23,7 @@ export class TokenService {
     abilities: string[] = []
   ): Promise<{
     plainTextToken: string;
-    expiresAt: Date;
+    createdAt: Date;
   }> {
     // Generate 40 random bytes → base64 → strip padding → first 40 chars
     const randomBytes = crypto.randomBytes(40);
@@ -50,10 +50,11 @@ export class TokenService {
       },
     });
 
-    // Return Sanctum format: "id|plainText"
+    // Return Sanctum format: "id|plainText" + created_at (Laravel uses
+    // token created_at as expires_token in the login response)
     return {
       plainTextToken: `${record.id}|${plainText}`,
-      expiresAt,
+      createdAt: record.created_at ?? new Date(),
     };
   }
 

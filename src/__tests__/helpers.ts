@@ -1,3 +1,6 @@
+// Load .env (APP_AES_PASSWORD etc.) before any module that needs it
+import 'dotenv/config';
+
 import express from 'express';
 import { Request, Response, NextFunction } from 'express';
 
