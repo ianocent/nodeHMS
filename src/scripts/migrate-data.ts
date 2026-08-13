@@ -47,9 +47,6 @@ const coerceValue = (value: any, mysqlType: string): any => {
   // Catch invalid Date objects (NaN time)
   if (value instanceof Date && isNaN(value.getTime())) return null;
 
-  // Catch NaN-corrupted string values
-  if (typeof value === 'string' && value.includes('NaN')) return null;
-
   // Catch "0000-00-00" zero dates / invalid dates
   if (typeof value === 'string' && (value === '0000-00-00' || value.startsWith('0000-00-00'))) return null;
 
@@ -148,9 +145,10 @@ const migrateTable = async (
             await pgClient.query(rowSql, rowValues);
             migrated++;
           } catch (rowErr: any) {
-            // Skip duplicates (23505) and not-null violations (23502)
-            if (rowErr.code === '23505' || rowErr.code === '23502') {
-              // skip
+            if (rowErr.code === '23505') {
+              // skip duplicates silently (common on resync — logging 100k+ rows is too slow)
+            } else if (rowErr.code === '23502') {
+              console.error(`  ! ${tableName} row ${row.id} skipped: ${rowErr.code} ${(rowErr.message || '').split('\n')[0]}`);
             } else {
               throw rowErr;
             }
@@ -171,6 +169,8 @@ const migrateTable = async (
 const main = async () => {
   console.log('Starting data migration from MySQL to PostgreSQL...\n');
 
+  const tableFilter = process.argv.find(a => a.startsWith('--table='))?.split('=')[1];
+
   const mysqlConn = await mysql.createConnection(mysqlConfig);
   const pgClient = await pgPool.connect();
 
@@ -185,6 +185,7 @@ const main = async () => {
     let totalRows = 0;
 
     for (const table of tables) {
+      if (tableFilter && table !== tableFilter) continue;
       const rowCount = await migrateTable(mysqlConn, pgClient, table);
       totalRows += rowCount;
     }

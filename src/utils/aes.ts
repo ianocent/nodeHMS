@@ -1,9 +1,12 @@
 import * as crypto from 'crypto';
 
 const AES_METHOD = 'aes-256-cbc';
-const AES_PASSWORD = process.env.APP_AES_PASSWORD;
-if (!AES_PASSWORD) {
-  throw new Error('APP_AES_PASSWORD is not set in environment');
+function getAesPassword(): string {
+  const pass = process.env.APP_AES_PASSWORD;
+  if (!pass) {
+    throw new Error('APP_AES_PASSWORD is not set in environment');
+  }
+  return pass;
 }
 const IV_SIZE = 16; // AES-256-CBC uses 16-byte IV
 
@@ -13,7 +16,7 @@ const IV_SIZE = 16; // AES-256-CBC uses 16-byte IV
  */
 export function encryptAES(plaintext: string): string {
   const iv = crypto.randomBytes(IV_SIZE);
-  const cipher = crypto.createCipheriv(AES_METHOD, AES_PASSWORD, iv);
+  const cipher = crypto.createCipheriv(AES_METHOD, getAesPassword(), iv);
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
 
   const ivHex = iv.toString('hex');
@@ -35,7 +38,7 @@ export function decryptAES(ciphered: string): string {
   const iv = Buffer.from(parts[0], 'hex');
   const ciphertext = Buffer.from(parts[1], 'hex');
 
-  const decipher = crypto.createDecipheriv(AES_METHOD, AES_PASSWORD, iv);
+  const decipher = crypto.createDecipheriv(AES_METHOD, getAesPassword(), iv);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
   return plaintext.toString('utf8');

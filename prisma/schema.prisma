@@ -332,8 +332,8 @@ model cities {
   country_code                String?
   latitude                    Decimal?
   longitude                   Decimal?
-  created_at                  DateTime                      @default(dbgenerated("'2013-12-31 23:31:01'"))
-  updated_at                  DateTime                      @default(now())
+  created_at                  DateTime?
+  updated_at                  DateTime?
   flag                        Boolean                       @default(true)
   status                      Boolean                       @default(true)
   wikiDataId                  String?
@@ -449,6 +449,7 @@ model code_posts {
   deleted_by                       BigInt?            
   sort                             Int                @default(0)
   status                           Int                @default(0)
+  bars                             bars[]
   code_items                       code_items[]
   code_billings                    code_billings?     @relation(fields: [code_billing_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   properties                       properties         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -1020,7 +1021,7 @@ model deposit_events {
   type_payment_id BigInt    
   amount          Int?
   created_at      DateTime  @default(now())
-  updated_at      DateTime  @default(dbgenerated("'0000-00-00 00:00:00'"))
+  updated_at      DateTime  @default(now())
   deleted_at      DateTime?
   created_by      BigInt?   
   updated_by      BigInt?   
@@ -1526,6 +1527,9 @@ model folios {
   accountings                                                  accountings[]
   billing_tos                                                  billing_tos[]
   deposit_payments                                             deposit_payments[]
+  pre_registration_token                                        String?
+  pre_registration_expires_at                                    DateTime?
+  pre_registration_completed_at                                  DateTime?
   doorlock_duplicate_counters                                  doorlock_duplicate_counters[]
   event_events                                                 event_events[]
   properties                                                   properties                    @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -1549,6 +1553,8 @@ model folios {
   @@index([is_payment_booking_engine])
   @@index([property_id])
   @@index([status_reservation])
+  @@index([pre_registration_token])
+  @@index([folio_number, pre_registration_completed_at])
 }
 
 model guest_profile_documents {
@@ -1911,8 +1917,8 @@ model jobs {
   payload      String    
   attempts     Int       
   reserved_at  DateTime?
-  available_at DateTime  @default(dbgenerated("'0000-00-00 00:00:00'"))
-  created_at   DateTime  @default(dbgenerated("'0000-00-00 00:00:00'"))
+  available_at DateTime  @default(now())
+  created_at   DateTime  @default(now())
 }
 
 model last_user_folios {
@@ -2538,6 +2544,9 @@ model properties {
   accountings                              accountings[]
   allotments                               allotments[]
   baggages                                 baggages[]
+  bar_inclusives                           bar_inclusives[]
+  bar_rates                                bar_rates[]
+  bars                                     bars[]
   billing_tos                              billing_tos[]
   car_parks                                car_parks[]
   channel_manager_rate_plans               channel_manager_rate_plans[]
@@ -2811,8 +2820,8 @@ model regions {
   id           BigInt       @id @default(autoincrement()) 
   name         String
   translations String?      
-  created_at   DateTime?
-  updated_at   DateTime     @default(now())
+  created_at                  DateTime?
+  updated_at                  DateTime?
   flag         Boolean      @default(true)
   wikiDataId   String?
   countries    countries[]
@@ -3213,6 +3222,7 @@ model room_types {
   deleted_by                                                                     BigInt?                         
   sort                                                                           Int                             @default(0)
   status                                                                         Int                             @default(0)
+  bar_rates                                                                       bar_rates[]
   channel_manager_room_types_channel_manager_room_types_room_type_idToroom_types channel_manager_room_types[]    @relation("channel_manager_room_types_room_type_idToroom_types")
   channel_manager_room_types_channel_manager_room_types_room_typeToroom_types    channel_manager_room_types[]    @relation("channel_manager_room_types_room_typeToroom_types")
   dynamic_rate_results                                                           dynamic_rate_results[]
@@ -3246,7 +3256,7 @@ model rooms {
   total_bed                Int                        @default(0)
   with_tv                  Int                        @default(0)
   with_shower              Int                        @default(0)
-  cleaning_time            DateTime                   @default(dbgenerated("'00:00:00'"))
+  cleaning_time            DateTime                   @default(dbgenerated("'1970-01-01 00:00:00'"))
   linen_days               Int                        @default(0)
   remark                   String?
   room_status              Int                        @default(0)
@@ -4207,4 +4217,63 @@ enum event_events_status {
   To_Be_Announced @map("To Be Announced")
   Definitely
   Fix
+}
+
+model bars {
+  id             BigInt    @id @default(autoincrement())
+  property_id    BigInt
+  code_post_id   BigInt
+  name           String
+  description    String?
+  start_date     DateTime
+  end_date       DateTime
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?
+  updated_by     BigInt?
+  deleted_by     BigInt?
+  sort           Int       @default(0)
+  status         Int       @default(0)
+  properties     properties      @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  code_posts     code_posts      @relation(fields: [code_post_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  bar_inclusives bar_inclusives[]
+  bar_rates      bar_rates[]
+
+  @@index([property_id])
+  @@index([code_post_id])
+}
+
+model bar_inclusives {
+  id          BigInt    @id @default(autoincrement())
+  property_id BigInt
+  bar_id      BigInt
+  description String?
+  frequency   String?
+  cost        String?
+  cost_on     String?
+  updated_at  DateTime?
+  updated_by  BigInt?
+  properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  bars        bars       @relation(fields: [bar_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([bar_id])
+}
+
+model bar_rates {
+  id           BigInt    @id @default(autoincrement())
+  property_id  BigInt
+  bar_id       BigInt
+  room_type_id BigInt
+  date         DateTime
+  updated_at   DateTime?
+  updated_by   BigInt?
+  properties   properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  bars         bars       @relation(fields: [bar_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  room_types   room_types @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([property_id])
+  @@index([bar_id])
+  @@index([room_type_id])
 }
