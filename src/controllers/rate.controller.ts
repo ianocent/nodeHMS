@@ -84,38 +84,79 @@ export class RateController {
         ];
       }
 
-      const [rates, total] = await Promise.all([
+      const [rates, total, allCodePosts] = await Promise.all([
         prisma.rates.findMany({
           where,
           orderBy: { [sort]: order },
           skip: (page - 1) * limit,
           take: limit,
-          include: {
-            code_posts: { select: { id: true, name: true } },
-          },
         }),
         prisma.rates.count({ where }),
+        prisma.code_posts.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
       ]);
 
+      const codePostById = new Map(allCodePosts.map((cp: any) => [cp.id, cp.name]));
+      const codePostOptions = allCodePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name }));
+
       const formatted = rates.map((r: any) => ({
-        ...r,
         id: Number(r.id),
-        property_id: Number(r.property_id),
-        code_post_id: Number(r.code_post_id),
-        minimum_rate: Number(r.minimum_rate),
+        name: r.module == 'rate' ? r.name : 'BAR',
+        description: r.description,
+        rate_type: r.rate_type,
+        online: r.online === 1,
+        staah: r.staah === true,
+        staah_ori: r.staah === true,
+        print_rate: r.print_rate === 1,
+        is_day_use: r.is_day_use === true,
+        min_advance_booking: r.min_advance_booking,
+        max_advance_booking: r.max_advance_booking,
+        code: r.code,
+        contract_rate: { value: Number(r.id), label: r.code },
+        code_color: [{ value: r.code, label: r.code }],
+        is_color: true,
+        sort_by_company: r.module == 'rate' ? 2 : 3,
+        color: r.module == 'rate' ? 'bg-primary' : 'bg-secondary',
         start_date: r.start_date ? formatDate(r.start_date) : null,
         end_date: r.end_date ? formatDate(r.end_date) : null,
-        code_post: r.code_posts ? { id: Number(r.code_posts.id), name: r.code_posts.name } : null,
-        code_posts: undefined,
+        term_condition: r.term_condition,
+        cancellation_policy: r.cancellation_policy,
+        notes: r.notes,
+        code_post_id: {
+          value: r.code_post_id ? Number(r.code_post_id) : null,
+          label: codePostById.get(r.code_post_id) || '',
+        },
+        code_post_extra_bed_id: {
+          value: r.code_post_extra_bed_id ? Number(r.code_post_extra_bed_id) : null,
+          label: codePostById.get(r.code_post_extra_bed_id) || '',
+        },
+        sort: r.sort,
+        status: r.status,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
       }));
 
       const table = [
-        { label: 'Code', key: 'code', type: 'none', is_search: true },
-        { label: 'Name', key: 'name', type: 'none', is_search: true },
-        { label: 'Start Date', key: 'start_date', type: 'none', is_search: false },
-        { label: 'End Date', key: 'end_date', type: 'none', is_search: false },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false },
+        {
+          label: 'Status',
+          key: 'status',
+          type: 'checkbox',
+          options: [
+            { value: 1, label: 'Active' },
+            { value: 0, label: 'Inactive' },
+          ],
+          is_search: true,
+        },
+        { label: 'Rate Code', key: 'code', type: 'text', is_link: true, uri: '/rate-management/rate', is_search: true },
+        { label: 'Name', key: 'name', type: 'text', is_search: true },
+        { label: 'Description', key: 'description', type: 'text', is_search: true },
+        { label: 'Start Date', key: 'start_date', type: 'date', is_search: true },
+        { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
+        { label: 'Post Code', key: 'code_post_id', type: 'select', options: codePostOptions, is_search: true },
+        { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
       ];
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
@@ -185,7 +226,7 @@ export class RateController {
         fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
       };
 
-      success(res, master, 'Success');
+      success(res, master, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Rate create form error:', err);
       error(res, 'Failed to load form data', 500);
@@ -398,7 +439,7 @@ export class RateController {
         return;
       }
 
-      const { name, code, start_date, end_date, code_post_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, status } = req.body;
+      const { name, code, start_date, end_date, code_post_id, code_post_extra_bed_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, status } = req.body;
 
       const data: any = {
         description: description || null,
@@ -420,6 +461,7 @@ export class RateController {
       if (name !== undefined && name !== null && name !== '') data.name = name;
       if (code !== undefined && code !== null && code !== '') data.code = code;
       if (code_post_id !== undefined && code_post_id !== null && code_post_id !== '') data.code_post_id = BigInt(code_post_id);
+      if (code_post_extra_bed_id !== undefined && code_post_extra_bed_id !== null && code_post_extra_bed_id !== '') data.code_post_extra_bed_id = BigInt(code_post_extra_bed_id);
       if (start_date !== undefined && start_date !== null && start_date !== '') data.start_date = new Date(start_date);
       if (end_date !== undefined && end_date !== null && end_date !== '') data.end_date = new Date(end_date);
 
@@ -1198,7 +1240,7 @@ export class RateController {
         fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
       };
 
-      success(res, master, 'Success');
+      success(res, master, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Bar rate create error:', err);
       error(res, 'Failed to load bar rate form data', 500);

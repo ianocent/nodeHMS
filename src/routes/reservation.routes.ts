@@ -34,6 +34,10 @@ router.post('/reservations/:id/unassign-room', authMiddleware, requirePermission
 router.post('/reservations/:id/replicate', authMiddleware, requirePermission(80, 'add'), ReservationController.replicate);
 router.post('/reservations/:id/assign-room', authMiddleware, requirePermission(80, 'edit'), ReservationController.assignRoom);
 
+// ── Reservation items (room grid per folio, ReservationItemController parity) ──
+router.get('/reservation-item', authMiddleware, requirePermission(80, 'view'), ReservationController.reservationItemIndex);
+router.put('/reservation-item/:id', authMiddleware, requirePermission(80, 'edit'), ReservationController.reservationItemUpdate);
+
 // ── Singular static routes ──
 router.get('/reservation', authMiddleware, requirePermission(80, 'view'), ReservationController.list);
 router.get('/reservation/create', authMiddleware, requirePermission(80, 'add'), ReservationController.create);

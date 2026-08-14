@@ -145,6 +145,263 @@ export class ReservationController {
   }
 
   // ─────────────────────────────────────────────
+  // GET /cms/reservation-item (ReservationItemController parity - room grid per folio)
+  // ─────────────────────────────────────────────
+  static async reservationItemIndex(req: Request, res: Response): Promise<void> {
+    const tableRom = [
+      { label: 'Doc Date', key: 'date', type: 'none', is_search: true },
+      { label: 'Company', key: 'company_id', type: 'select', is_search: true },
+      { label: 'Type', key: 'room_type_id', type: 'select', is_search: true },
+      { label: 'Room', key: 'room_id', type: 'select', is_search: true },
+      { label: 'Total', key: 'total', type: 'text', is_search: true },
+      { label: 'Reason', key: 'remark_room', type: 'select', is_search: true },
+      { label: 'Market Segment 1', key: 'market_segment_1', type: 'select', is_search: true },
+      { label: 'Market Segment 2', key: 'market_segment_2', type: 'select', is_search: true },
+      { label: 'Market Segment 3', key: 'market_segment_3', type: 'select', is_search: true },
+      { label: 'Market Segment 4', key: 'market_segment_4', type: 'select', is_search: true },
+      { label: 'Source', key: 'source', type: 'select', is_search: true },
+      { label: 'Staf', key: 'updated_by', type: 'text', is_search: true },
+    ];
+
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 9999;
+      const folioIdParam = req.query.folio_id as string;
+      const permission = {
+        view: true,
+        add: true,
+        edit: true,
+        delete: true,
+      };
+      const pagging = (total: number) => ({
+        current_page: page,
+        last_page: Math.ceil(total / limit),
+        per_page: limit,
+        total,
+        from: total === 0 ? 0 : (page - 1) * limit + 1,
+        to: Math.min(page * limit, total),
+      });
+      const empty = (msg: string) =>
+        success(res, [], 'No guest ID provided.', 200, {
+          table: tableRom,
+          pagging: pagging(0),
+          permission,
+          search_data: [],
+        });
+
+      if (!folioIdParam) {
+        empty('folio_id required');
+        return;
+      }
+
+      const folio = await prisma.folios.findUnique({ where: { id: BigInt(folioIdParam) } });
+      if (!folio || folio.deleted_at) {
+        empty('folio not found');
+        return;
+      }
+
+      const [rows, types, property, reasonTypes] = await Promise.all([
+        prisma.reservations.findMany({
+          where: { folio_id: folio.id, deleted_at: null },
+          orderBy: { date: 'asc' },
+          include: { rates: { select: { code: true } } },
+        }),
+        prisma.types.findMany({
+          where: {
+            deleted_at: null,
+            status: STATUS_ACTIVE,
+            group: { in: ['remark-room', 'market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'] },
+          },
+          select: { id: true, name: true, group: true },
+        }),
+        prisma.properties.findUnique({
+          where: { id: req.user?.lastProperty as bigint },
+          select: { id: true, name: true, market_segment_1: true, market_segment_2: true, market_segment_3: true, market_segment_4: true },
+        }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+
+      const rowIds = rows.map((r) => r.id);
+      const mht = await prisma.model_has_types.findMany({
+        where: { model_type: 'App\\Models\\Reservation', model_id: { in: rowIds } },
+        include: { types: true },
+      });
+      const typeByRow: Record<string, any[]> = {};
+      for (const m of mht) {
+        (typeByRow[String(m.model_id)] = typeByRow[String(m.model_id)] || []).push(m.types);
+      }
+      const typeGroup = (rowId: bigint, group: string) => {
+        const list = typeByRow[String(rowId)] || [];
+        const found = list.find((t) => t.group === group);
+        return found ? { value: Number(found.id), label: found.name } : [];
+      };
+
+      const statusReservationMap: Record<number, string> = {
+        0: 'Check In',
+        1: 'Check Out',
+        2: 'Cancelled',
+        3: 'Reservation',
+        4: 'In House',
+        5: 'Pending',
+      };
+
+      const data = rows.map((r: any) => ({
+        id: Number(r.id),
+        rate_id: r.rate_id ? Number(r.rate_id) : null,
+        rate: {
+          value: r.rate_id ? Number(r.rate_id) : null,
+          label: r.rate_name || r.rates?.code || '',
+        },
+        action_table: r.is_posting ? false : true,
+        date: r.date,
+        remark_room: typeGroup(r.id, 'remark-room'),
+        market_segment_1: typeGroup(r.id, 'market-segment-1'),
+        market_segment_2: typeGroup(r.id, 'market-segment-2'),
+        market_segment_3: typeGroup(r.id, 'market-segment-3'),
+        market_segment_4: typeGroup(r.id, 'market-segment-4'),
+        source: typeGroup(r.id, 'source'),
+        company_id: r.company_profile_name || null,
+        company_idx: r.company_profile_id ? Number(r.company_profile_id) : null,
+        rate_price: Number(r.amount || 0),
+        total_extra_bed: Number(r.total_extra_bed || 0),
+        total: Number(r.total || 0),
+        check_in_date: r.check_in_date,
+        check_out_date: r.check_out_date,
+        room_type_id: {
+          value: r.room_type_id ? Number(r.room_type_id) : null,
+          label: r.room_type_name || '',
+        },
+        room_type: r.room_type_name || '',
+        room_id: {
+          value: r.room_id ? Number(r.room_id) : null,
+          label: r.room_name || '',
+        },
+        room: r.room_name || '',
+        stay: '0',
+        night: r.night,
+        status_reservation: {
+          value: r.status_reservation ?? 0,
+          label: statusReservationMap[r.status_reservation ?? 0] || 'Pending',
+        },
+        adult: r.adult,
+        child: r.child,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        deleted_at: r.deleted_at,
+        created_by: r.created_by ? Number(r.created_by) : null,
+        deleted_by: r.deleted_by ? Number(r.deleted_by) : null,
+        status: r.status,
+      }));
+
+      const marketProperty = property
+        ? {
+            id: Number(property.id),
+            name: property.name,
+            is_market_segment_1: property.market_segment_1 === true,
+            is_market_segment_2: property.market_segment_2 === true,
+            is_market_segment_3: property.market_segment_3 === true,
+            is_market_segment_4: property.market_segment_4 === true,
+          }
+        : {};
+
+      success(res, data, 'Success', 200, {
+        table: tableRom,
+        pagging: pagging(data.length),
+        permission,
+        folio: reservationBn(folio),
+        market_property: marketProperty,
+        master: {
+          reasons: reasonTypes.map((t) => ({ value: t.name, label: t.name })),
+        },
+        search_data: [],
+      });
+    } catch (err: any) {
+      console.error('Reservation item index error:', err);
+      error(res, 'Failed to fetch reservation items', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // PUT /cms/reservation-item/:id (ReservationItemController update parity - basic)
+  // ─────────────────────────────────────────────
+  static async reservationItemUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = BigInt(idParam);
+      const userId = req.user?.id;
+
+      const existing = await prisma.reservations.findUnique({ where: { id } });
+      if (!existing || existing.deleted_at) {
+        notFound(res, 'Not Found');
+        return;
+      }
+
+      const { rate_id, room_type_id, room_id, remark_room, total, market_segment_1, market_segment_2, market_segment_3, market_segment_4, apply_mode } = req.body;
+
+      const data: any = {
+        updated_by: userId,
+        updated_at: new Date(),
+      };
+      if (rate_id !== undefined && rate_id !== null && rate_id !== '') data.rate_id = BigInt(rate_id);
+      if (room_type_id !== undefined && room_type_id !== null && room_type_id !== '') data.room_type_id = BigInt(room_type_id);
+      if (room_id !== undefined && room_id !== null && room_id !== '') data.room_id = BigInt(room_id);
+      if (total !== undefined && total !== null && total !== '') data.total = Number(total);
+
+      await prisma.reservations.update({ where: { id }, data });
+
+      const typeMap: Record<string, any> = {
+        remark_room: remark_room,
+        market_segment_1: market_segment_1,
+        market_segment_2: market_segment_2,
+        market_segment_3: market_segment_3,
+        market_segment_4: market_segment_4,
+      };
+      for (const [group, typeId] of Object.entries(typeMap)) {
+        if (typeId === undefined || typeId === null || typeId === '') continue;
+        const existingType = await prisma.model_has_types.findFirst({
+          where: { model_type: 'App\\Models\\Reservation', model_id: id, types: { group } },
+        });
+        const typeIdBig = BigInt(typeId);
+        if (existingType) {
+          if (existingType.type_id !== typeIdBig) {
+            await prisma.model_has_types.updateMany({
+              where: { type_id: existingType.type_id, model_type: 'App\\Models\\Reservation', model_id: id },
+              data: { type_id: typeIdBig },
+            });
+          }
+        } else {
+          await prisma.model_has_types.create({
+            data: { type_id: typeIdBig, model_type: 'App\\Models\\Reservation', model_id: id },
+          });
+        }
+      }
+
+      if (apply_mode === 'following' || apply_mode === 'all') {
+        await prisma.reservations.updateMany({
+          where: { folio_id: existing.folio_id, deleted_at: null, date: { gt: existing.date } },
+          data: {
+            rate_id: data.rate_id ?? existing.rate_id,
+            room_type_id: data.room_type_id ?? existing.room_type_id,
+            room_id: data.room_id ?? existing.room_id,
+            updated_by: userId,
+            updated_at: new Date(),
+          },
+        });
+      }
+
+      const updated = await prisma.reservations.findUnique({ where: { id } });
+      success(res, reservationBn(updated), 'Success');
+    } catch (err: any) {
+      console.error('Reservation item update error:', err);
+      error(res, 'Failed to update reservation item', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────
   // GET /api/reservations/create
   // ─────────────────────────────────────────────
   static async create(req: Request, res: Response): Promise<void> {

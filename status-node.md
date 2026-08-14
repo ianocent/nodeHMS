@@ -176,3 +176,11 @@ Other notes:
 - frontend-node/components/pages/rate/form/index.tsx: options index misaligned - data[5]=comm_codes, data[6]=code_posts, data[7]=company_types, data[8]=cancelations, data[10]=code_posts -> Post Code/Grouping/Extra Bed dropdowns empty; fixed: data[7]=code_posts, data[8]=company_types, data[9]=cancelations, data[11]=code_posts
 - prisma client regenerated (stale since 2026-07-15; bars model missing from generated types)
 - tsc clean + jest 69/69
+
+## 2026-08-14 rate form master meta + reservation-item + rate list parity (fd1503c)
+- **rate.controller.ts create() (line ~188) + barRateCreate(): `success(res, master, 'Success')` tanpa meta { master }** -> response punya data=master tapi `master` field ABSENT -> frontend `datauser?.master?.days` undefined -> CheckBoxBase.tsx:106 `options.map` crash (Rate Bar "Tab Rate" crash root cause). Fixed: success(res, master, 'Success', 200, { master }).
+- **reservation-item** (ReservationItemController parity, room grid per folio): `reservationItemIndex` + `reservationItemUpdate` in reservation.controller.ts + routes GET /reservation-item + PUT /reservation-item/:id (registered in reservation.routes.ts). Was 404 -> folio detail "Tab Reservation/Room" loading forever. Rows: formatData parity (rate/room_type/room_id/remark_room/market_segment_1-4/source via model_has_types morph groups, company_id, total, status_reservation map 0-5). table = formatTableRom (12 cols). meta folio/market_property/reasons added to ApiMeta.
+- **rate list table -> full Laravel parity**: code column is_link=true uri=/rate-management/rate (klik Code -> edit form page; TableView is_link branch), all columns inline-editable (status checkbox, code/name/description text, start/end date, code_post_id + code_post_extra_bed_id select dgn options code_posts). Rows formatData parity (code_post_id {value,label}, online/staah/print_rate bools, contract_rate, code_color, sort_by_company/color).
+- rate update handler: + code_post_extra_bed_id support.
+- /bar/inclusives verified: Laravel BarRelationController.index juga pakai rate_inclusives by rate_id=bar.id -> node inclusiveList parity OK (no change).
+- tsc clean + jest 69/69.
