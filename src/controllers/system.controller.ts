@@ -3,6 +3,13 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+
+// Helper: coerce sort/status to number (matches Laravel int casting)
+function num(v: any, fallback = 0): number {
+  if (v === undefined || v === null || v === '') return fallback;
+  const n = Number(v);
+  return isNaN(n) ? fallback : n;
+}
 import { encrypt } from '../utils/encryption';
 import { setupTable, postCodeBudgetTable, laravelPaging, crudPermission } from '../utils/tableMeta';
 
@@ -425,7 +432,7 @@ export class SystemController {
           description: description || null,
           text: text || null,
           image: image || null,
-          sort: sort ?? 0,
+          sort: num(sort),
           status: status === true || status === 'true' ? 1 : (status ?? 1),
           created_at: new Date(),
           updated_at: new Date(),
@@ -455,7 +462,7 @@ export class SystemController {
       if (description !== undefined) data.description = description;
       if (text !== undefined) data.text = text;
       if (image !== undefined) data.image = image;
-      if (sort !== undefined) data.sort = sort;
+      if (sort !== undefined) data.sort = num(sort);
       if (status !== undefined) data.status = status === true || status === 'true' ? 1 : status;
 
       await getPrisma().types.update({ where: { id }, data });

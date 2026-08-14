@@ -61,6 +61,33 @@ export const IS_TAX_EXCLUDE_RESTAURANTS: OptionItem[] = [
   { value: false, label: 'No' },
 ];
 
+export const DASHBOARDS: OptionItem[] = [
+  { value: 'total_room', label: 'Total Room' },
+  { value: 'chart_room', label: 'Chart Room' },
+  { value: 'daily_room_revenue_forecast', label: 'Daily Room Revenue Forecast' },
+  { value: 'today_revenue', label: 'Today Revenue' },
+  { value: 'departure', label: 'Departure' },
+  { value: 'arrival_git', label: 'Arrival GIT' },
+  { value: 'arrival_fit', label: 'Arrival FIT' },
+  { value: 'total_arrival_git_fit', label: 'Total Arrival GIT & FIT' },
+  { value: 'forecast', label: 'Forecast' },
+  { value: 'chart_analysis_history_forecast', label: 'Chart Analysis History & Forecast' },
+  { value: 'total_room_revenue', label: 'Total Room Revenue' },
+  { value: 'maps', label: 'Maps' },
+  { value: 'market_segment_1', label: 'Market Segment 1' },
+  { value: 'market_segment_2', label: 'Market Segment 2' },
+  { value: 'market_segment_3', label: 'Market Segment 3' },
+  { value: 'market_segment_4', label: 'Market Segment 4' },
+  { value: 'hotel_competitor', label: 'Hotel Competitor' },
+  { value: 'house_use_complimentary', label: 'House Use & Complimentary' },
+  { value: 'mtd_actual_vs_budget', label: 'MTD Actual vs Budget' },
+  { value: 'room_sold_per_segment', label: 'Room Sold per Segment' },
+  { value: 'forecast_per_room_sold', label: 'Forecast per Room Sold' },
+  { value: 'room_sold_rbv_vs_ro', label: 'Room Sold RBV vs RO' },
+  { value: 'notifications', label: 'Notifications' },
+  { value: 'guest_requests', label: 'Guest Requests' },
+];
+
 export function moneyFormat(value: number | string | null | undefined): string {
   const num = Number(value ?? 0);
   if (Number.isNaN(num)) return '0,00';

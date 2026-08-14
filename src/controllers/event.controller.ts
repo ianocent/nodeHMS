@@ -169,21 +169,35 @@ export class EventController {
   }
 
   // ==================== EVENT ====================
-  static async eventList(req: Request, res: Response): Promise<void> {
+static async eventList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { property_id: pid };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
+      const include = {
+        event_venues: { select: { name: true } },
+        event_packages: { select: { name: true } },
+        event_layouts: { select: { name: true } },
+      };
       const [data, total] = await Promise.all([
-        prisma.event_events.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit, include: { event_venues: { select: { name: true } }, event_packages: { select: { name: true } }, event_layouts: { select: { name: true } } } }),
+        prisma.event_events.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit, include }),
         prisma.event_events.count({ where }),
       ]);
 
-      const permFlags = getPermissionFlags(req.user, 211);
       success(res, bigintToNumber(data), 'Success', 200, {
-        permission: { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete },
+        table: [
+          { label: 'No', key: 'sort', type: 'number', is_search: false },
+          { label: 'Name', key: 'name', type: 'text', is_search: true },
+          { label: 'Venue', key: 'event_venues.name', type: 'text', is_search: true },
+          { label: 'Package', key: 'event_packages.name', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true },
+        ],
+        search_data: [
+          { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }] },
+        ],
+        permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Event list error:', err); error(res, 'Failed to list events', 500); }
@@ -298,6 +312,17 @@ export class EventController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: [
+          { label: 'No', key: 'sort', type: 'number', is_search: false },
+          { label: 'Name', key: 'name', type: 'text', is_search: true },
+          { label: 'Venue', key: 'venue_id', type: 'number', is_search: true },
+          { label: 'Layout', key: 'layout_id', type: 'number', is_search: true },
+          { label: 'Capacity', key: 'max_capacity', type: 'number', is_search: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true },
+        ],
+        search_data: [
+          { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }] },
+        ],
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });

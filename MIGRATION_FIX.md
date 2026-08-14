@@ -351,3 +351,10 @@ Audit probe (`probe-all.js`) nge-hits semua GLOBALURI frontend; semua 5xx dibere
 - **Form Overbooking/Allotment**: generic createForm/editForm master {} -> statuses default, overbooking + room_types/business_date, allotment + company_guest.
 - **Halaman Reservation Fit Transaction 404**: /cms/transaction/create, /cms/transaction/folio, /cms/code-post/get-charge, /cms/code-post/get-code-items, /cms/reservation/ledger/move/:id semuanya salah route/404 -> keimplementasi (parity Laravel), PUT /front-desk/data/:id buat save remark.
 - utils/cmsConfig.ts (list config + moneyFormat + parity CodePost::calculate). tsc bersih + jest 69/69.
+## 2026-08-14 (sesi 5) sweep final zero-5xx — `2d9363e` (kepush)
+- Probe sweep 1332 reqs / 333 endpoint `/cms`: zero 5xx, semua list 200.
+- `codeGlGetGl` (MasterDataController) — parity `CodeGLSController@getGL`: search name/description, map `{id: Number, name: description(name)}`.
+- `/rate/extra-bed/inclusives` CRUD (parity `RateExtraBedInclusiveController`) didaftarin sebelum `/rate/:rateId/inclusives`; extraBedList/extraBedInclusive toleran rate_id non-numeric -> empty 200.
+- `/room-type/get-configuration/:id`, `/room-type/get-room/:id`, `/room-type/get-room-v2/:id` static sebelum `/room-type/:id` (param shadow) + handler RoomController (+201).
+- frontend-node `997aba8`: form rate dropdown options index (data[7]/[8]/[9]/[11]).
+- package-lock.json frontend-node dihapus. Issues nodeHMS #6 #7 #8 closed. Sisa: #3 STAAH jobs/ARI, #4 diff endpoint, #5 cutover.

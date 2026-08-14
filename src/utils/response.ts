@@ -36,7 +36,7 @@ export function success(
   meta?: ApiMeta
 ): Response {
   return sendEncrypted(res, code, {
-    code: String(code),
+    code,
     message,
     data,
     ...(meta?.permission ? { permission: meta.permission } : {}),
@@ -67,7 +67,7 @@ export function error(
   errors: any = null
 ): Response {
   return sendEncrypted(res, code, {
-    code: String(code),
+    code,
     message,
     data: null,
     ...(errors ? { errors } : {}),

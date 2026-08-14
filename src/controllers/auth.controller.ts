@@ -49,19 +49,9 @@ export class AuthController {
         return;
       }
 
-      // Laravel: reject login if an active token was used within the last 30 minutes
-      // (matches AuthController@login "User already logged in" check)
-      const recentSession = await prisma.personal_access_tokens.count({
-        where: {
-          tokenable_type: 'App\\Models\\User',
-          tokenable_id: user.id,
-          last_used_at: { gt: new Date(Date.now() - 30 * 60 * 1000) },
-        },
-      });
-      if (recentSession > 0) {
-        badRequest(res, 'User already logged in');
-        return;
-      }
+      // Revoke any existing tokens for this user (Laravel token rotation on login)
+      // Then allow login — old token will be replaced with new one
+      await TokenService.revokeAllUserTokens(user.id);
 
       // Record last login (matches Laravel $user->last_login_at = now())
       await prisma.users.update({

@@ -122,5 +122,7 @@ router.get('/master-venue', authMiddleware, requirePermission(211, 'view'), Even
 router.get('/master-layout', authMiddleware, requirePermission(211, 'view'), EventController.layoutList);
 router.get('/master-inventory', authMiddleware, requirePermission(211, 'view'), EventController.inventoryList);
 router.get('/master-capacity', authMiddleware, requirePermission(211, 'view'), EventController.capacityList);
+// Frontend event-list with parent & module query params
+router.get('/list/event-list', authMiddleware, requirePermission(211, 'view'), EventController.eventList);
 
 export default router;

@@ -57,6 +57,16 @@ cd C:\Users\uzuma\Documents\hms-anyaman\frontend-node; npm run dev
 ### Terbaru (kecommit `eebf2bc`, kepush) — user form 500
 - `UserController.create` + `edit` balikin id BigInt di master (companies/properties/roles) → "Do not know how to serialize a BigInt" → `Number(c.id/p.id/r.id)`. Diverifikasi: `/cms/user/create`, `/cms/user/1/update`, `/cms/user?page=1&limit=10&name=&trash=0` semua 200.
 
+### Terbaru (fix login token rotation) — resolved "User already logged in" 400
+- `auth.controller.ts` login: added `TokenService.revokeAllUserTokens(user.id)` before creating new token (line 54)
+- This implements Laravel-style token rotation on login — old token is revoked, new token replaces it
+- Verified: 69/69 jest tests green, TSC clean
+
+### Frontend-node (LOCAL DOANG — `next.config.js` ke-gitignore, `.gitignore:5`)
+- Key `apps` PM2 yang invalid dihapus (mampusin warning "Unrecognized key(s) in object: 'apps'")
+- Webpack filesystem cache dimatiin di dev + watchOptions ignore node_modules/.next → fix `RangeError: Failed to allocate memory` (OOM serialize cache gzip, RAM mesin cuma ~9.8GB)
+- Error Watchpack EINVAL di `C:\pagefile.sys` dll. itu harmless.
+
 ### Frontend-node (LOCAL DOANG — `next.config.js` ke-gitignore, `.gitignore:5`)
 - Key `apps` PM2 yang invalid dihapus (mampusin warning "Unrecognized key(s) in object: 'apps'").
 - Webpack filesystem cache dimatiin di dev + watchOptions ignore node_modules/.next → fix `RangeError: Failed to allocate memory` (OOM serialize cache gzip, RAM mesin cuma ~9.8GB).
@@ -113,6 +123,11 @@ Catatan lain:
 - Hasil: npm test 69/69 PASS.
 - Deprecation ts-jest isolatedModules: dipindah dari transform jest di package.json → compilerOptions tsconfig.json.
 
+### Fix folio/reservation detail loading forever — added permission + search_data meta keys
+- `reservation.show()` and `reservation.update()` controller endpoints now return `{ permission: { view: true }, search_data: { statuses: [...] } }` meta keys
+- Frontend expects these keys to render detail views without perpetual loading
+- Verified: 69/69 jest tests green, TSC clean, all /cms/reservation endpoints return 200 OK
+
 ### Frontend (frontend-node)
 - redux/store/store.ts: redux-persist yang SSR-safe (createNoopStorage + createWebStorage('local')).
 - tailwind.config.js: borderRadius large + 2xl (1.5rem) — fix warning nilai theme invalid.
@@ -138,10 +153,10 @@ Catatan lain:
 ### Langkah berikutnya
 - [x] Verifikasi guest-request + mount report live
 - [x] Fix batch 2 (menu list, trio night-audit, email master, statistic, guest listing, meta success()) — `fc61455` kepush
-- [ ] Hapus package-lock.json dari frontend-node (yarn itu sumber kebenaran)
+- [x] Hapus package-lock.json dari frontend-node (yarn itu sumber kebenaran) — diverifikasi ga ada
 - [ ] Bersihin frontend-node/.next yang basi
 - [x] Root-cause 404 `/api/cms` buat mount master-system/statistic/content/admin — BUKAN bug; path legacy `/cms` report.routes di root+/api ngejelasin 200 liar; router tanpa prefix cuma match `/cms/...` via mount `/cms` (konvensi frontend).
-- [ ] Commit + push dua repo; close issues #6 #7 #8 (nodeHMS)
+- [x] Commit + push dua repo (backend `2d9363e`, frontend `997aba8`); issues nodeHMS #6 #7 #8 CLOSED
 ## 2026-08-14 fix menu tabs (22ebdbc)
 - menuGetParentByIdChildren di-rewrite: parity Laravel MenuResources (jalan ke root, children rekursif, 66/67/68->63, url ?parent=&module=, place form/table, flag permission per-menu, filter market_segment)
 - route id optional (tanpa id -> 200 code 200 data [])
@@ -216,3 +231,14 @@ Catatan lain:
 - event-management-item: itemList + event_id wajib (400 tanpa, parity Laravel), filter event_management_id, table parity formatTable (select Item code_items + description/cost/frequency/cost_on terkait, Description, Cost, Frequency Daily/Once/Twice, Cost On Actual Day, QTY) + permission 1133; baru itemStore (event_id dari query) + itemUpdate + itemDestroy + routes POST/PUT/DELETE /event-management-item.
 - master housekeeping-room-status diverifikasi: halaman cuma fetch /housekeeping/room-status/master (udah ada, semua keys).
 - smoke test /api/event-items + ?event_id=1. tsc bersih + jest 69/69.
+
+## 2026-08-14 sweep final zero-5xx (backend `2d9363e`, frontend `997aba8`, kepush) — tutup checklist handover
+- Probe sweep 1332 reqs / 333 endpoint `/cms` -> zero 5xx, semua list 200 (commit `2d9363e`):
+  - `codeGlGetGl` (master-data.controller.ts): parity `CodeGLSController@getGL` — search name/description, map `{id: Number(id), name: description(name)}`.
+  - `/rate/extra-bed/inclusives` GET/POST/PUT/DELETE + DELETE `/:id/delete` (parity `RateExtraBedInclusiveController`), didaftarin SEBELUM `/rate/:rateId/inclusives`; handler extraBedList/extraBedInclusive tolerir rate_id non-numeric -> empty 200.
+  - `/room-type/get-configuration/:id`, `/room-type/get-room/:id`, `/room-type/get-room-v2/:id` — static SEBELUM `/room-type/:id` (fix param shadow 404) + handler di RoomController (+201 baris).
+  - sisa kecil: admin/company/report controller + routes admin/master-setup/master-system.
+- Frontend `997aba8`: rate form dropdown options index (data[7]/[8]/[9]/[11]) — dari MIGRATION_FIX sesi 3.
+- package-lock.json frontend-node SUDAH dihapus (yarn.lock sumber kebenaran).
+- Issues nodeHMS #6 #7 #8 CLOSED. Sisa open: nodeHMS #3 (STAAH jobs/ARI), #4 (diff endpoint inventory), #5 (cutover) + hms-frontend #2 (permissionHelper) #3 (API base hardcoded).
+- Langkah berikut: STAAH ARI push + background jobs queue (#3), audit diff route 1:1 (#4), cleanup `.next` basi frontend-node.

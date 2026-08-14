@@ -6,6 +6,7 @@ import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
+import { TABLES } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -114,6 +115,12 @@ export class HousekeepingController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: TABLES.room,
+        permission: { view: true, add: true, edit: true, delete: true },
+        search_data: [
+          { label: 'Room Status', key: 'room_status', type: 'select', valueOptions: [{ value: 0, label: 'Vacant' }, { value: 1, label: 'Occupied' }, { value: 2, label: 'Out of Order' }, { value: 3, label: 'Maid Clean' }, { value: 4, label: 'Inspect' }] },
+          { label: 'Maid Status', key: 'maid_status', type: 'select', valueOptions: [{ value: 0, label: 'Not Assigned' }, { value: 1, label: 'Cleaning' }, { value: 2, label: 'Check Out' }, { value: 3, label: 'Inspect' }] },
+        ],
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Room status error:', err); error(res, 'Failed to fetch room status', 500); }
@@ -184,6 +191,17 @@ export class HousekeepingController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: [
+          { label: 'No', key: 'sort', type: 'number', is_search: false },
+          { label: 'Work Description', key: 'work_description', type: 'text', is_search: true },
+          { label: 'Area', key: 'area', type: 'text', is_search: true },
+          { label: 'Room', key: 'room_id', type: 'number', is_search: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true },
+          { label: 'Assign To', key: 'assign_to', type: 'number', is_search: false },
+        ],
+        search_data: [
+          { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Open' }, { value: 0, label: 'Closed' }] },
+        ],
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });

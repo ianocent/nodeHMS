@@ -805,7 +805,7 @@ export class ReservationController {
         return;
       }
 
-      success(res, bigintToNumber(folio), 'Success');
+      success(res, bigintToNumber(folio), 'Success', 200, { permission: { view: true }, search_data: { statuses: ['reservation', 'pending', 'check_in', 'check_out', 'cancel_reservation'] } } as any);
     } catch (err: any) {
       console.error('Reservation show error:', err);
       error(res, 'Failed to fetch reservation', 500);
@@ -1027,7 +1027,7 @@ export class ReservationController {
       }
 
       const updated = await prisma.folios.findUnique({ where: { id } });
-      success(res, bigintToNumber(updated), 'Success');
+      success(res, bigintToNumber(updated), 'Success', 200, { permission: { view: true }, search_data: { statuses: ['reservation', 'pending', 'check_in', 'check_out', 'cancel_reservation'] } } as any);
     } catch (err: any) {
       console.error('Reservation update error:', err);
       error(res, 'Failed to update reservation', 500);

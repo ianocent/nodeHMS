@@ -5,6 +5,13 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { AuthController } from './auth.controller';
+
+// Helper: coerce sort/status to number (matches Laravel int casting)
+function num(v: any, fallback = 0): number {
+  if (v === undefined || v === null || v === '') return fallback;
+  const n = Number(v);
+  return isNaN(n) ? fallback : n;
+}
 import {
   ROOM_STATUSES,
   MAID_STATUSES,
@@ -201,7 +208,7 @@ export class RoomController {
           is_physical: is_physical !== undefined ? Boolean(is_physical) : true,
           rate: rate || 0,
           min_rate: min_rate || 0,
-          sort: sort || 0,
+          sort: num(sort),
           status: status !== undefined ? Number(status) : STATUS_ACTIVE,
           created_by: userId,
         },
@@ -494,7 +501,7 @@ export class RoomController {
       if (is_physical !== undefined) updateData.is_physical = Boolean(is_physical);
       if (rate !== undefined) updateData.rate = rate;
       if (min_rate !== undefined) updateData.min_rate = min_rate;
-      if (sort !== undefined) updateData.sort = sort;
+      if (sort !== undefined) updateData.sort = num(sort);
       if (status !== undefined) updateData.status = Number(status);
 
       await prisma.room_types.update({ where: { id }, data: updateData });

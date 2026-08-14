@@ -47,6 +47,18 @@ const STATUS_COL = (): any => ({
 const NO_COL = (): any => ({ label: 'No', key: 'no', type: 'none', is_search: false });
 
 export const TABLES: Record<string, any[]> = {
+  room: [
+    { label: 'No', key: 'sort', type: 'number', is_search: false },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Room Type', key: 'room_type_id', type: 'number', is_search: true },
+    { label: 'Status', key: 'room_status', type: 'checkbox', is_search: true },
+    { label: 'Maid Status', key: 'maid_status', type: 'select', is_search: true },
+    { label: 'Map ID', key: 'map_id', type: 'text', is_search: false },
+    { label: 'Max Pax', key: 'max_pax', type: 'number', is_search: false },
+    { label: 'Total Bed', key: 'total_bed', type: 'number', is_search: false },
+    { label: 'TV', key: 'with_tv', type: 'checkbox', is_search: false },
+    { label: 'Shower', key: 'with_shower', type: 'checkbox', is_search: false },
+  ],
   role: [
     STATUS_COL(),
     { label: 'Name', key: 'name', type: 'text', is_search: true },

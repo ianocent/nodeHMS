@@ -59,6 +59,12 @@ export class AdminController {
 
       const permFlags = getPermissionFlags(req.user, 1117);
       const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+
+      const permissions = await getPrisma().permissions.findMany({
+        where: { status: 1, deleted_at: null },
+        select: { id: true, name: true },
+      });
+
       success(res, rows, 'Success', 200, {
         table: TABLES.role,
         permission: {
@@ -66,6 +72,10 @@ export class AdminController {
           edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete,
         },
         pagging: laravelPaging(total, limit, page),
+        master: {
+          permissions: bigintToNumber(permissions).map((p: any) => ({ value: p.id, label: p.name })),
+          statuses: STATUSES,
+        },
       });
     } catch (err: any) { console.error('Role list error:', err); error(res, 'Failed to list roles', 500); }
   }
@@ -126,13 +136,123 @@ export class AdminController {
       const pid = req.user?.lastProperty ?? 0n;
       const [role, menus, templates, menuCruds] = await Promise.all([
         getPrisma().roles.findUnique({ where: { id } }),
-        getPrisma().menus.findMany({ where: { status: 1, deleted_at: null }, orderBy: [{ left: 'asc' }] }),
+        getPrisma().menus.findMany({ where: { deleted_at: null, status: 1, id: { notIn: [15, 5, 6, 14, 1123, 1126] } }, orderBy: [{ left: 'asc' }] }),
         getPrisma().role_templates.findMany({ where: { property_id: pid, is_active: true }, orderBy: { sort: 'asc' } }),
         getPrisma().role_menu_crud.findMany({ where: { role_id: id } }),
       ]);
       if (!role) { notFound(res, 'Role not found'); return; }
-      success(res, { ...bigintToNumber(role), menus: bigintToNumber(menus), templates: bigintToNumber(templates), menu_cruds: bigintToNumber(menuCruds) }, 'Success');
-    } catch (err: any) { error(res, 'Failed to load role', 500); }
+
+      const buildTree = (parentId: bigint | null): any[] =>
+        menus.filter(m => m.parent_id === parentId).map(m => {
+          let label = String(m.name ?? '');
+          try {
+            const parsed = JSON.parse(label);
+            label = parsed.en ?? parsed.id ?? parsed.name ?? label;
+          } catch (e) { /* keep as string */ }
+
+          const labelParts = label.replace(/[-_]/g, ' ').split('.').map(s => {
+            return s.charAt(0).toUpperCase() + s.slice(1);
+          });
+          const lastLabel = labelParts[labelParts.length - 1];
+
+          const children = buildTree(m.id);
+          const mc = menuCruds.find(c => c.menu_id === m.id);
+          const isaccess = !!mc;
+
+          return {
+            key: labelParts,
+            value: Number(m.id),
+            label: labelParts, // top level uses array for label, children use string for label
+            isaccess,
+            crud: {
+              view: mc ? !!mc.view : false,
+              add: mc ? !!mc.add : false,
+              edit: mc ? !!mc.edit : false,
+              delete: mc ? !!mc.delete : false,
+            },
+            transaction_actions: mc && mc.transaction_actions ? (typeof mc.transaction_actions === 'string' ? JSON.parse(mc.transaction_actions) : mc.transaction_actions) : {},
+            children,
+          };
+        });
+
+      const rawTree = buildTree(null);
+      // Flatten children like Laravel does in `formatData()`
+      const permissions = rawTree.map(root => {
+        // Flat map all descendants for access array
+        const accessList: any[] = [];
+        const walkChildren = (nodes: any[]) => {
+          for (const n of nodes) {
+            accessList.push({
+              label: n.label[n.label.length - 1],
+              value: n.value,
+              isaccess: n.isaccess,
+              crud: n.crud,
+              transaction_actions: n.transaction_actions,
+            });
+            if (n.children && n.children.length > 0) {
+              walkChildren(n.children);
+            }
+          }
+        };
+        if (root.children) walkChildren(root.children);
+
+        return {
+          key: root.key,
+          value: root.value,
+          label: root.label,
+          isaccess: root.isaccess,
+          access: accessList,
+        };
+      }).filter(p => p.value !== 52); // Filter out menu 52 as Laravel does
+
+      const formattedRole = {
+        id: Number(role.id),
+        name: role.name,
+        code: role.guard_name,
+        list_dashboard: role.list_dashboard ? role.list_dashboard.split(',').filter(Boolean).map(d => ({
+          label: d.replace(/[-_]/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+          value: d
+        })) : [],
+        permissions,
+        created_at: role.created_at,
+        created_by: Number(role.created_by),
+        status: {
+          value: !!role.status,
+          label: STATUSES.find(s => s.value === role.status)?.label || (role.status ? 'Active' : 'Inactive'),
+        },
+        relation: {
+          permissions: [],
+        },
+      };
+
+      const templateData = templates.map(t => ({
+        id: Number(t.id),
+        key: t.key,
+        name: t.name,
+        label: t.label,
+        code: t.code,
+        desc: t.description,
+        dashboard: t.dashboard ? (typeof t.dashboard === 'string' ? JSON.parse(t.dashboard) : t.dashboard) : [],
+        grants: t.grants ? (typeof t.grants === 'string' ? JSON.parse(t.grants) : t.grants) : [],
+        transactionGrants: t.transaction_grants ? (typeof t.transaction_grants === 'string' ? JSON.parse(t.transaction_grants) : t.transaction_grants) : null,
+        colors: {
+          ringColor: t.color_ring,
+          bgColor: t.color_bg,
+          badgeBg: t.color_badge_bg,
+          badgeText: t.color_badge_text,
+        },
+      }));
+
+      import('../utils/cmsConfig').then(({ DASHBOARDS }) => {
+        success(res, formattedRole, 'Success', 200, {
+          master: {
+            statuses: STATUSES,
+            dashboards: DASHBOARDS,
+            templates: templateData,
+          }
+        });
+      });
+    } catch (err: any) { console.error(err); error(res, 'Failed to load role', 500); }
   }
 
   static async roleUpdate(req: Request, res: Response): Promise<void> {
