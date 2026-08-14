@@ -865,15 +865,14 @@ export class DynamicRateController {
         prisma.dynamic_rate_results.count({ where })
       ]);
 
-      const formatted = results.map(r => ({
-        ...r,
-        id: Number(r.id),
-        property_id: Number(r.property_id),
-        dynamic_rate_config_id: Number(r.dynamic_rate_config_id),
-        room_type_id: Number(r.room_type_id),
-        room_type: r.room_types ? { id: Number(r.room_types.id), name: r.room_types.name } : null,
-        room_types: undefined
-      }));
+      const formatted = results.map(r => {
+        const safe = bigintToNumber(r);
+        return {
+          ...safe,
+          room_type: r.room_types ? { id: Number(r.room_types.id), name: r.room_types.name } : null,
+          room_types: undefined
+        };
+      });
 
       // Get room types for filter dropdown
       const config = await prisma.dynamic_rate_configs.findUnique({

@@ -25,6 +25,71 @@ const router = Router();
 const prisma = new PrismaClient({ adapter });
 const generic = new GenericController();
 
+// ─── Phase 4.10 - Remaining module aliases (auth-only, kebab URLs) ───
+// Stop Sell Booking (StopSellController parity)
+router.get('/stop-sell-booking', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.list(req, res); });
+router.get('/stop-sell-booking/create', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.createForm(req, res); });
+router.post('/stop-sell-booking', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.create(req, res); });
+router.get('/stop-sell-booking/:id/update', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.editForm(req, res); });
+router.put('/stop-sell-booking/:id', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.update(req, res); });
+router.delete('/stop-sell-booking/:id', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.destroy(req, res); });
+router.delete('/stop-sell-booking', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; req.params.id = String((req.body && req.body.id) ?? ''); generic.destroy(req, res); });
+
+// Channel Manager Interface
+router.get('/channel-manager-interface', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.list(req, res); });
+router.get('/channel-manager-interface/create', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.createForm(req, res); });
+router.post('/channel-manager-interface', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.create(req, res); });
+router.get('/channel-manager-interface/:id/update', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.editForm(req, res); });
+router.put('/channel-manager-interface/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.update(req, res); });
+router.delete('/channel-manager-interface/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.destroy(req, res); });
+
+// Content Room
+router.get('/content-room', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.list(req, res); });
+router.get('/content-room/create', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.createForm(req, res); });
+router.post('/content-room', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.create(req, res); });
+router.get('/content-room/:id/update', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.editForm(req, res); });
+router.put('/content-room/:id', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.update(req, res); });
+router.delete('/content-room/:id', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.destroy(req, res); });
+
+// Rate Room (RateRoomController parity -> rates)
+router.get('/rate-room', authMiddleware, (req, res) => { req.params.model = 'rates'; generic.list(req, res); });
+router.get('/rate-room/:id/update', authMiddleware, (req, res) => { req.params.model = 'rates'; generic.editForm(req, res); });
+
+// Payment Matrix
+router.get('/payment-matrix', authMiddleware, (req, res) => { req.params.model = 'payment_matrices'; generic.list(req, res); });
+router.get('/payment-matrix/create', authMiddleware, (req, res) => { req.params.model = 'payment_matrices'; generic.createForm(req, res); });
+router.post('/payment-matrix', authMiddleware, (req, res) => { req.params.model = 'payment_matrices'; generic.create(req, res); });
+router.get('/payment-matrix/:id/update', authMiddleware, (req, res) => { req.params.model = 'payment_matrices'; generic.editForm(req, res); });
+router.put('/payment-matrix/:id', authMiddleware, (req, res) => { req.params.model = 'payment_matrices'; generic.update(req, res); });
+router.delete('/payment-matrix/:id', authMiddleware, (req, res) => { req.params.model = 'payment_matrices'; generic.destroy(req, res); });
+
+// STAAM Manager (StaahInterfaceController parity)
+router.get('/staah-manager', authMiddleware, (req, res) => { req.params.model = 'staah_interfaces'; generic.list(req, res); });
+router.get('/staah-manager/create', authMiddleware, (req, res) => { req.params.model = 'staah_interfaces'; generic.createForm(req, res); });
+router.post('/staah-manager', authMiddleware, (req, res) => { req.params.model = 'staah_interfaces'; generic.create(req, res); });
+router.get('/staah-manager/:id/update', authMiddleware, (req, res) => { req.params.model = 'staah_interfaces'; generic.editForm(req, res); });
+router.put('/staah-manager/:id', authMiddleware, (req, res) => { req.params.model = 'staah_interfaces'; generic.update(req, res); });
+router.delete('/staah-manager/:id', authMiddleware, (req, res) => { req.params.model = 'staah_interfaces'; generic.destroy(req, res); });
+
+// STAAM Reservation
+router.get('/staah-reservation', authMiddleware, (req, res) => { req.params.model = 'staah_reservations'; generic.list(req, res); });
+router.get('/staah-reservation/:id', authMiddleware, (req, res) => { req.params.model = 'staah_reservations'; generic.show(req, res); });
+
+// STAAM OTA Mapping (StaahOtaMappingController parity)
+router.get('/staah-ota-mapping', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.list(req, res); });
+router.get('/staah-ota-mapping/create', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.createForm(req, res); });
+router.post('/staah-ota-mapping', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.create(req, res); });
+router.get('/staah-ota-mapping/:id/update', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.editForm(req, res); });
+router.put('/staah-ota-mapping/:id', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.update(req, res); });
+router.delete('/staah-ota-mapping/:id', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.destroy(req, res); });
+
+// Allotment Room child (AllotmentController@room parity; must precede /allotment/:id)
+router.get('/allotment/room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.list(req, res); });
+router.post('/allotment/room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.create(req, res); });
+router.put('/allotment/room/:id', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.update(req, res); });
+router.delete('/allotment/room/:id', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.destroy(req, res); });
+router.get('/allotment-room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.list(req, res); });
+
 // ═══════════════════════════════════════════════
 // Phase 4.9 — Remaining Modules
 // ═══════════════════════════════════════════════

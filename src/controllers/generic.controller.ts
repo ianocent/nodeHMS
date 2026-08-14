@@ -37,6 +37,31 @@ function idParam(val: any): bigint | null {
   return BigInt(s);
 }
 
+const AUDIT_KEYS = ['id', 'created_at', 'updated_at', 'deleted_at', 'created_by', 'updated_by', 'deleted_by', 'undefined'];
+
+function sanitizeBody(body: any): any {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return {};
+  const out: any = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (AUDIT_KEYS.includes(k)) continue;
+    if (v === undefined) continue;
+    const isDate = /(date|_at)$/i.test(k);
+    if (isDate) {
+      if (v === '') continue;
+      if (typeof v === 'object') {
+        if (v instanceof Date) { out[k] = v; continue; }
+        continue;
+      }
+      const d = new Date(v as string | number);
+      if (!isNaN(d.getTime())) out[k] = d;
+      continue;
+    }
+    if (v !== null && typeof v === 'object' && Object.keys(v).length === 0) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 function parsePagination(query: any) {
   const page = parseInt(query.page as string) || 1;
   const limit = Math.min(parseInt(query.limit as string) || 10, 100);
@@ -56,6 +81,20 @@ export class GenericController {
   }
 
   private toPlural(name: string): string {
+    const kebabOverrides: Record<string, string> = {
+      'stop-sell-booking': 'stop_sells',
+      'stop-sell': 'stop_sells',
+      'content-room': 'content_rooms',
+      'channel-manager-interface': 'channel_manager_interfaces',
+      'rate-room': 'rates',
+      'payment-matrix': 'payment_matrices',
+      'staah-manager': 'staah_interfaces',
+      'staah-reservation': 'staah_reservations',
+      'staah-ota-mapping': 'staah_ota_company_mappings',
+      'allotment-room': 'room_allotments',
+      'room-allotment': 'room_allotments',
+    };
+    if (kebabOverrides[name]) return kebabOverrides[name];
     const irregular: Record<string, string> = {
       user: 'users',
       property: 'properties',
@@ -136,6 +175,10 @@ export class GenericController {
       const where: any = trash
         ? (hasSoftDelete ? { deleted_at: { not: null } } : {})
         : (hasSoftDelete ? { deleted_at: null } : {});
+      for (const [k, v] of Object.entries(req.query)) {
+        if (['page', 'limit', 'search', 'sort', 'order', 'trash', 'group'].includes(k)) continue;
+        if (k.endsWith('_id') && String(v)) where[k] = BigInt(String(v));
+      };
       if (search && searchFields.length > 0) {
         where.OR = searchFields.map((f: string) => ({ [f]: { contains: search, mode: 'insensitive' } }));
       }
@@ -229,8 +272,21 @@ export class GenericController {
     try {
       const model = String(req.params.model);
       const modelDelegate = this.getPrismaModel(model);
-      const data = { ...req.body, created_at: new Date(), updated_at: new Date() };
-      const record = await modelDelegate.create({ data });
+      const data = sanitizeBody(req.body);
+      if (!data.property_id && req.user?.lastProperty) data.property_id = BigInt(req.user.lastProperty);
+      data.created_at = new Date();
+      data.updated_at = new Date();
+      let record;
+      try {
+        record = await modelDelegate.create({ data });
+      } catch (e: any) {
+        if (e?.message?.includes('property_id')) {
+          delete data.property_id;
+          record = await modelDelegate.create({ data });
+        } else {
+          throw e;
+        }
+      }
       const permission = { view: true, add: true, edit: true, delete: true };
       success(res, bigintToNumber(record), 'Created', 201, { table: [], search_data: [], permission });
     } catch (err: any) {
@@ -249,7 +305,8 @@ async update(req: Request, res: Response): Promise<void> {
       if (parsedId === null) { notFound(res, 'Record not found'); return; }
       const existing = await modelDelegate.findUnique({ where: { id: parsedId } });
       if (!existing) { notFound(res, 'Record not found'); return; }
-      const data = { ...req.body, updated_at: new Date() };
+      const data = sanitizeBody(req.body);
+      data.updated_at = new Date();
       const record = await modelDelegate.update({ where: { id: parsedId }, data });
       success(res, bigintToNumber(record), 'Updated');
     } catch (err: any) {

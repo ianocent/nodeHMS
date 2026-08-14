@@ -261,6 +261,7 @@ export class RateController {
   static async show(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idParam || !/^\d+$/.test(String(idParam))) { notFound(res, 'Rate not found'); return; }
       const id = BigInt(idParam);
 
       const rate = await prisma.rates.findUnique({

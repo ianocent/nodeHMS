@@ -30,6 +30,24 @@ router.get('/rate', authMiddleware, requirePermission(86, 'view'), RateControlle
 router.get('/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.create);
 router.post('/rate', authMiddleware, requirePermission(86, 'add'), RateController.store);
 
+// Rate inclusives / extra beds (frontend sends rate_id as query param; must precede /rate/:id)
+router.get('/rate/inclusives', authMiddleware, requirePermission(86, 'view'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? '');
+  RateAddonController.inclusiveList(req, res);
+});
+router.post('/rate/inclusives', authMiddleware, requirePermission(86, 'add'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? '');
+  RateAddonController.inclusiveStore(req, res);
+});
+router.get('/rate/extra-beds', authMiddleware, requirePermission(86, 'view'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? '');
+  RateAddonController.extraBedList(req, res);
+});
+router.post('/rate/extra-beds', authMiddleware, requirePermission(86, 'add'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? '');
+  RateAddonController.extraBedStore(req, res);
+});
+
 // ── /rate/rate — rate-rate/form grid page (must precede /rate/:id) ──
 function gridQuery(req: any) {
   const b = req.body || {};

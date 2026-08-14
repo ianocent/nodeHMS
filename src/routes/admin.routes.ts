@@ -71,6 +71,11 @@ router.post('/user/fcm-token', authMiddleware, AdminController.saveFcmToken);
 // Property routes (choose-property page)
 router.get('/property', authMiddleware, AdminController.propertyList);
 router.get('/property/auth/:id', authMiddleware, AdminController.propertyAuth);
+router.get('/property/create', authMiddleware, AdminController.propertyCreate);
+router.post('/property', authMiddleware, AdminController.propertyStore);
+router.get('/property/:id/update', authMiddleware, AdminController.propertyEdit);
+router.put('/property/:id', authMiddleware, AdminController.propertyUpdate);
+router.delete('/property/:id', authMiddleware, AdminController.propertyDestroy);
 
 // Singular aliases for permissions
 router.get('/permission', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionList);

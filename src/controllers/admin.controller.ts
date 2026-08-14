@@ -743,6 +743,132 @@ export class AdminController {
     }
   }
 
+  static async propertyCreate(req: Request, res: Response): Promise<void> {
+    try {
+      const [cities, countries] = await Promise.all([
+        getPrisma().cities.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+        getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      ]);
+      success(res, { status: 1 }, 'Success', 200, {
+        table: [],
+        master: {
+          cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
+          countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        },
+        search_data: [],
+        permission: { view: true, add: true, edit: true, delete: true },
+      });
+    } catch (err: any) {
+      console.error('Property create form error:', err);
+      error(res, 'Failed to load form', 500);
+    }
+  }
+
+  static async propertyStore(req: Request, res: Response): Promise<void> {
+    try {
+      const b = req.body || {};
+      if (!b.name) { validationError(res, { name: ['The name field is required.'] }); return; }
+      const data: any = {
+        name: b.name,
+        alias: b.alias || null,
+        email: b.email || null,
+        telp: b.telp ? BigInt(String(b.telp)) : null,
+        fax: b.fax ? BigInt(String(b.fax)) : null,
+        address: b.address || null,
+        logo: b.logo || null,
+        image: b.image || null,
+        slug: b.slug || null,
+        whatsapp: b.whatsapp || null,
+        bank_name: b.bank_name || null,
+        bank_account_no: b.bank_account_no || null,
+        city_id: b.city_id ? BigInt(String(b.city_id)) : null,
+        country_id: b.country_id ? BigInt(String(b.country_id)) : null,
+        status: b.status !== undefined && b.status !== null ? Number(b.status) : 1,
+        created_by: req.user?.id ? BigInt(String(req.user.id)) : null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      const record = await getPrisma().properties.create({ data });
+      success(res, { ...bigintToNumber(record), id: Number(record.id) }, 'Created', 201, {
+        table: [], search_data: [], permission: { view: true, add: true, edit: true, delete: true },
+      });
+    } catch (err: any) {
+      console.error('Property store error:', err);
+      if ((err as any).code === 'P2002') badRequest(res, 'Duplicate entry');
+      else error(res, 'Failed to create property', 500);
+    }
+  }
+
+  static async propertyEdit(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const property = await getPrisma().properties.findUnique({ where: { id } });
+      if (!property) { notFound(res, 'Property not found'); return; }
+      const [cities, countries] = await Promise.all([
+        getPrisma().cities.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+        getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      ]);
+      success(res, { ...bigintToNumber(property), id: Number(property.id) }, 'Success', 200, {
+        table: [],
+        master: {
+          cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
+          countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        },
+        search_data: [],
+        permission: { view: true, add: true, edit: true, delete: true },
+      });
+    } catch (err: any) {
+      console.error('Property edit form error:', err);
+      error(res, 'Failed to load property', 500);
+    }
+  }
+
+  static async propertyUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const existing = await getPrisma().properties.findUnique({ where: { id } });
+      if (!existing) { notFound(res, 'Property not found'); return; }
+      const b = req.body || {};
+      const data: any = {
+        name: b.name ?? existing.name,
+        alias: b.alias !== undefined ? b.alias : existing.alias,
+        email: b.email !== undefined ? b.email : existing.email,
+        telp: b.telp ? BigInt(String(b.telp)) : (b.telp === null || b.telp === '' ? null : existing.telp),
+        fax: b.fax ? BigInt(String(b.fax)) : (b.fax === null || b.fax === '' ? null : existing.fax),
+        address: b.address !== undefined ? b.address : existing.address,
+        logo: b.logo !== undefined ? b.logo : existing.logo,
+        image: b.image !== undefined ? b.image : existing.image,
+        slug: b.slug !== undefined ? b.slug : existing.slug,
+        whatsapp: b.whatsapp !== undefined ? b.whatsapp : existing.whatsapp,
+        bank_name: b.bank_name !== undefined ? b.bank_name : existing.bank_name,
+        bank_account_no: b.bank_account_no !== undefined ? b.bank_account_no : existing.bank_account_no,
+        city_id: b.city_id ? BigInt(String(b.city_id)) : (b.city_id === null || b.city_id === '' ? null : existing.city_id),
+        country_id: b.country_id ? BigInt(String(b.country_id)) : (b.country_id === null || b.country_id === '' ? null : existing.country_id),
+        status: b.status !== undefined && b.status !== null ? Number(b.status) : existing.status,
+        updated_by: req.user?.id ? BigInt(String(req.user.id)) : null,
+        updated_at: new Date(),
+      };
+      const record = await getPrisma().properties.update({ where: { id }, data });
+      success(res, { ...bigintToNumber(record), id: Number(record.id) }, 'Updated');
+    } catch (err: any) {
+      console.error('Property update error:', err);
+      error(res, 'Failed to update property', 500);
+    }
+  }
+
+  static async propertyDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const existing = await getPrisma().properties.findUnique({ where: { id } });
+      if (!existing) { notFound(res, 'Property not found'); return; }
+      await getPrisma().properties.update({ where: { id }, data: { deleted_at: new Date() } });
+      success(res, null, 'Deleted');
+    } catch (err: any) {
+      console.error('Property destroy error:', err);
+      error(res, 'Failed to delete property', 500);
+    }
+  }
+
   // ================================================================
   //  SIDEBAR MENU (Laravel MenuResources parity: url with ?parent=&module=)
   // ================================================================

@@ -537,15 +537,14 @@ export class RateAddonController {
         prisma.rates.count({ where }),
       ]);
 
-      const formatted = rates.map((r: any) => ({
-        ...r,
-        id: Number(r.id),
-        property_id: Number(r.property_id),
-        code_post_id: r.code_post_id !== null && r.code_post_id !== undefined ? Number(r.code_post_id) : null,
-        minimum_rate: r.minimum_rate !== null && r.minimum_rate !== undefined ? Number(r.minimum_rate) : null,
-        code_post: r.code_posts ? { id: Number(r.code_posts.id), name: r.code_posts.name } : null,
-        code_posts: undefined,
-      }));
+      const formatted = rates.map((r: any) => {
+        const safe = bigintToNumber(r);
+        return {
+          ...safe,
+          code_post: r.code_posts ? { id: Number(r.code_posts.id), name: r.code_posts.name } : null,
+          code_posts: undefined,
+        };
+      });
 
       const codePosts = await prisma.code_posts.findMany({
         where: { type: 'DEFAULT', deleted_at: null },
