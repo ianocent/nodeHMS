@@ -120,6 +120,12 @@ router.get('/system-balance/:type', authMiddleware, requirePermission(69, 'view'
 
 router.get('/log', authMiddleware, requirePermission(69, 'view'), SystemController.logList);
 router.get('/setup', authMiddleware, requirePermission(69, 'view'), SystemController.setup);
+router.get('/setup/get-type', authMiddleware, requirePermission(69, 'view'), SystemController.setupGetType);
+router.get('/setup/create', authMiddleware, requirePermission(69, 'add'), SystemController.setupCreate);
+router.get('/setup/:id', authMiddleware, requirePermission(69, 'view'), SystemController.setupShow);
+router.post('/setup', authMiddleware, requirePermission(69, 'add'), SystemController.setupStore);
+router.put('/setup/:id', authMiddleware, requirePermission(69, 'edit'), SystemController.setupUpdate);
+router.delete('/setup/:id', authMiddleware, requirePermission(69, 'delete'), SystemController.setupDestroy);
 router.get('/post-code-budget', authMiddleware, requirePermission(69, 'view'), SystemController.postCodeBudget);
 
 // Night Audit — Room Change

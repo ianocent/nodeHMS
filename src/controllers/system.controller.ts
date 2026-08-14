@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { encrypt } from '../utils/encryption';
+import { setupTable, postCodeBudgetTable, laravelPaging, crudPermission } from '../utils/tableMeta';
 
 const systemPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const systemAdapter = new PrismaPg(systemPool);
@@ -310,24 +311,171 @@ export class SystemController {
     }
   }
 
+  // ==================== SETUP (TypeController@index parity) ====================
   static async setup(req: Request, res: Response): Promise<void> {
     try {
-      const config = {
-        app_name: 'HMS Anyaman',
-        app_version: '1.0.0',
-        currency: 'IDR',
-        date_format: 'Y-m-d',
-        time_format: 'H:i:s',
-        timezone: 'Asia/Jakarta',
-        language: 'en',
-        pagination_limit: 10,
-        default_property: req.user?.lastProperty ? Number(req.user.lastProperty) : null,
-      };
+      const group = (req.query.group as string) || '';
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = (req.query.search as string) || '';
+      const propertyId = req.user?.lastProperty ?? 0n;
 
-      success(res, config, 'Success');
+      const where: any = { property_id: propertyId, deleted_at: null };
+      if (group) where.group = group;
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+
+      let orderBy: any = { id: 'desc' };
+      if (group === 'guest-title') orderBy = { name: 'asc' };
+      if (group === 'room-type-grouping') orderBy = { sort: 'asc' };
+
+      const [data, total] = await Promise.all([
+        getPrisma().types.findMany({ where, orderBy, skip: (page - 1) * limit, take: limit }),
+        getPrisma().types.count({ where }),
+      ]);
+
+      const normal = data.filter(d => /normal/i.test(d.name));
+      const rest = data.filter(d => !/normal/i.test(d.name));
+      const ordered = [...normal, ...rest];
+
+      const rows = ordered.map((d, i) => ({
+        no: (page - 1) * limit + i + 1,
+        id: Number(d.id),
+        name: d.name,
+        description: d.description,
+        image: d.image,
+        text: d.text,
+        group: d.group,
+        sort: d.sort,
+        status: d.status,
+      }));
+
+      const perms = crudPermission(req.user, 1125n);
+      success(res, rows, 'Success', 200, {
+        table: setupTable(group),
+        pagging: laravelPaging(total, limit, page),
+        permission: { view: true, add: perms.add, edit: perms.edit, delete: perms.delete },
+      });
     } catch (err: any) {
       console.error('Setup error:', err);
       error(res, 'Failed to load setup', 500);
+    }
+  }
+
+  // ==================== SETUP GET TYPE (TypeController@getType parity) ====================
+  static async setupGetType(req: Request, res: Response): Promise<void> {
+    try {
+      const group = (req.query.group as string) || '';
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const where: any = { property_id: propertyId, deleted_at: null, status: 1 };
+      if (group) where.group = group;
+      const data = await getPrisma().types.findMany({ where, orderBy: { sort: 'asc' } });
+      success(res, data.map(d => ({ id: Number(d.id), name: d.name })), 'Success');
+    } catch (err: any) {
+      console.error('Setup get-type error:', err);
+      error(res, 'Failed to load types', 500);
+    }
+  }
+
+  // ==================== SETUP CREATE FORM ====================
+  static async setupCreate(req: Request, res: Response): Promise<void> {
+    try {
+      success(res, { status: 1 }, 'Success', 200, {
+        master: {
+          statuses: [
+            { value: 1, label: 'Active' },
+            { value: 2, label: 'Inactive' },
+          ],
+        },
+      });
+    } catch (err: any) {
+      error(res, 'Failed to load setup form', 500);
+    }
+  }
+
+  // ==================== SETUP SHOW ====================
+  static async setupShow(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; }
+      const id = BigInt(raw);
+      const d = await getPrisma().types.findUnique({ where: { id } });
+      if (!d || d.deleted_at) { notFound(res); return; }
+      success(res, { ...bigintToNumber(d), no: d.sort }, 'Success');
+    } catch (err: any) {
+      console.error('Setup show error:', err);
+      error(res, 'Failed to load setup', 500);
+    }
+  }
+
+  // ==================== SETUP STORE ====================
+  static async setupStore(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const { group, name, description, status, sort, text, image } = req.body;
+      if (!name) { badRequest(res, 'name is required'); return; }
+
+      const dup = await getPrisma().types.findFirst({ where: { name, group: group || '', property_id: propertyId } });
+      if (dup) { badRequest(res, 'Name already exist'); return; }
+
+      const d = await getPrisma().types.create({
+        data: {
+          property_id: propertyId,
+          group: group || '',
+          name,
+          description: description || null,
+          text: text || null,
+          image: image || null,
+          sort: sort ?? 0,
+          status: status === true || status === 'true' ? 1 : (status ?? 1),
+          created_at: new Date(),
+          updated_at: new Date(),
+          created_by: req.user?.id || null,
+        },
+      });
+      success(res, bigintToNumber(d), 'Created');
+    } catch (err: any) {
+      console.error('Setup store error:', err);
+      error(res, 'Failed to create setup', 500);
+    }
+  }
+
+  // ==================== SETUP UPDATE ====================
+  static async setupUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; }
+      const id = BigInt(raw);
+      const existing = await getPrisma().types.findUnique({ where: { id } });
+      if (!existing) { notFound(res); return; }
+
+      const { group, name, description, status, sort, text, image } = req.body;
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id || null };
+      if (name !== undefined) data.name = name;
+      if (group !== undefined) data.group = group;
+      if (description !== undefined) data.description = description;
+      if (text !== undefined) data.text = text;
+      if (image !== undefined) data.image = image;
+      if (sort !== undefined) data.sort = sort;
+      if (status !== undefined) data.status = status === true || status === 'true' ? 1 : status;
+
+      await getPrisma().types.update({ where: { id }, data });
+      success(res, null, 'Updated');
+    } catch (err: any) {
+      console.error('Setup update error:', err);
+      error(res, 'Failed to update setup', 500);
+    }
+  }
+
+  // ==================== SETUP DESTROY ====================
+  static async setupDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; }
+      const id = BigInt(raw);
+      await getPrisma().types.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id || null } });
+      success(res, null, 'Deleted');
+    } catch (err: any) {
+      error(res, 'Failed to delete setup', 500);
     }
   }
 
@@ -955,67 +1103,46 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
   static async postCodeBudget(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 10;
+      const limit = parseInt(req.query.limit as string) || 9999;
       const propertyId = req.user?.lastProperty ?? 0n;
-      const type = req.query.type as string;
-      const year = req.query.year as string;
+      const type = (req.query.type as string) || 'static';
+      const year = parseInt((req.query.year as string) || String(new Date().getFullYear()));
 
-      const where: any = { property_id: propertyId };
-
-      if (year) {
-        where.year = parseInt(year);
-      }
-
-      const [data, total] = await Promise.all([
+      const [budgets, codePosts] = await Promise.all([
         getPrisma().post_code_budgets.findMany({
-          where,
-          orderBy: { id: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
+          where: { property_id: propertyId, year },
+          select: { code_post_id: true, month: true, budget: true },
         }),
-        getPrisma().post_code_budgets.count({ where }),
+        getPrisma().code_posts.findMany({
+          where: {
+            property_id: propertyId,
+            deleted_at: null,
+            ...(type === 'static' ? { type: 'STATISTIC' } : type === 'budget' ? { type: 'DEFAULT' } : {}),
+          },
+          orderBy: { id: 'asc' },
+        }),
       ]);
 
-      if (data.length > 0) {
-        const codePostIds = data.map((d: any) => d.code_post_id);
-        const codePosts = await getPrisma().code_posts.findMany({
-          where: { id: { in: codePostIds } },
-          select: { id: true, name: true },
-        });
+      const budgetMap = new Map<string, number>();
+      for (const b of budgets) budgetMap.set(`${b.code_post_id}:${b.month}`, Number(b.budget) || 0);
 
-        const codePostMap = new Map<bigint, string>();
-        for (const cp of codePosts) {
-          codePostMap.set(cp.id, cp.name);
+      const money = (v: number) => Number(v || 0).toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      const data = codePosts.map(cp => {
+        const row: any = { id: Number(cp.id), name: cp.name };
+        for (let i = 1; i <= 12; i++) {
+          row['month_' + i] = money(budgetMap.get(`${cp.id}:${i}`) ?? 0);
         }
+        return row;
+      });
+      const totalData = data.length;
 
-        const enriched = data.map((d: any) => ({
-          ...d,
-          id: Number(d.id),
-          code_post_name: codePostMap.get(d.code_post_id) || null,
-        }));
-
-        success(res, bigintToNumber(enriched), 'Success', 200, {
-          pagging: {
-            current_page: page,
-            last_page: Math.ceil(total / limit),
-            per_page: limit,
-            total,
-            from: (page - 1) * limit + 1,
-            to: Math.min(page * limit, total),
-          },
-        });
-      } else {
-        success(res, [], 'Success', 200, {
-          pagging: {
-            current_page: page,
-            last_page: 0,
-            per_page: limit,
-            total: 0,
-            from: 0,
-            to: 0,
-          },
-        });
-      }
+      const perms = crudPermission(req.user, 1117n);
+      success(res, data, 'Success', 200, {
+        table: postCodeBudgetTable(year),
+        pagging: laravelPaging(totalData, limit, page),
+        permission: { view: true, add: perms.add, edit: perms.edit, delete: perms.delete },
+      });
     } catch (err: any) {
       console.error('Post code budget error:', err);
       error(res, 'Failed to fetch post code budget', 500);

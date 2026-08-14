@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -89,7 +90,12 @@ export class MasterDataController {
         prisma.code_posts.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, { page, total } as any);
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.codePost,
+        pagging: laravelPaging(total, limit, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      } as any);
     } catch (err: any) {
       console.error('CodePost list error:', err);
       error(res, 'Failed to list code posts', 500);
@@ -220,7 +226,12 @@ export class MasterDataController {
         prisma.code_items.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, { page, total } as any);
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.codeItem,
+        pagging: laravelPaging(total, limit, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      } as any);
     } catch (err: any) {
       console.error('CodeItem list error:', err);
       error(res, 'Failed to list code items', 500);
@@ -343,7 +354,12 @@ export class MasterDataController {
         prisma.code_billings.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, { page, total } as any);
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.codeBilling,
+        pagging: laravelPaging(total, limit, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      } as any);
     } catch (err: any) {
       console.error('CodeBilling list error:', err);
       error(res, 'Failed to list code billings', 500);
@@ -451,7 +467,12 @@ export class MasterDataController {
         prisma.code_gls.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, { page, total } as any);
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.codeGl,
+        pagging: laravelPaging(total, limit, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      } as any);
     } catch (err: any) {
       console.error('CodeGl list error:', err);
       error(res, 'Failed to list code GLs', 500);
@@ -556,7 +577,7 @@ export class MasterDataController {
   // ═══════════════════════════════════════════════════════════════
   //  TYPE PAYMENT (type_payments)
   // ═══════════════════════════════════════════════════════════════
-  private static async crudList(model: any, req: Request, res: Response): Promise<void> {
+  private static async crudList(model: any, req: Request, res: Response, table?: any[]): Promise<void> {
     const pid = BigInt(req.user?.lastProperty ?? 0);
     const { page, limit, search } = parsePagination(req.query);
     const where: any = { property_id: pid, deleted_at: null };
@@ -565,11 +586,14 @@ export class MasterDataController {
       model.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
       model.count({ where }),
     ]);
-    success(res, bigintToNumber(data), 'Success', 200, {
-      pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
-    });
+    const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+    success(res, rows, 'Success', 200, {
+      table: table || [],
+      pagging: laravelPaging(total, limit, page),
+      permission: listPermission(req, { add: true, edit: true, delete: true }),
+    } as any);
   }
-  static async typePaymentList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.type_payments, req, res); }
+  static async typePaymentList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.type_payments, req, res, TABLES.typePayment); }
   static async typePaymentShow(req: Request, res: Response): Promise<void> {
     try { const id = idParam(req.params.id); const d = await prisma.type_payments.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }

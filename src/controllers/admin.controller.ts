@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { TABLES, laravelPaging } from '../utils/tableMeta';
 
 const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adminAdapter = new PrismaPg(adminPool);
@@ -56,12 +57,14 @@ export class AdminController {
       ]);
 
       const permFlags = getPermissionFlags(req.user, 1117);
-      success(res, bigintToNumber(data), 'Success', 200, {
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.role,
         permission: {
           view: true, add: req.user?.superUser || permFlags.add,
           edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete,
         },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagging: laravelPaging(total, limit, page),
       });
     } catch (err: any) { console.error('Role list error:', err); error(res, 'Failed to list roles', 500); }
   }
@@ -604,8 +607,15 @@ export class AdminController {
         rolesMap.get(mr.model_id)!.push(mr.roles);
       }
       const formatted = users.map(u => ({ ...bigintToNumber(u), roles: rolesMap.get(u.id) || [] }));
-      success(res, formatted, 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      const rows = formatted.map((u, i) => ({ ...u, no: (page - 1) * limit + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.user,
+        pagging: laravelPaging(total, limit, page),
+        permission: {
+          view: true, add: req.user?.superUser || getPermissionFlags(req.user, 1116).add,
+          edit: req.user?.superUser || getPermissionFlags(req.user, 1116).edit,
+          delete: req.user?.superUser || getPermissionFlags(req.user, 1116).delete,
+        },
       });
     } catch (err: any) {
       console.error('[ERROR] userList:', err?.message, err?.stack);
@@ -664,6 +674,7 @@ export class AdminController {
       ]);
 
       const mapped = data.map(p => ({
+        ...bigintToNumber(p),
         id: Number(p.id),
         name: p.name,
         alias: p.alias,
@@ -675,13 +686,12 @@ export class AdminController {
       }));
 
       success(res, mapped, 'Success', 200, {
-        pagging: {
-          current_page: page,
-          last_page: Math.ceil(total / limit),
-          per_page: limit,
-          total,
-          from: (page - 1) * limit + 1,
-          to: Math.min(page * limit, total),
+        table: TABLES.property,
+        pagging: laravelPaging(total, limit, page),
+        permission: {
+          view: true, add: req.user?.superUser || getPermissionFlags(req.user, 1134).add,
+          edit: req.user?.superUser || getPermissionFlags(req.user, 1134).edit,
+          delete: req.user?.superUser || getPermissionFlags(req.user, 1134).delete,
         },
       });
     } catch (err: any) {

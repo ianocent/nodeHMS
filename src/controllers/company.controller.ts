@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -30,7 +31,12 @@ export class CompanyController {
         prisma.company_profiles.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),
         prisma.company_profiles.count({ where }),
       ]);
-      success(res, bn(data), 'Success', 200, { pagging: { current_page: page, last_page: Math.ceil(total / lim), per_page: lim, total, from: (page - 1) * lim + 1, to: Math.min(page * lim, total) } });
+      const rows = bn(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * lim + i + 1 }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.company,
+        pagging: laravelPaging(total, lim, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      });
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
   }
 
