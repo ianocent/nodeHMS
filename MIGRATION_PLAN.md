@@ -3,9 +3,9 @@
 
 **Goal**: Complete backend rewrite with 100% API compatibility. Frontend Next.js must work unchanged.
 
-**Status**: Phase 5 — Bug Fixing & Frontend Integration ✅ COMPLETE
+**Status**: Phase 6 — Cross-sector Parity Fixes & Testing 🔄 IN PROGRESS (live verification pending)
 **Started**: 2026-07-13
-**Last Updated**: 2026-07-15
+**Last Updated**: 2026-08-14
 
 ---
 
@@ -310,3 +310,32 @@ Error responses must also match.
 | Concierge | `concierge.controller.ts` | 16 | ✅ |
 | Event | `event.controller.ts` | 22 | ✅ |
 | Statistic | `statistic.controller.ts` | 5 | ✅ |
+
+---
+
+## Phase 6: Cross-sector Parity Fixes & Testing (2026-08-14)
+
+**Status**: IN PROGRESS — audit + fix rounds complete, live verification pending (user restarts watchlogs.js)
+
+### Completed (committed + pushed: df65184, bd00320)
+- Route audit all form pages (frontend GLOBALURI vs node routes) — missing routes implemented:
+  - `GET /housekeeping/room-status/master` (housekeeping room-status page crash)
+  - `GET /transaction/create`, `GET /transaction/folio` (before `/transaction/:id`), `PUT /front-desk/data/:id`
+  - `GET /code-post/get-charge`, `GET /code-post/get-code-items` (master-setup + master-system, before `/code-post/:id`)
+  - `PUT /reservation/ledger/move/:id`
+  - `POST/PUT/DELETE /event-management-item` (+ event_id filter + formatTable parity)
+- Master meta parity (forms crashing/empty via CheckBoxBase options.map):
+  - generic createForm/editForm per-model master (statuses; overbooking room_types+business_date; allotment company_guest)
+  - lost-found form (statuses/itemsStatus/reservations/rooms/statusLost), company profile (17-key Laravel master), property form (is_taxs/market_segments/subscribe_types/regions/...)
+  - email-builder templateTypes, email-group users + group_list emails, company-others code_posts
+- New shared `src/utils/cmsConfig.ts` (config lists, moneyFormat, CodePost::calculate parity)
+- Laravel upstream bugs kept as-is (holiday form /cms/rate, overbooking form /cms/allotment)
+
+### Testing
+- `npx tsc --noEmit` clean, jest 69/69 green, server boot clean
+- Pending: live browser verification per module (user restarts watchlogs.js)
+
+### Remaining (issue #3, #4, #5 open)
+- STAAH: full ARI push flow verification, background jobs (queue) not yet ported
+- Full 1:1 route:list diff Laravel vs node (partial audits done per module)
+- Cutover: contract diff test, performance sanity, parallel run, rollback plan, decommission

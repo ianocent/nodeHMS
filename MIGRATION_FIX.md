@@ -343,3 +343,11 @@ Audit probe (`probe-all.js`) hit every frontend GLOBALURI; fixed all 5xx, verifi
 - **Rate Setup Edit Rate dropdowns No Options**: rate edit() response missing top-level master meta (same bug class as fd1503c Tab Rate fix).
 - **Room Type list scope**: rate create/edit/barRateCreate room_types now property-scoped.
 - New shared utils/cmsStatus.ts; ApiMeta extended with building/meta. tsc clean + jest 69/69.
+## 2026-08-14 (session 4b) cross-sector audit
+- **housekeeping-room-status index crash**: GET /cms/housekeeping/room-status/master route MISSING (frontend fetches it) -> HousekeepingController.roomStatusMaster + route (masterFilter parity).
+- **Lost & Found form No Options**: lostFoundForm returned data only, no master -> + statuses/itemsStatus/reservations/rooms/statusLost.
+- **Company Profile form No Options**: createForm update path had NO master; create path only countries+type_companies -> full Laravel master (17 keys).
+- **Property form No Options**: propertyCreate/propertyEdit master only cities+countries -> + statuses/companies/is_taxs/market_segments/subscribe_types/regions.
+- **Overbooking/Allotment forms**: generic createForm/editForm master {} -> statuses default, overbooking + room_types/business_date, allotment + company_guest.
+- **Reservation Fit Transaction page 404s**: /cms/transaction/create, /cms/transaction/folio, /cms/code-post/get-charge, /cms/code-post/get-code-items, /cms/reservation/ledger/move/:id all misrouted/404 -> implemented (Laravel parity), /front-desk/data/:id PUT for remark save.
+- utils/cmsConfig.ts (config lists + moneyFormat + CodePost::calculate parity). tsc clean + jest 69/69.

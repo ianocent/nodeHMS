@@ -193,3 +193,25 @@ Other notes:
 - **utils/cmsStatus.ts baru**: ROOM_STATUSES (0 vacant..4 out_of_order), MAID_STATUSES, STATUS_RESERVATION_MAP, getColorRoom/getColorCodeRoom/getColorMaid/getColorCodeMaid/getColorReservation/getColorCodeReservation, dashLabel, ucfirst, folioUrl (fit/git/vr). AuthController.getBusinessDate jadi public. ApiMeta + building/meta keys.
 - rate edit() include code_gls invalid (schema cuma code_billings) -> select id/name.
 - tsc clean + jest 69/69.
+
+## 2026-08-14 cross-sector audit: master meta parity + missing routes (df65184)
+- Full audit (frontend GLOBALURI/master reads vs node routes/handlers) of ALL form pages for same bug classes: master meta missing, missing routes.
+- utils/cmsConfig.ts baru: STATUSES (Active/Inactive), REGIONS (6), SUBSCRIBE_TYPES (Monthly/Yearly), BILLINGS (By Company/By Department), TERMS (7), ITEM_LOST_FOUND_STATUS (4), STATUS_LOST (Lost/Found), IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS, moneyFormat (Laravel parity 1.234,56), calculateCodePost (CodePost::calculate inclusive/exclusive parity).
+- generic.controller createForm/editForm: master {} -> per-model master. default statuses; overbooking + room_types (property-scoped) + business_date top-level; allotment + company_guest. (Laravel AllotmentController@create cuma statuses - company_guest needed by node form.)
+- HousekeepingController.roomStatusMaster (Laravel HouseKeepingRoomStatusController@masterFilter parity): statuses/maidStatuses/roomStatuses/housekeepers/houseKeeperHistory:null/builder/floor/business_date/roomTypes. Route GET /housekeeping/room-status/master (was MISSING -> housekeeping-room-status index crash).
+- ConciergeController.lostFoundForm: create+edit paths sekarang return master {statuses, itemsStatus, reservations:[], rooms, statusLost} (Laravel LostAndFoundController@create/edit parity).
+- CompanyController.createForm: master sekarang penuh (Laravel CompanyProfileController@create parity): statuses/statusGuest (normal-first)/regions/typeCompany/billings/terms/market_segment_1-4/source/staff/markets (property formatData)/statusBlacklist + countries/cities (node form reads). Update path (id) sebelumnya tanpa master -> No Options.
+- AdminController propertyCreate/propertyEdit: master + statuses/companies/is_taxs/is_tax_exclude_restaurants/market_segments/subscribe_types/regions (Laravel PropertyController@create parity).
+- FrontDeskController + routes: transactionCreate (Laravel TransactionController@create parity: master ledgers/code_posts(type_payments IS_PAYMENT)/postCodeManual(DEFAULT)/folios(transfer)/paid_out/payment/bussiness_date, data=folio), transactionFolio (check-in folios), updateData PUT /front-desk/data/:id (remark save; Laravel 404s upstream). GET /transaction/create + GET /transaction/folio registered BEFORE /transaction/:id (param shadow fix).
+- MasterDataController + routes: getCharge (surcharge_type flat/%, calculateCodePost pb1/service/tax3, amount/total moneyFormat, ledger via billing_tos by code_billing) + getCodeItems (code_items active, search, amount=moneyFormat(sales)). Registered before /code-post/:id di master-setup + master-system routes.
+- ReservationController.moveLedger (Laravel ReservationController@moveLedger parity: bill_to update) + PUT /reservation/ledger/move/:id.
+- ApiMeta + ledger key.
+- Not changed (upstream Laravel bugs, frontend-node mirrors Laravel): holiday + overbooking forms GLOBALURI=/cms/rate dan /cms/allotment (sama di Laravel).
+- tsc clean + jest 69/69, boot clean.
+## 2026-08-14 residual audit closes (bd00320)
+- email-builder form: emailBuilderForm sekarang return master.templateTypes (8 static Laravel parity) di create+edit.
+- email-group form: emailGroupForm master.users (all active users id/email); edit + data.group_list (emails -> {value,label}); store/update convert group_list array -> comma-joined emails (Laravel parity).
+- company-others "Comm Code" select: buildCompanyMaster + code_posts (Laravel tidak punya - upstream gap, node superset).
+- event-management-item: itemList + event_id required (400 tanpa, Laravel parity), filter event_management_id, table formatTable parity (Item select code_items + related description/cost/frequency/cost_on, Description, Cost, Frequency Daily/Once/Twice, Cost On Actual Day, QTY) + permission 1133; baru itemStore (event_id dari query) + itemUpdate + itemDestroy + routes POST/PUT/DELETE /event-management-item.
+- housekeeping-room-status master verified: page cuma fetch /housekeeping/room-status/master (sudah ada, semua keys).
+- smoke test /api/event-items + ?event_id=1. tsc clean + jest 69/69.
