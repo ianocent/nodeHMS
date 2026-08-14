@@ -1,36 +1,36 @@
-# HMS Anyaman Backend Migration - Phase 1 Status
+# HMS Anyaman Backend Migration — Status Phase 1
 
-**Date**: 2026-07-13  
-**Phase**: 1 of 5  
-**Status**: 🟡 Ready to Execute
+**Tanggal**: 2026-07-13
+**Phase**: 1 dari 5
+**Status**: 🟡 Siap Eksekusi
 
 ---
 
-## What's Been Prepared
+## Yang Udah Disiapin
 
-### ✅ Infrastructure
-- PostgreSQL database created: `hms_anyaman` (Laragon)
-- .env configured for Laragon (no Docker)
-- Node.js project initialized with Express + Prisma + TypeScript
-- 186 tables identified in MySQL schema (much larger than expected!)
+### ✅ Infrastruktur
+- Database PostgreSQL dibuat: `hms_anyaman` (Laragon)
+- `.env` diatur buat Laragon (tanpa Docker)
+- Project Node.js jalan dengan Express + Prisma + TypeScript
+- 186 tabel ketemu di schema MySQL (jauh lebih gede dari perkiraan!)
 
-### ✅ Documentation
-- `MIGRATION_PLAN.md` - Full 5-phase roadmap
-- `PHASE1_EXECUTION.md` - Step-by-step execution guide
-- Scripts created for automated migration
+### ✅ Dokumentasi
+- `MIGRATION_PLAN.md` — Roadmap lengkap 5 phase
+- `PHASE1_EXECUTION.md` — Panduan eksekusi step-by-step
+- Script otomatis buat migrasi
 
-### ✅ Automated Scripts
-1. **Schema extraction** - Pulls from MySQL, generates Prisma schema
-2. **Table creation** - Creates PostgreSQL tables from schema
-3. **Data migration** - Migrates all data from MySQL → PostgreSQL
-4. **Data verification** - Compares row counts, ensures integrity
-5. **Connection test** - Verifies both databases are reachable
+### ✅ Script Otomatis
+1. **Ekstrak schema** — Baca MySQL, generate Prisma schema
+2. **Buat tabel** — Bikin tabel PostgreSQL dari schema
+3. **Migrasi data** — Pindahin semua data MySQL → PostgreSQL
+4. **Verifikasi data** — Bandingin jumlah row, pastiin ga ada yang ilang
+5. **Test koneksi** — Pastiin dua database bisa diakses
 
 ---
 
 ## Quick Start (Phase 1)
 
-### 1️⃣ Test Connections (verify setup)
+### 1️⃣ Test Koneksi (cek setup)
 ```bash
 cd backend-node
 npm install
@@ -38,161 +38,161 @@ npm run build
 npm run phase1:test
 ```
 
-### 2️⃣ Execute Phase 1 (automated migration)
+### 2️⃣ Eksekusi Phase 1 (migrasi otomatis)
 
-**Step 1: Extract Schema from MySQL**
+**Step 1: Ekstrak Schema dari MySQL**
 ```bash
 export DATABASE_URL="mysql://root:@localhost:3306/draft_rndhms"
 npm run phase1:schema
 ```
 
-**Step 2: Create Tables in PostgreSQL**
+**Step 2: Bikin Tabel di PostgreSQL**
 ```bash
 export DATABASE_URL="postgresql://postgres:@localhost:5432/hms_anyaman?schema=public"
 npm run phase1:tables
 ```
 
-**Step 3: Migrate Data**
+**Step 3: Migrasi Data**
 ```bash
 npm run phase1:data
 ```
 
-**Step 4: Verify Data**
+**Step 4: Verifikasi Data**
 ```bash
 npm run phase1:verify
 ```
 
-✅ If last command shows "All tables verified successfully!" - **Phase 1 is done!**
+✅ Kalau command terakhir nunjukin "All tables verified successfully!" — **Phase 1 kelar!**
 
 ---
 
-## Expected Phase 1 Timeline
+## Estimasi Waktu Phase 1
 
-| Task | Duration |
-|------|----------|
-| npm install | 5 min |
-| npm run build | 1 min |
-| npm run phase1:test | 1 min |
-| Schema extract | 2 min |
-| Create PostgreSQL tables | 2 min |
-| Data migration (186 tables) | 10-15 min |
-| Data verification | 2 min |
-| **Total** | **~25-30 min** |
-
----
-
-## What Phase 1 Accomplishes
-
-After Phase 1 complete:
-- ✅ PostgreSQL database fully populated with data from MySQL
-- ✅ All 186 tables migrated with exact row counts
-- ✅ Foreign keys and relationships intact
-- ✅ Ready for Phase 2 (Architecture & Permissions)
+| Task | Durasi |
+|------|--------|
+| npm install | 5 mnt |
+| npm run build | 1 mnt |
+| npm run phase1:test | 1 mnt |
+| Ekstrak schema | 2 mnt |
+| Bikin tabel PostgreSQL | 2 mnt |
+| Migrasi data (186 tabel) | 10-15 mnt |
+| Verifikasi data | 2 mnt |
+| **Total** | **~25-30 mnt** |
 
 ---
 
-## After Phase 1 - Next Steps
+## Hasil Phase 1
 
-Once Phase 1 completes successfully:
+Abis Phase 1 kelar:
+- ✅ PostgreSQL kepenuhan data dari MySQL
+- ✅ Semua 186 tabel kemigrasi dengan jumlah row persis
+- ✅ Foreign key + relasi tetap utuh
+- ✅ Siap lanjut Phase 2 (Architecture & Permissions)
 
-### Phase 2: Core Architecture (2 days)
-- Setup permission system
-- Setup role system
-- Create middleware for auth & validation
-- Create response formatter
+---
 
-### Phase 3: Authentication (2 days)
-- Login/logout endpoints
+## Setelah Phase 1 — Langkah Selanjutnya
+
+Kalau Phase 1 sukses:
+
+### Phase 2: Core Architecture (2 hari)
+- Setup sistem permission
+- Setup sistem role
+- Bikin middleware auth & validation
+- Bikin response formatter
+
+### Phase 3: Authentication (2 hari)
+- Endpoint login/logout
 - JWT token generation
-- Session validation
-- Permission checks
+- Validasi session
+- Cek permission
 
-### Phase 4: API Endpoints (3-4 weeks)
+### Phase 4: API Endpoints (3-4 minggu)
 - User management
 - Reservations
 - Room management
 - Pricing/rates
-- OTA integration
+- Integrasi OTA
 - POS & accounting
 
-### Phase 5: Testing (1 week)
-- Frontend integration
+### Phase 5: Testing (1 minggu)
+- Integrasi frontend
 - QA testing
 - Bug fixes
 
 ---
 
-## Key Documentation
+## Dokumentasi Kunci
 
-1. **Full Roadmap**: `/backend-node/MIGRATION_PLAN.md`
-2. **Phase 1 Guide**: `/backend-node/PHASE1_EXECUTION.md`
-3. **Database Info**: 
+1. **Roadmap Lengkap**: `/backend-node/MIGRATION_PLAN.md`
+2. **Panduan Phase 1**: `/backend-node/PHASE1_EXECUTION.md`
+3. **Info Database**:
    - MySQL: `localhost:3306/draft_rndhms` (Laragon)
    - PostgreSQL: `localhost:5432/hms_anyaman` (Laragon)
 
 ---
 
-## Architecture (Current)
+## Arsitektur (Sekarang)
 
 ```
 backend-node/
 ├── src/
-│   ├── index.ts              (Express app - basic setup)
+│   ├── index.ts              (Express app - setup dasar)
 │   ├── scripts/
-│   │   ├── migrate-data.ts   (Data migration)
-│   │   ├── verify-data.ts    (Data verification)
-│   │   └── test-connections.ts (Connectivity test)
-│   ├── config/               (Empty - Phase 2)
-│   ├── middleware/           (Empty - Phase 2)
-│   ├── services/             (Empty - Phase 2)
-│   ├── controllers/          (Empty - Phase 2)
-│   └── routes/               (Empty - Phase 2)
+│   │   ├── migrate-data.ts   (Migrasi data)
+│   │   ├── verify-data.ts    (Verifikasi data)
+│   │   └── test-connections.ts (Test koneksi)
+│   ├── config/               (Kosong - Phase 2)
+│   ├── middleware/           (Kosong - Phase 2)
+│   ├── services/             (Kosong - Phase 2)
+│   ├── controllers/          (Kosong - Phase 2)
+│   └── routes/               (Kosong - Phase 2)
 ├── prisma/
-│   ├── schema.prisma         (Models - will be regenerated)
-│   └── migrations/           (Empty - will be populated)
+│   ├── schema.prisma         (Models - bakal di-regenerate)
+│   └── migrations/           (Kosong - bakal keisi)
 ├── .env                      (Laragon PostgreSQL)
-├── package.json              (Updated with scripts)
-└── PHASE1_EXECUTION.md       (Step-by-step guide)
+├── package.json              (Dapet script baru)
+└── PHASE1_EXECUTION.md       (Panduan step-by-step)
 ```
 
 ---
 
 ## Troubleshooting
 
-### Issue: "Cannot connect to MySQL"
+### Masalah: "Cannot connect to MySQL"
 ```
-Check if Laragon MySQL is running:
-- Open Laragon
-- Start MySQL service
-- Verify: mysql -u root -h localhost
-```
-
-### Issue: "Cannot connect to PostgreSQL"
-```
-Check if Laragon PostgreSQL is running:
-- Open Laragon
-- Start PostgreSQL service
-- Verify: psql -U postgres -h localhost
+Cek Laragon MySQL jalan apa ga:
+- Buka Laragon
+- Start service MySQL
+- Cek: mysql -u root -h localhost
 ```
 
-### Issue: "Module not found: mysql2"
+### Masalah: "Cannot connect to PostgreSQL"
 ```
-Run: npm install
-Then: npm run build
+Cek Laragon PostgreSQL jalan apa ga:
+- Buka Laragon
+- Start service PostgreSQL
+- Cek: psql -U postgres -h localhost
 ```
 
-### Issue: Data migration fails mid-way
+### Masalah: "Module not found: mysql2"
 ```
-Check PostgreSQL logs for FK constraint errors
-May need to truncate tables and retry
-See PHASE1_EXECUTION.md for rollback steps
+Jalanin: npm install
+Terus: npm run build
+```
+
+### Masalah: Migrasi data gagal di tengah jalan
+```
+Cek log PostgreSQL buat error constraint FK
+Mungkin perlu truncate tabel dan ulang
+Liat PHASE1_EXECUTION.md buat langkah rollback
 ```
 
 ---
 
-## Success Indicator
+## Indikator Sukses
 
-You'll know Phase 1 is done when:
+Phase 1 dibilang kelar kalau:
 
 ```bash
 $ npm run phase1:verify
@@ -202,7 +202,7 @@ Verifying data migration integrity...
 ✓ accountings                    MySQL:  32360 → PostgreSQL:  32360
 ✓ allocation_accountings         MySQL:      0 → PostgreSQL:      0
 ✓ allotments                      MySQL:    xxx → PostgreSQL:    xxx
-... (all tables match) ...
+... (semua tabel cocok) ...
 
 ======================================================================
 ✓ All tables verified successfully!
@@ -210,34 +210,34 @@ Verifying data migration integrity...
 
 ---
 
-## Important Notes
+## Catatan Penting
 
-- 🔴 **Do NOT start Phase 2 until Phase 1 verification passes**
-- 🟡 **MySQL database remains unchanged** - safe to rollback
-- 🟢 **PostgreSQL = new source of truth** - once Phase 1 complete
-- 📝 **Keep these docs handy** - referenced throughout migration
+- 🔴 **JANGAN mulai Phase 2 sebelum verifikasi Phase 1 lolos**
+- 🟡 **Database MySQL ga disentuh** — aman buat rollback
+- 🟢 **PostgreSQL = sumber kebenaran baru** — abis Phase 1 kelar
+- 📝 **Simpen docs ini** — bakal kepake terus selama migrasi
 
 ---
 
-## Quick Reference Commands
+## Command Cepat
 
 ```bash
-# Test connections
+# Test koneksi
 npm run phase1:test
 
-# Full Phase 1 execution (in order)
+# Eksekusi Phase 1 lengkap (urut)
 npm run phase1:schema     # Step 1
 npm run phase1:tables     # Step 2
 npm run phase1:data       # Step 3
-npm run phase1:verify     # Step 4 (success check)
+npm run phase1:verify     # Step 4 (cek sukses)
 
-# If you need to start over
-rm -rf prisma/migrations  # Clear migrations
-npm run build             # Recompile
-npm run phase1:test       # Verify connections
-npm run phase1:schema     # Start again
+# Kalau mau mulai dari awal
+rm -rf prisma/migrations  # Hapus migrations
+npm run build             # Compile ulang
+npm run phase1:test       # Cek koneksi
+npm run phase1:schema     # Mulai lagi
 ```
 
 ---
 
-**Ready to begin Phase 1?** → Start with `npm run phase1:test`
+**Siap mulai Phase 1?** → Mulai dari `npm run phase1:test`

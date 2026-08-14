@@ -1,233 +1,233 @@
-# Phase 1 Execution Guide
-## Database Migration & Architecture Setup
+# Panduan Eksekusi Phase 1
+## Migrasi Database & Setup Arsitektur
 
-**Current Status**: Ready to start
+**Status Sekarang**: Siap mulai
 
-**Prerequisites**:
-- ✅ PostgreSQL running on Laragon
-- ✅ MySQL running on Laragon  
-- ✅ Node.js installed
-- ✅ .env configured for Laragon
+**Prasyarat**:
+- ✅ PostgreSQL jalan di Laragon
+- ✅ MySQL jalan di Laragon
+- ✅ Node.js keinstall
+- ✅ `.env` diatur buat Laragon
 
 ---
 
-## Step-by-Step Execution
+## Eksekusi Step-by-Step
 
-### Step 1: Fix Prisma Schema (Extract from MySQL)
+### Step 1: Benerin Prisma Schema (Ekstrak dari MySQL)
 
 ```bash
-# Update .env to read from MySQL
+# Update .env buat baca dari MySQL
 export DATABASE_URL="mysql://root:@localhost:3306/draft_rndhms"
 
-# Pull schema from MySQL and generate correct Prisma schema
+# Tarik schema dari MySQL dan generate Prisma schema yang bener
 npm run phase1:schema
 
-# This will:
-# - Connect to MySQL
-# - Introspect all 186 tables
-# - Generate proper Prisma schema with correct syntax
+# Ini bakal:
+# - Connect ke MySQL
+# - Introspect semua 186 tabel
+# - Generate Prisma schema dengan syntax yang bener
 # - Generate Prisma client
 ```
 
-**Expected Output**:
+**Output yang Diharapkan**:
 ```
 Introspected 186 models from MySQL database
 Generated Prisma schema with all models
 Generated Prisma client
 ```
 
-**Time**: ~2 minutes
+**Waktu**: ~2 menit
 
 ---
 
-### Step 2: Migrate Schema to PostgreSQL
+### Step 2: Migrasi Schema ke PostgreSQL
 
 ```bash
-# Switch back to PostgreSQL
+# Balikin ke PostgreSQL
 export DATABASE_URL="postgresql://postgres:@localhost:5432/hms_anyaman?schema=public"
 
-# Create PostgreSQL tables from Prisma schema
+# Bikin tabel PostgreSQL dari Prisma schema
 npm run phase1:tables
 
-# This will:
-# - Generate SQL migration from schema
-# - Apply migration to PostgreSQL
-# - Create all 186 tables with correct structure
+# Ini bakal:
+# - Generate SQL migration dari schema
+# - Apply migration ke PostgreSQL
+# - Bikin semua 186 tabel dengan struktur yang bener
 ```
 
-**Expected Output**:
+**Output yang Diharapkan**:
 ```
 Creating migration from current schema
 Executing migration
 Migration applied successfully
 ```
 
-**Time**: ~1-2 minutes
+**Waktu**: ~1-2 menit
 
 ---
 
-### Step 3: Install Dependencies
+### Step 3: Install Dependensi
 
 ```bash
-# Install MySQL connector for data migration script
+# Install konektor MySQL buat script migrasi data
 npm install
 
-# This adds mysql2 to node_modules
+# Ini nambahin mysql2 ke node_modules
 ```
 
-**Time**: ~3-5 minutes
+**Waktu**: ~3-5 menit
 
 ---
 
 ### Step 4: Compile TypeScript
 
 ```bash
-# Compile scripts to JavaScript
+# Compile script ke JavaScript
 npm run build
 
-# This generates dist/ folder with compiled scripts
+# Ini ngasilin folder dist/ berisi script yang udah kecompile
 ```
 
-**Time**: ~1 minute
+**Waktu**: ~1 menit
 
 ---
 
-### Step 5: Migrate Data
+### Step 5: Migrasi Data
 
 ```bash
-# Run data migration from MySQL to PostgreSQL
+# Jalanin migrasi data dari MySQL ke PostgreSQL
 npm run phase1:data
 
-# This will:
-# - Connect to both MySQL and PostgreSQL
-# - Read all data from MySQL (186 tables)
-# - Insert data into PostgreSQL
-# - Handle type conversions (decimal, datetime, etc.)
-# - Skip duplicate key errors
+# Ini bakal:
+# - Connect ke MySQL dan PostgreSQL
+# - Baca semua data dari MySQL (186 tabel)
+# - Insert data ke PostgreSQL
+# - Handle konversi tipe (decimal, datetime, dll)
+# - Skip error duplicate key
 # - Report progress
 ```
 
-**Expected Output**:
+**Output yang Diharapkan**:
 ```
 Found 186 tables to migrate
 
 accountings: 32360 rows migrated
 allocation_accountings: 0 rows
-... (many more tables) ...
+... (masih banyak tabel lain) ...
 
 ✓ Migration complete: XXXXX total rows migrated
 ```
 
-**Time**: 5-15 minutes (depends on data volume)
+**Waktu**: 5-15 menit (tergantung volume data)
 
 ---
 
-### Step 6: Verify Data Integrity
+### Step 6: Verifikasi Integritas Data
 
 ```bash
-# Compare row counts between MySQL and PostgreSQL
+# Bandingin jumlah row antara MySQL dan PostgreSQL
 npm run phase1:verify
 
-# This will:
-# - Count rows in each MySQL table
-# - Count rows in corresponding PostgreSQL table
-# - Compare and report mismatches
-# - Exit with error if any mismatch found
+# Ini bakal:
+# - Hitung row di tiap tabel MySQL
+# - Hitung row di tabel PostgreSQL yang sama
+# - Bandingin dan report selisihnya
+# - Exit dengan error kalau ada yang ga cocok
 ```
 
-**Expected Output**:
+**Output yang Diharapkan**:
 ```
 Verifying data migration integrity...
 
 ✓ accountings                    MySQL:  32360 → PostgreSQL:  32360
 ✓ allocation_accountings         MySQL:      0 → PostgreSQL:      0
-... (all match) ...
+... (semua cocok) ...
 
 ======================================================================
 ✓ All tables verified successfully!
 ```
 
-**Time**: ~2 minutes
+**Waktu**: ~2 menit
 
 ---
 
 ## Troubleshooting
 
-### Issue: "Cannot find module 'mysql2'"
-**Solution**: Run `npm install` first
+### Masalah: "Cannot find module 'mysql2'"
+**Solusi**: Jalanin `npm install` dulu
 
-### Issue: "ECONNREFUSED" on MySQL
-**Solution**: Ensure Laragon MySQL is running, check credentials in .env
+### Masalah: "ECONNREFUSED" di MySQL
+**Solusi**: Pastiin Laragon MySQL jalan, cek kredensial di `.env`
 
-### Issue: "ECONNREFUSED" on PostgreSQL
-**Solution**: Ensure Laragon PostgreSQL is running. Check port is 5432
+### Masalah: "ECONNREFUSED" di PostgreSQL
+**Solusi**: Pastiin Laragon PostgreSQL jalan. Cek port-nya 5432
 
-### Issue: Schema pull fails
-**Solution**: Check if `.env` has correct MySQL connection string set
+### Masalah: Tarik schema gagal
+**Solusi**: Cek `.env` udah pake connection string MySQL yang bener apa belum
 
-### Issue: Data migration leaves empty tables
-**Solution**: Check for foreign key constraint violations, see error logs
+### Masalah: Migrasi data nyisain tabel kosong
+**Solusi**: Cek pelanggaran foreign key constraint, liat error log
 
 ---
 
-## After Phase 1 Complete
+## Setelah Phase 1 Kelar
 
-Once all 6 steps are done:
+Abis 6 step di atas beres:
 
-1. PostgreSQL will have all 186 tables with full data
-2. Verify no errors in logs
-3. Manually spot-check a few tables in PostgreSQL:
+1. PostgreSQL punya semua 186 tabel dengan data lengkap
+2. Pastiin ga ada error di log
+3. Cek manual beberapa tabel di PostgreSQL:
    ```bash
    psql -U postgres -h localhost -d hms_anyaman
    hms_anyaman=# SELECT COUNT(*) FROM accountings;
    ```
-4. Proceed to Phase 2 (Architecture & Permissions)
+4. Lanjut Phase 2 (Architecture & Permissions)
 
 ---
 
-## Phase 1 Rollback (if needed)
+## Rollback Phase 1 (kalau perlu)
 
-If migration fails and you need to restart:
+Kalau migrasi gagal dan mau mulai ulang:
 
 ```bash
-# Delete PostgreSQL schema
+# Hapus schema PostgreSQL
 psql -U postgres -h localhost -d hms_anyaman -c "DROP SCHEMA public CASCADE;"
 
-# Recreate empty schema
+# Bikin ulang schema kosong
 psql -U postgres -h localhost -d hms_anyaman -c "CREATE SCHEMA public;"
 
-# Delete migrations folder
+# Hapus folder migrations
 rm -rf prisma/migrations
 
-# Start over from Step 1
+# Mulai dari Step 1
 ```
 
 ---
 
-## Estimated Timeline
+## Estimasi Waktu
 
-| Step | Time | Cumulative |
+| Step | Waktu | Kumulatif |
 |------|------|-----------|
-| 1: Schema Extract | 2 min | 2 min |
-| 2: PostgreSQL Setup | 2 min | 4 min |
-| 3: Dependencies | 5 min | 9 min |
-| 4: Build | 1 min | 10 min |
-| 5: Data Migration | 10 min | 20 min |
-| 6: Verification | 2 min | 22 min |
+| 1: Ekstrak Schema | 2 mnt | 2 mnt |
+| 2: Setup PostgreSQL | 2 mnt | 4 mnt |
+| 3: Dependensi | 5 mnt | 9 mnt |
+| 4: Build | 1 mnt | 10 mnt |
+| 5: Migrasi Data | 10 mnt | 20 mnt |
+| 6: Verifikasi | 2 mnt | 22 mnt |
 
-**Total Phase 1**: ~22 minutes (plus any troubleshooting)
-
----
-
-## Success Criteria
-
-✅ Phase 1 is complete when:
-1. `npm run phase1:verify` shows "All tables verified successfully!"
-2. Row counts match exactly between MySQL and PostgreSQL
-3. No foreign key constraint errors
-4. No data type conversion errors
-5. PostgreSQL database is ready for Phase 2
+**Total Phase 1**: ~22 menit (plus troubleshooting kalau ada)
 
 ---
 
-**Next**: Once Phase 1 done, start Phase 2 (Core Architecture & Permissions)
+## Kriteria Sukses
+
+✅ Phase 1 dibilang kelar kalau:
+1. `npm run phase1:verify` nunjukin "All tables verified successfully!"
+2. Jumlah row persis cocok antara MySQL dan PostgreSQL
+3. Ga ada error foreign key constraint
+4. Ga ada error konversi tipe data
+5. Database PostgreSQL siap buat Phase 2
+
+---
+
+**Lanjut**: Abis Phase 1 beres, mulai Phase 2 (Core Architecture & Permissions)

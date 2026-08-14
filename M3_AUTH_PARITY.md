@@ -1,6 +1,6 @@
 # M3 — Auth Parity (backend-node)
 
-Status: CODE DONE. Build by user (`npm run build`), lalu `npm start` / test.
+Status: CODE DONE. Build oleh user (`npm run build`), terus `npm start` / test.
 
 ## Perubahan vs Laravel (AuthController.php / Sanctum)
 
@@ -8,16 +8,16 @@ Status: CODE DONE. Build by user (`npm run build`), lalu `npm start` / test.
 | Area | Sebelum (node) | Sesudah (mirror Laravel) | File |
 |------|----------------|--------------------------|------|
 | Login: duplicate session | Auto-revoke, selalu allow | Tolak `400 "User already logged in"` kalau token aktif <30 mnt | auth.controller.ts |
-| Login: `last_login_at` | tidak di-set | di-set `now()` | auth.controller.ts |
+| Login: `last_login_at` | ga di-set | di-set `now()` | auth.controller.ts |
 | Login/refresh: `expires_token` | created + 24h | **created_at token** (Laravel: `tokens->last()->created_at`) | token.service.ts + auth.controller.ts |
 | Login/refresh: `is_shift` | `false` hardcoded | query `shifts` (user_id + property_id + date business + `end IS NULL`) | auth.controller.ts |
 | Login/refresh: `is_need_shift` | `false` hardcoded | query `model_has_menus` (morph `App\Models\Role`) join `menus.visibility='transaction'` | auth.controller.ts |
 | Login/refresh: `bussinesDate` | `today` | `log_audits.date` max per property + 1 hari (fallback today) — mirror `LogAudit::getBusinessDate` | auth.controller.ts |
 | Logout | `X-Token` only | `Authorization: Bearer` + `X-Token` fallback (Laravel: `bearerToken()`) | auth.controller.ts |
 | Refresh | `X-Token` only | sama (getTokenHeader) | auth.controller.ts |
-| Permission tree: menu exclude | tidak ada | exclude id `5, 6, 14, 15` (semua level) + filter id `52` (output) — mirror `formatData()` | auth.controller.ts |
+| Permission tree: menu exclude | ga ada | exclude id `5, 6, 14, 15` (semua level) + filter id `52` (output) — mirror `formatData()` | auth.controller.ts |
 | Permission tree: label | `split(/[\s_]+/)` | `title()` + `replace(-,_ → space)` + `split('.')` (mirror `str($name['en'])->title()...`) | auth.controller.ts |
-| Permission tree: child crud | pakai crud **parent** | lookup crud per **child** menu_id | auth.controller.ts |
+| Permission tree: child crud | pake crud **parent** | lookup crud per **child** menu_id | auth.controller.ts |
 | Permission tree: isaccess | super-user → all true | murni `model_has_menus` (mirror `in_array`) | auth.controller.ts |
 | Permission tree: child label | `join(' ')` | elemen **terakhir** dari split (mirror `->last()`) | auth.controller.ts |
 | Change password | payload beda | + `property_name` / `property_image` (`/storage/{logo}`), role di-query ulang, shift/bdate real | auth.controller.ts |
@@ -28,9 +28,9 @@ Status: CODE DONE. Build by user (`npm run build`), lalu `npm start` / test.
 - `GET  /cms/force-bulk-logout` (public, validasi token internal)
 - `POST /cms/force-bulk-logout` (auth) — revoke token semua user dgn `last_property` sama (kecuali caller)
 
-### Tidak diubah (sengaja)
-- `forgetPassword` return token langsung — Laravel butuh kolom `password_change_token` yang **tidak ada** di MySQL maupun PG (fitur Laravel rusak legacy, bukan parity bug)
-- Semua route tetap mount di `/api` + `/cms`
+### Ga diubah (sengaja)
+- `forgetPassword` return token langsung — Laravel butuh kolom `password_change_token` yang **ga ada** di MySQL maupun PG (fitur Laravel rusak legacy, bukan parity bug)
+- Semua route tetep mount di `/api` + `/cms`
 
 ## Verified (runtime, server :3007, user dev@dipstrategy.com hash backup/restore)
 ```
@@ -50,7 +50,7 @@ npm run build
 npm start
 node C:\Users\uzuma\AppData\Local\Temp\opencode\refresh-only.js   # script: login→refresh (harap 200)
 ```
-Prisma generate: TIDAK perlu (tidak ada perubahan schema).
+Prisma generate: TIDAK perlu (ga ada perubahan schema).
 
 ## Files changed
 - `backend-node/src/controllers/auth.controller.ts`

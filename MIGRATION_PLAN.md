@@ -1,26 +1,26 @@
 # HMS Anyaman Backend Migration Plan
 ## Laravel/MySQL → Node.js/PostgreSQL
 
-**Goal**: Complete backend rewrite with 100% API compatibility. Frontend Next.js must work unchanged.
+**Tujuan**: Rewrite backend total dengan kompatibilitas API 100%. Frontend Next.js harus jalan tanpa diubah.
 
-**Status**: Phase 6 — Cross-sector Parity Fixes & Testing 🔄 IN PROGRESS (live verification pending)
-**Started**: 2026-07-13
-**Last Updated**: 2026-08-14
+**Status**: Phase 6 — Cross-sector Parity Fixes & Testing 🔄 IN PROGRESS (verifikasi live pending)
+**Mulai**: 2026-07-13
+**Terakhir Update**: 2026-08-14
 
 ---
 
-## Current State
+## Kondisi Sekarang
 
-| Aspect | Value |
+| Aspek | Nilai |
 |--------|-------|
-| Frontend | Next.js at `http://localhost:3002` (unchanged) |
-| Frontend (migration) | `frontend-node/` — adapted for backend-node API |
+| Frontend | Next.js di `http://localhost:3002` (ga diubah) |
+| Frontend (migrasi) | `frontend-node/` — diadaptasi buat API backend-node |
 | Backend | `backend-node/` — Node.js/Express/Prisma ✅ |
-| Database | PostgreSQL `hms_anyaman` — 186 tables, all data migrated ✅ |
+| Database | PostgreSQL `hms_anyaman` — 186 tabel, semua data kemigrasi ✅ |
 | API Base | `http://localhost:3001` |
-| Login | Working (Sanctum-style tokens) ✅ |
-| Sidebar menus | Working (menu tree loads) ✅ |
-| Choose property | Working (property list + auth) ✅ |
+| Login | Jalan (token gaya Sanctum) ✅ |
+| Sidebar menus | Jalan (menu tree ke-load) ✅ |
+| Pilih property | Jalan (list property + auth) ✅ |
 
 ---
 
@@ -28,39 +28,39 @@
 
 - **Framework**: Express.js 5
 - **ORM**: Prisma 7 + `@prisma/adapter-pg`
-- **Database**: PostgreSQL 18 (Laragon), migrated from MySQL `draft_rndhms`
-- **Language**: TypeScript (via ts-node)
+- **Database**: PostgreSQL 18 (Laragon), migrasi dari MySQL `draft_rndhms`
+- **Bahasa**: TypeScript (via ts-node)
 - **Port**: 3001
-- **Auth**: Sanctum-style tokens (SHA-256 hashed, stored in `personal_access_tokens`)
-- **Encryption**: AES-256-CBC (text/plain handshake with Next.js frontend)
+- **Auth**: Token gaya Sanctum (di-hash SHA-256, disimpen di `personal_access_tokens`)
+- **Enkripsi**: AES-256-CBC (handshake text/plain sama frontend Next.js)
 
 ---
 
-## Phased Roadmap
+## Roadmap Bertahap
 
-### Phase 1: Infra Setup & Database Migration ✅
-- .env fixed (Laragon PostgreSQL)
-- Prisma schema generated from MySQL (`prisma db pull`)
-- PostgreSQL `hms_anyaman` created with all 186 tables
-- 574MB data migrated from MySQL → PostgreSQL
-- Data integrity verified (row counts match)
+### Phase 1: Infra Setup & Migrasi Database ✅
+- `.env` dibenerin (Laragon PostgreSQL)
+- Prisma schema di-generate dari MySQL (`prisma db pull`)
+- PostgreSQL `hms_anyaman` dibuat dengan semua 186 tabel
+- 574MB data dimigrasi dari MySQL → PostgreSQL
+- Integritas data diverifikasi (jumlah row cocok)
 
 ### Phase 2: Core Architecture & Permissions ✅
-- Express.js setup with global middleware (CORS, logger, error handler)
-- Permission system (role_menu_crud + model_has_menus)
-- Sanctum-compatible token auth (SHA-256 hashing)
-- AES-256-CBC request/response encryption middleware
-- 404 catch-all returns encrypted JSON (not HTML)
+- Setup Express.js dengan global middleware (CORS, logger, error handler)
+- Sistem permission (role_menu_crud + model_has_menus)
+- Token auth kompatibel Sanctum (hash SHA-256)
+- Middleware enkripsi AES-256-CBC request/response
+- 404 catch-all balikin JSON terenkripsi (bukan HTML)
 
 ### Phase 3: Authentication & Session ✅
-- Login/lock — working with Sanctum tokens
-- Logout — revokes all user tokens
-- Token validation middleware (check both `x-token` and `Authorization: Bearer`)
-- Auto-revoke on re-login (no more "User already logged in")
-- Password change, forgot password endpoints
+- Login/lock — jalan dengan token Sanctum
+- Logout — revoke semua token user
+- Middleware validasi token (cek `x-token` dan `Authorization: Bearer`)
+- Auto-revoke pas login ulang (ga ada lagi "User already logged in")
+- Ganti password, endpoint lupa password
 
 ### Phase 4: API Endpoints (Modular) ✅
-All 19 controllers implemented with CRUD operations:
+Semua 19 controller keimplementasi dengan operasi CRUD:
 
 | Module | Controller | Routes | Lines |
 |--------|-----------|--------|-------|
@@ -85,48 +85,48 @@ All 19 controllers implemented with CRUD operations:
 | Event | `event.controller.ts` | 22 | — |
 | Statistic | `statistic.controller.ts` | 5 | — |
 
-### Phase 5: Bug Fixing & Frontend Integration ⏳ CURRENT
+### Phase 5: Bug Fixing & Integrasi Frontend ⏳ CURRENT
 
-Frontend calls `/cms/...` routes but backend only mounted routes at `/api/...` during Phase 4. Phase 5 bridges this gap:
+Frontend manggil route `/cms/...` tapi backend cuma mount route di `/api/...` waktu Phase 4. Phase 5 nge-bridge celah ini:
 
-#### 5.1 Route Mount Alignment ✅
-- [x] Dual-mount all route groups at both `/api` and `/cms`
-- [x] Auth middleware accepts both `x-token` and `Authorization: Bearer`
-- [x] Property list + auth endpoints for choose-property flow
-- [x] Sidebar menu endpoint (`GET /cms/menu`) returns flat list with `relation.children`
-- [x] Role, UALL, RALL endpoints
-- [x] Property auth includes `access_token` (prevents logout after choose)
+#### 5.1 Penyelarasan Route Mount ✅
+- [x] Dual-mount semua grup route di `/api` dan `/cms`
+- [x] Auth middleware nerima `x-token` dan `Authorization: Bearer`
+- [x] Endpoint list property + auth buat flow choose-property
+- [x] Endpoint menu sidebar (`GET /cms/menu`) balikin flat list dengan `relation.children`
+- [x] Endpoint Role, UALL, RALL
+- [x] Auth property masukin `access_token` (cegah logout abis choose)
 
 #### 5.2 Generic CRUD Engine ✅
-Build reusable CRUD generator from Prisma models. Eliminates 80% of manual route work:
-- Auto-generate list (paginated, searchable, trash filter)
-- Auto-generate create (POST with body validation)
+Bikin generator CRUD reusable dari model Prisma. Ngilangin 80% kerja route manual:
+- Auto-generate list (paginated, searchable, filter trash)
+- Auto-generate create (POST dengan validasi body)
 - Auto-generate show (GET by id)
 - Auto-generate update (PUT/PATCH by id)
 - Auto-generate destroy (soft delete + restore)
-- Single `generic.controller.ts` + `generic.routes.ts`
-- Mounted at `/api/generic/:model` + `/cms/generic/:model`
+- Satu `generic.controller.ts` + `generic.routes.ts`
+- Mount di `/api/generic/:model` + `/cms/generic/:model`
 
-#### 5.3 Remaining Sidebar Routes ✅
-| Route | Frontend component | Backend status |
+#### 5.3 Route Sidebar Sisanya ✅
+| Route | Komponen frontend | Status backend |
 |-------|-------------------|----------------|
-| `GET /cms/user` | User list page | ✅ Implemented |
-| `GET /cms/night-audit/audit` | Night audit | ✅ Implemented |
-| `GET /cms/night-audit/shift` | Night audit shift list | ✅ Implemented |
-| `POST /cms/night-audit/check-audit` | Night audit check/save | ✅ Implemented |
-| `GET /cms/helper/task-notification` | Dashboard widget | ✅ Implemented |
-| `GET /cms/helper/total-cancel-booking-engine` | Helper | ✅ Implemented |
-| `POST /cms/helper/release-last-user-folio` | Helper | ✅ Implemented |
-| `GET /cms/get-dashboard` | Dashboard data | ✅ Implemented |
+| `GET /cms/user` | Halaman list User | ✅ Keimplementasi |
+| `GET /cms/night-audit/audit` | Night audit | ✅ Keimplementasi |
+| `GET /cms/night-audit/shift` | List shift night audit | ✅ Keimplementasi |
+| `POST /cms/night-audit/check-audit` | Night audit check/save | ✅ Keimplementasi |
+| `GET /cms/helper/task-notification` | Widget dashboard | ✅ Keimplementasi |
+| `GET /cms/helper/total-cancel-booking-engine` | Helper | ✅ Keimplementasi |
+| `POST /cms/helper/release-last-user-folio` | Helper | ✅ Keimplementasi |
+| `GET /cms/get-dashboard` | Data dashboard | ✅ Keimplementasi |
 
-#### 5.4 Module-by-Module Bug Fixing ✅
-Added singular route aliases across all route files so frontend pages calling `/cms/singular` endpoints stop getting 404s.
-Fix: Edit each route file to duplicate plural routes with singular path names.
+#### 5.4 Bug Fixing Module-by-Module ✅
+Alias route singular ditambahin di semua file route biar halaman frontend yang manggil endpoint `/cms/singular` ga 404 lagi.
+Fix: Edit tiap file route, duplikat route plural dengan path singular.
 
-Modules covered:
-1. ✅ Dashboard widgets & stats
+Module yang ke-cover:
+1. ✅ Widget & stats dashboard
 2. ✅ User Management
-3. ✅ Role & Permission pages
+3. ✅ Halaman Role & Permission
 4. ✅ Property management
 5. ✅ Master data (country, city, code-*, type-payment, holiday)
 6. ✅ Company profiles
@@ -141,26 +141,26 @@ Modules covered:
 
 ---
 
-## Known Issues
+## Masalah yang Diketahui
 
-| Issue | Status | Fix |
+| Masalah | Status | Fix |
 |-------|--------|-----|
-| `login.blade.php` → `login.tsx` `mapPermissions` import missing | ✅ Fixed | Created `permissionHelper.ts` + imported |
-| `FetchData()` in `helper/index.tsx` missing | ✅ Fixed | Created with all utility functions |
-| `passAes` env var not found in frontend | ✅ Fixed | Uses `env.passAes` from `next.config.js` |
-| PrismaClient created before `dotenv.config()` | ✅ Fixed | `import 'dotenv/config'` loads first |
-| `@prisma/adapter-pg` TableDoesNotExist (wrong DATABASE_URL) | ✅ Fixed | dotenv loads before PrismaClient init |
-| `$2y$` bcrypt hashes from Laravel cause "Invalid input" | ✅ Fixed | System user password reset |
-| "User already logged in" blocks re-login | ✅ Fixed | Auto-revoke old tokens on login |
-| Auth middleware only checks `x-token`, not `Authorization` header | ✅ Fixed | Fallback to `Authorization: Bearer` |
-| Property auth overwrites login data → loses access_token | ✅ Fixed | Property response includes token |
-| `menuGetParentByIdChildren` 500 on `:id = "null"` | ✅ Fixed | Null check before BigInt() |
-| Response `code` is string `"200"` but frontend checks `=== 200` (number) in some places | 🔲 Minor | Frontend uses loose comparison in most places |
-| Toast errors for unimplemented routes | ✅ Fixed | All sidebar + module routes implemented. Remaining: night-audit/shift + check-audit done |
+| `login.blade.php` → `login.tsx` import `mapPermissions` ilang | ✅ Fixed | Bikin `permissionHelper.ts` + import |
+| `FetchData()` di `helper/index.tsx` ilang | ✅ Fixed | Dibuat dengan semua utility function |
+| Env var `passAes` ga ketemu di frontend | ✅ Fixed | Pake `env.passAes` dari `next.config.js` |
+| PrismaClient dibuat sebelum `dotenv.config()` | ✅ Fixed | `import 'dotenv/config'` ke-load duluan |
+| `@prisma/adapter-pg` TableDoesNotExist (DATABASE_URL salah) | ✅ Fixed | dotenv load sebelum init PrismaClient |
+| Hash bcrypt `$2y$` dari Laravel bikin "Invalid input" | ✅ Fixed | Password user system di-reset |
+| "User already logged in" ngeblokir login ulang | ✅ Fixed | Auto-revoke token lama pas login |
+| Auth middleware cuma cek `x-token`, ga cek `Authorization` | ✅ Fixed | Fallback ke `Authorization: Bearer` |
+| Auth property nimpa data login → `access_token` ilang | ✅ Fixed | Response property masukin token |
+| `menuGetParentByIdChildren` 500 pas `:id = "null"` | ✅ Fixed | Null check sebelum `BigInt()` |
+| Response `code` string `"200"` tapi frontend cek `=== 200` (number) di beberapa tempat | 🔲 Minor | Frontend mayoritas pake loose comparison |
+| Toast error buat route yang belum keimplementasi | ✅ Fixed | Semua route sidebar + module keimplementasi. Sisa: night-audit/shift + check-audit beres |
 
 ---
 
-## File Structure
+## Struktur File
 
 ```
 backend-node/
@@ -208,12 +208,12 @@ backend-node/
 ├── package.json
 └── tsconfig.json
 
-frontend-node/                           ← Copy of frontend/, modified for Node API
+frontend-node/                           ← Salinan frontend/, dimodif buat Node API
 ├── pages/                 (Next.js pages)
 │   ├── front-desk/
-│   │   ├── check-in/      (Check-in listing)
-│   │   ├── check-out/     (Check-out listing)
-│   │   ├── check-out-view/ ← NEW: Individual check-out detail with bill review
+│   │   ├── check-in/      (Listing check-in)
+│   │   ├── check-out/     (Listing check-out)
+│   │   ├── check-out-view/ ← BARU: Detail check-out per orang dengan review bill
 │   │   ├── batch-check-out/
 │   │   ├── batch-posting/
 │   │   ├── folio/
@@ -226,10 +226,10 @@ frontend-node/                           ← Copy of frontend/, modified for Nod
 
 ---
 
-## Database Connection (Laragon)
+## Koneksi Database (Laragon)
 
 ```bash
-# Test connection
+# Test koneksi
 psql -U postgres -h localhost -d hms_anyaman
 
 # Info
@@ -237,14 +237,14 @@ psql -U postgres -h localhost -d hms_anyaman
 # Port: 5432
 # Database: hms_anyaman
 # User: postgres
-# Password: (empty or blank)
+# Password: (kosong atau blank)
 ```
 
 ---
 
-## API Contract Guarantee
+## Jaminan Kontrak API
 
-Every endpoint response MUST match Laravel format exactly:
+Response tiap endpoint WAJIB cocok persis format Laravel:
 
 ```json
 {
@@ -255,44 +255,44 @@ Every endpoint response MUST match Laravel format exactly:
 }
 ```
 
-Error responses must also match.
+Response error juga harus cocok.
 
 ---
 
-## Validation Checkpoints
+## Checkpoint Validasi
 
 | Phase | Checkpoint |
 |-------|-----------|
-| After 1.1 | Prisma schema validates without error |
-| After 1.2 | PostgreSQL tables created |
-| After 1.3 | Data row counts match MySQL |
-| After 1.4 | No FK constraint errors |
-| After 2 | Permission middleware works |
-| After 3 | Login returns JWT token |
-| After 4 | All endpoints return correct schema |
-| After 5 | Frontend works without changes |
+| Setelah 1.1 | Prisma schema valid tanpa error |
+| Setelah 1.2 | Tabel PostgreSQL kebuat |
+| Setelah 1.3 | Jumlah row data cocok sama MySQL |
+| Setelah 1.4 | Ga ada error FK constraint |
+| Setelah 2 | Middleware permission jalan |
+| Setelah 3 | Login balikin JWT token |
+| Setelah 4 | Semua endpoint balikin schema yang bener |
+| Setelah 5 | Frontend jalan tanpa perubahan |
 
 ---
 
-## Notes
+## Catatan
 
-- **No Docker**: Using Laragon PostgreSQL local
-- **Staging**: Cannot test with real OTA until Phase 4.4
-- **Parallel work**: Phases can overlap after Phase 2
-- **Revert Plan**: Keep MySQL db backup in case needed
+- **Tanpa Docker**: Pake Laragon PostgreSQL lokal
+- **Staging**: Ga bisa test OTA beneran sampe Phase 4.4
+- **Kerja paralel**: Phase bisa overlap setelah Phase 2
+- **Rencana Revert**: Keep backup DB MySQL kalau-kalau dibutuhin
 
 ---
 
-**Last Updated**: 2026-07-15  
-**Next Review**: Frontend integration testing — confirm all modules load without toast errors
+**Terakhir Update**: 2026-07-15
+**Review Berikutnya**: Testing integrasi frontend — konfirmasi semua module ke-load tanpa toast error
 
-## Endpoint Summary
+## Ringkasan Endpoint
 
 | Module | Controller | Routes | Status |
 |--------|-----------|--------|--------|
 | Auth | `auth.controller.ts` | 3 | ✅ |
 | User | `user.controller.ts` | 11 | ✅ |
-| Guest | `guest.controller.ts` | 19 (inc. sub-features) | ✅ |
+| Guest | `guest.controller.ts` | 19 (termasuk sub-features) | ✅ |
 | Reservation | `reservation.controller.ts` | ~20 | ✅ |
 | Rate | `rate.controller.ts` | ~15 | ✅ |
 | Room | `room.controller.ts` | ~10 | ✅ |
@@ -315,27 +315,27 @@ Error responses must also match.
 
 ## Phase 6: Cross-sector Parity Fixes & Testing (2026-08-14)
 
-**Status**: IN PROGRESS — audit + fix rounds complete, live verification pending (user restarts watchlogs.js)
+**Status**: IN PROGRESS — ronde audit + fix kelar, verifikasi live pending (user restart watchlogs.js)
 
-### Completed (committed + pushed: df65184, bd00320)
-- Route audit all form pages (frontend GLOBALURI vs node routes) — missing routes implemented:
-  - `GET /housekeeping/room-status/master` (housekeeping room-status page crash)
-  - `GET /transaction/create`, `GET /transaction/folio` (before `/transaction/:id`), `PUT /front-desk/data/:id`
-  - `GET /code-post/get-charge`, `GET /code-post/get-code-items` (master-setup + master-system, before `/code-post/:id`)
+### Kelar (kecommit + kepush: df65184, bd00320)
+- Audit route semua halaman form (GLOBALURI frontend vs route node) — route yang ilang keimplementasi:
+  - `GET /housekeeping/room-status/master` (crash halaman housekeeping room-status)
+  - `GET /transaction/create`, `GET /transaction/folio` (sebelum `/transaction/:id`), `PUT /front-desk/data/:id`
+  - `GET /code-post/get-charge`, `GET /code-post/get-code-items` (master-setup + master-system, sebelum `/code-post/:id`)
   - `PUT /reservation/ledger/move/:id`
-  - `POST/PUT/DELETE /event-management-item` (+ event_id filter + formatTable parity)
-- Master meta parity (forms crashing/empty via CheckBoxBase options.map):
-  - generic createForm/editForm per-model master (statuses; overbooking room_types+business_date; allotment company_guest)
-  - lost-found form (statuses/itemsStatus/reservations/rooms/statusLost), company profile (17-key Laravel master), property form (is_taxs/market_segments/subscribe_types/regions/...)
-  - email-builder templateTypes, email-group users + group_list emails, company-others code_posts
-- New shared `src/utils/cmsConfig.ts` (config lists, moneyFormat, CodePost::calculate parity)
-- Laravel upstream bugs kept as-is (holiday form /cms/rate, overbooking form /cms/allotment)
+  - `POST/PUT/DELETE /event-management-item` (+ filter event_id + parity formatTable)
+- Parity master meta (form crash/kosong lewat CheckBoxBase options.map):
+  - generic createForm/editForm master per-model (statuses; overbooking room_types+business_date; allotment company_guest)
+  - form lost-found (statuses/itemsStatus/reservations/rooms/statusLost), company profile (master Laravel 17-key), form property (is_taxs/market_segments/subscribe_types/regions/...)
+  - email-builder templateTypes, email-group users + email group_list, company-others code_posts
+- `src/utils/cmsConfig.ts` shared baru (list config, moneyFormat, parity CodePost::calculate)
+- Bug upstream Laravel dibiarin apa adanya (form holiday /cms/rate, form overbooking /cms/allotment)
 
 ### Testing
-- `npx tsc --noEmit` clean, jest 69/69 green, server boot clean
-- Pending: live browser verification per module (user restarts watchlogs.js)
+- `npx tsc --noEmit` bersih, jest 69/69 hijau, boot server bersih
+- Pending: verifikasi browser live per module (user restart watchlogs.js)
 
-### Remaining (issue #3, #4, #5 open)
-- STAAH: full ARI push flow verification, background jobs (queue) not yet ported
-- Full 1:1 route:list diff Laravel vs node (partial audits done per module)
-- Cutover: contract diff test, performance sanity, parallel run, rollback plan, decommission
+### Sisa (issue #3, #4, #5 masih open)
+- STAAH: verifikasi full flow ARI push, background jobs (queue) belum diporting
+- Diff 1:1 route:list Laravel vs node (audit parsial per module udah)
+- Cutover: test contract diff, sanity performa, run paralel, rencana rollback, decommission
