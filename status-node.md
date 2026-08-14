@@ -142,3 +142,16 @@ Other notes:
 - [ ] Clean stale frontend-node/.next
 - [x] Root-cause `/api/cms` 404 for master-system/statistic/content/admin mounts — NOT a bug; report.routes legacy `/cms`-prefixed paths at root+/api explain stray 200s; unprefixed routers only match `/cms/...` via their `/cms` mount (frontend convention).
 - [ ] Commit + push both repos; close issues #6 #7 #8 (nodeHMS)
+## 2026-08-14 menu tabs fix (22ebdbc)
+- menuGetParentByIdChildren rewritten: Laravel MenuResources parity (walk to root, recursive children, 66/67/68->63, url ?parent=&module=, place form/table, per-menu permission flags, market_segment filters)
+- route optional id (no-id -> 200 code 200 data [])
+- special case /reservation/vr/reservation -> 69
+- verified live: children/1116 -> 20 rows root children, kids 3,4 (User+Role); vr -> 12 rows first id=63
+- verify4.js untracked probe
+
+## 2026-08-14 sidebar parent urls + 2 bugfix (5b4e3cc)
+- menuListAll -> MenuResources parity: url ?parent=&module=, alias_url, recursive children, pagging/permission/datas (admin nav-menu page), active-only, market_segment filter
+- cityByCountry literal undefined/null -> [] not 500
+- guest update: guest_status virtual field removed from data (PUT profile/guest 500 fix)
+- verified: USER ACCOUNT 1116 -> /user?parent=1116&module= kids 3,4; cityByCountry undefined -> 200 []; PUT 71819 -> 200
+- verify5.js untracked probe
