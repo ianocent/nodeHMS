@@ -49,6 +49,7 @@ router.delete('/menus/:id', authMiddleware, requirePermission(1115, 'delete'), A
 router.post('/menus/:id/restore', authMiddleware, requirePermission(1115, 'edit'), AdminController.menuRestore);
 router.put('/menu/sort', authMiddleware, requirePermission(1115, 'edit'), AdminController.menuSort);
 router.get('/list/:slug', authMiddleware, AdminController.menuListBySlug);
+router.get('/menu/get-parent-by-id-children', authMiddleware, AdminController.menuGetParentByIdChildren);
 router.get('/menu/get-parent-by-id-children/:id', authMiddleware, AdminController.menuGetParentByIdChildren);
 
 // Setting routes

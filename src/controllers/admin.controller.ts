@@ -409,31 +409,54 @@ export class AdminController {
 
   static async menuGetParentByIdChildren(req: Request, res: Response): Promise<void> {
     try {
-      const rawId = req.params.id;
-      if (!rawId || rawId === 'null' || rawId === 'undefined') {
-        success(res, { data: [], breadcumbs: [] }, 'Success');
+      const ischildren = String(req.query.ischildren ?? '1') === '1' ? 1 : 0;
+      let rawId = String(req.params.id ?? '');
+      // Laravel parity: special-case reservation vr path maps to menu 69
+      if (String(req.query.path) === '/reservation/vr/reservation') rawId = '69';
+
+      let menu: any = null;
+      if (rawId && rawId !== 'null' && rawId !== 'undefined') {
+        menu = await getPrisma().menus.findUnique({ where: { id: idParam(rawId) } });
+      }
+      if (!menu || menu.deleted_at) {
+        // Laravel: HTTP 404 but body code 200 + empty data (frontend checks body code only)
+        success(res, [], 'Success');
         return;
       }
-      const id = idParam(rawId);
-      const menus = await getPrisma().menus.findMany({ where: { parent_id: id, deleted_at: null }, orderBy: { sort: 'asc' } });
 
-      // Build breadcrumbs by traversing parent chain up to root
-      const breadcumbs: { name: string; url: string }[] = [];
-      let currentId: bigint | null = id;
+      // Walk up parent chain to root (Laravel: while ($data->parent_id != null) $data = $data->parent)
+      let root: any = menu;
       const visited = new Set<string>();
-      while (currentId && !visited.has(currentId.toString())) {
-        visited.add(currentId.toString());
-        const parent: any = await getPrisma().menus.findUnique({
-          where: { id: currentId },
-          select: { id: true, name: true, url: true, parent_id: true },
-        });
+      while (root.parent_id && !visited.has(root.parent_id.toString())) {
+        visited.add(root.parent_id.toString());
+        const parent: any = await getPrisma().menus.findUnique({ where: { id: root.parent_id } });
         if (!parent) break;
-        breadcumbs.unshift({ name: parent.name || '', url: parent.url || '' });
-        currentId = parent.parent_id;
+        root = parent;
+      }
+      if (!root) { error(res, 'Not Found', 404); return; }
+
+      // Property market-segment filters (menus 19-22)
+      const pid = req.user?.lastProperty ?? null;
+      const property = pid ? await getPrisma().properties.findUnique({ where: { id: pid } }) : null;
+      const excluded: bigint[] = [];
+      if (property) {
+        if (!property.market_segment_1) excluded.push(19n);
+        if (!property.market_segment_2) excluded.push(20n);
+        if (!property.market_segment_3) excluded.push(21n);
+        if (!property.market_segment_4) excluded.push(22n);
       }
 
-      success(res, { data: bigintToNumber(menus), breadcumbs }, 'Success');
-    } catch (err: any) { error(res, 'Failed to get children', 500); }
+      const allMenus = await getPrisma().menus.findMany({
+        where: { deleted_at: null },
+        orderBy: [{ left: 'asc' }, { sort: 'asc' }],
+      });
+
+      const children = buildMenuResources(root.id, allMenus, excluded, ischildren, 0, req.user);
+      success(res, children, 'Success');
+    } catch (err: any) {
+      console.error('Menu get parent by id children error:', err);
+      error(res, 'Failed to get children', 500);
+    }
   }
 
   // ================================================================
@@ -796,4 +819,81 @@ function parseJsonField(val: any, fallback: any): any {
   if (!val) return fallback;
   if (typeof val === 'object') return val;
   try { return JSON.parse(val); } catch { return val; }
+}
+
+function menuPermissions(menuId: bigint, user: any): { view: boolean; edit: boolean; approve: boolean } {
+  if (!user) return { view: false, edit: false, approve: false };
+  if (user.superUser) return { view: true, edit: true, approve: true };
+  const crud = user.permissions?.get(menuId);
+  return {
+    view: !!crud?.view,
+    edit: !!crud?.edit,
+    // Prisma role_menu_crud has no approve column; fall back to view (Laravel: approve)
+    approve: !!crud?.view,
+  };
+}
+
+// Laravel MenuResources parity (recursive)
+function toMenuResource(
+  m: any,
+  allMenus: any[],
+  excluded: bigint[],
+  ischildren: number,
+  depth: number,
+  user: any
+): any {
+  const id = Number(m.id);
+  const mappedId = [66, 67, 68].includes(id) ? 63 : id;
+  const parent = depth === 1 && ischildren === 1
+    ? (m.parent_id ? Number(m.parent_id) : null)
+    : mappedId;
+  const rawUrl = m.url || '';
+  const url = rawUrl
+    ? rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'parent=' + parent + '&module=' + (m.visibility ?? '')
+    : rawUrl;
+  const aliasUrl = rawUrl.includes('?') ? rawUrl.split('?')[0] : rawUrl;
+  const perms = menuPermissions(m.id, user);
+
+  const resource: any = {
+    no: m.sort ?? 0,
+    id: mappedId,
+    parent_id: m.parent_id ? Number(m.parent_id) : null,
+    page_id: null,
+    name: parseJsonField(m.name, {}),
+    url,
+    alias_url: aliasUrl,
+    recursive: depth,
+    media: parseJsonField(m.media, {}),
+    target: m.target,
+    module: m.visibility ?? '',
+    status: m.status ?? 0,
+    is_view: perms.view,
+    is_edit: perms.edit,
+    is_need_approval: perms.approve,
+    place: '',
+  };
+
+  const children = allMenus.filter(c =>
+    c.parent_id && c.parent_id.toString() === m.id.toString() && !excluded.includes(c.id)
+  );
+  if (children.length > 0) {
+    resource.place = m.child_type === 'form' ? 'form' : 'table';
+    resource.relation = {
+      children: children.map(c => toMenuResource(c, allMenus, excluded, ischildren, depth + 1, user)),
+    };
+  }
+  return resource;
+}
+
+function buildMenuResources(
+  parentId: bigint,
+  allMenus: any[],
+  excluded: bigint[],
+  ischildren: number,
+  depth: number,
+  user: any
+): any[] {
+  return allMenus
+    .filter(m => m.parent_id && m.parent_id.toString() === parentId.toString() && !excluded.includes(m.id))
+    .map(m => toMenuResource(m, allMenus, excluded, ischildren, depth, user));
 }
