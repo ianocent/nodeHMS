@@ -133,12 +133,12 @@ Other notes:
 - Live verified (verify3.js, base `http://localhost:3001` — frontend base, NOT `/api`): check-last-user-folio POST 200 status:0, no-show/over-stay 200 (10 rows w/ date), room-change 200, guest-listing-report 200 (5 rows), email-send/master 200, statistic 200, list/event-package + event-list 200 with label.
 - Sweep: 186 URIs → 24 fail, ALL false positives (17 POST-only routes the GET sweep can't hit — helper/check-last-user-folio POST verified 200; 2 date-required 400s; check-value 400; rate/promotion rate_id=1 absent → Laravel parity; companyProfile dead code; bare /cms/list; property/auth/ without id).
 - Gotcha: POST probes must send `Content-Type: application/json` — raw `text/plain` bodies get AES-decrypt attempted (requestParser) and stay strings → 400.
-- Note: `/api/cms/*` 404s for some route files (master-system/statistic/content/admin) despite dist mounting both `/api` and `/cms`; frontend + sweep use `/cms/*` only, so NOT a blocker. Cause unresolved.
+- Note: `/api/cms/*` 404s for some route files (master-system/statistic/content/admin) despite dist mounting both `/api` and `/cms`; frontend + sweep use `/cms/*` only, so NOT a blocker. Cause unresolved. → **RESOLVED 2026-08-14**: `report.routes.ts` uses `/cms/...`-prefixed paths mounted at ROOT (`app.use(reportRoutes)` index.ts:106) + `/api` (108) — its `/cms/guest/guest-listing-report` (line 50) explains the stray `/api/cms/guest/...` 200s. All other routers use unprefixed paths mounted at `/api` + `/cms` → `/api/cms/...` cannot match them (by design); frontend only calls `/cms/...` which matches via the `/cms` mounts. No bug.
 
 ### Next steps
 - [x] Verify guest-request + report mount live
 - [x] Fix batch 2 (menu list, night-audit trio, email master, statistic, guest listing, success() meta) — `fc61455` pushed
 - [ ] Remove package-lock.json from frontend-node (yarn is source of truth)
 - [ ] Clean stale frontend-node/.next
-- [ ] Root-cause `/api/cms` 404 for master-system/statistic/content/admin mounts (frontend unaffected)
+- [x] Root-cause `/api/cms` 404 for master-system/statistic/content/admin mounts — NOT a bug; report.routes legacy `/cms`-prefixed paths at root+/api explain stray 200s; unprefixed routers only match `/cms/...` via their `/cms` mount (frontend convention).
 - [ ] Commit + push both repos; close issues #6 #7 #8 (nodeHMS)
