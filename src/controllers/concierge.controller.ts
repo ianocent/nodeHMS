@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { STATUSES, ITEM_LOST_FOUND_STATUS, STATUS_LOST } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -270,14 +271,32 @@ export class ConciergeController {
 
   static async lostFoundForm(req: Request, res: Response): Promise<void> {
     try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const master: any = {
+        statuses: STATUSES,
+        itemsStatus: ITEM_LOST_FOUND_STATUS,
+        reservations: [],
+        statusLost: STATUS_LOST,
+      };
+      try {
+        const rooms = await prisma.rooms.findMany({
+          where: { deleted_at: null, status: 1, ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        master.rooms = rooms.map((r: any) => ({ value: Number(r.id), label: r.name }));
+      } catch (e: any) {
+        master.rooms = [];
+        console.error('Lost & found rooms error:', e);
+      }
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) {
-        success(res, { status: 0 }, 'Success', 200);
+        success(res, { status: 0 }, 'Success', 200, { master });
         return;
       }
       const data = await prisma.lost_and_founds.findUnique({ where: { id: BigInt(idRaw) } });
       if (!data || data.deleted_at) { notFound(res, 'Lost & found not found'); return; }
-      success(res, bigintToNumber(data), 'Success', 200);
+      success(res, bigintToNumber(data), 'Success', 200, { master });
     } catch (err: any) { console.error('Lost & found form error:', err); error(res, 'Failed to load lost & found', 500); }
   }
 

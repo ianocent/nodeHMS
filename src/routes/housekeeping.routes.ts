@@ -16,6 +16,7 @@ router.get('/housekeeping/setups/:id', authMiddleware, requirePermission(158, 'v
 router.put('/housekeeping/setups/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.setupUpdate);
 router.delete('/housekeeping/setups/:id', authMiddleware, requirePermission(158, 'delete'), HousekeepingController.setupDestroy);
 router.get('/housekeeping/room-status', authMiddleware, requirePermission(158, 'view'), HousekeepingController.roomStatus);
+router.get('/housekeeping/room-status/master', authMiddleware, requirePermission(158, 'view'), HousekeepingController.roomStatusMaster);
 router.get('/housekeeping/room-status/create', authMiddleware, requirePermission(158, 'add'), RoomController.create);
 router.get('/housekeeping/room-status/:id/update', authMiddleware, requirePermission(158, 'edit'), RoomController.edit);
 router.post('/housekeeping/room-status', authMiddleware, requirePermission(158, 'add'), RoomController.store);

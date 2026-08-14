@@ -42,6 +42,27 @@ function reservationBn(val: any): any {
 }
 
 export class ReservationController {
+  // Replicates Laravel ReservationController@moveLedger (PUT /reservation/ledger/move/:id).
+  static async moveLedger(req: Request, res: Response): Promise<void> {
+    try {
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Transaction not found'); return; }
+      const id = BigInt(idRaw);
+      const ledgerTo = String(req.body?.ledger_to ?? '');
+      if (!ledgerTo) { notFound(res, 'The ledger to field is required.'); return; }
+
+      const transaction = await prisma.transactions.findUnique({ where: { id } });
+      if (!transaction) { notFound(res, 'Transaction not found'); return; }
+
+      await prisma.transactions.update({ where: { id }, data: { bill_to: ledgerTo, updated_at: new Date(), updated_by: req.user?.id } });
+
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Move ledger error:', err);
+      error(res, 'Failed to move ledger', 500);
+    }
+  }
+
   // ─────────────────────────────────────────────
   // GET /api/reservations
   // ─────────────────────────────────────────────

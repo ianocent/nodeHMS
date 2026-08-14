@@ -3,6 +3,8 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
+import { STATUSES } from '../utils/cmsConfig';
+import { AuthController } from './auth.controller';
 
 const genericPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const genericAdapter = new PrismaPg(genericPool);
@@ -243,10 +245,42 @@ export class GenericController {
     }
   }
 
+  private async buildMaster(model: string, propertyId: bigint | null): Promise<{ [key: string]: any }> {
+    const prisma = getPrisma();
+    const base: { [key: string]: any } = { statuses: STATUSES };
+    try {
+      if (model === 'overbooking') {
+        const roomTypes = await prisma.room_types.findMany({
+          where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        base.room_types = roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name }));
+      } else if (model === 'allotment') {
+        const companies = await prisma.company_profiles.findMany({
+          where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        base.company_guest = companies.map((c: any) => ({ value: Number(c.id), label: c.name }));
+      }
+      return base;
+    } catch (err: any) {
+      console.error('Generic buildMaster error for model:', model, err);
+      return base;
+    }
+  }
+
   async createForm(req: Request, res: Response): Promise<void> {
     try {
+      const model = String(req.params.model);
       const permission = { view: true, add: true, edit: true, delete: true };
-      success(res, { status: 1 }, 'Success', 200, { table: [], master: {}, search_data: [], permission });
+      const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
+      const extra: any = { table: [], master, search_data: [], permission };
+      if (model === 'overbooking') {
+        extra.business_date = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+      }
+      success(res, { status: 1 }, 'Success', 200, extra);
     } catch (err: any) {
       error(res, 'Failed to load form data', 500);
     }
@@ -261,7 +295,8 @@ export class GenericController {
       const record = await modelDelegate.findUnique({ where: { id } });
       if (!record) { notFound(res, 'Record not found'); return; }
       const permission = { view: true, add: true, edit: true, delete: true };
-      success(res, bigintToNumber(record), 'Success', 200, { table: [], master: {}, search_data: [], permission });
+      const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
+      success(res, bigintToNumber(record), 'Success', 200, { table: [], master, search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic edit form error:', err); error(res, 'Failed to load', 500); }

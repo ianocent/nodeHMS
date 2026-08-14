@@ -38,9 +38,12 @@ router.post('/transactions/:id/void', authMiddleware, FrontDeskController.transa
 // Singular aliases for transactions
 router.get('/transaction', authMiddleware, FrontDeskController.transactionList);
 router.post('/transaction', authMiddleware, FrontDeskController.transactionStore);
+router.get('/transaction/folio', authMiddleware, FrontDeskController.transactionFolio);
+router.get('/transaction/create', authMiddleware, FrontDeskController.transactionCreate);
 router.get('/transaction/pos', authMiddleware, requirePermission(69, 'view'), PosController.listTransactions);
 router.get('/transaction/:id', authMiddleware, FrontDeskController.transactionShow);
 router.post('/transaction/:id/void', authMiddleware, FrontDeskController.transactionVoid);
+router.put('/front-desk/data/:id', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.updateData);
 
 // Batch Posting
 router.get('/batch-postings', authMiddleware, FrontDeskController.batchPostingList);

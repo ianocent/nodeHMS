@@ -49,6 +49,7 @@ router.get('/reservation/in-house', authMiddleware, requirePermission(80, 'view'
 router.get('/reservation/pending', authMiddleware, requirePermission(80, 'view'), ReservationController.pending);
 router.post('/reservation/on-check', authMiddleware, requirePermission(80, 'view'), ReservationController.onCheck);
 router.post('/reservation/update-bulk', authMiddleware, requirePermission(80, 'edit'), ReservationController.updateBulk);
+router.put('/reservation/ledger/move/:id', authMiddleware, requirePermission(80, 'edit'), ReservationController.moveLedger);
 
 // ── Reservation sub-feature statics (must precede /reservation/:id) ──
 router.get('/reservation/code-item', authMiddleware, requirePermission(80, 'view'), ReservationController.codeItemList);

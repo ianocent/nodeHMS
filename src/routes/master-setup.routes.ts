@@ -87,6 +87,8 @@ router.delete('/code-posts/:id', authMiddleware, MasterDataController.codePostDe
 // Singular aliases for frontend compatibility
 router.get('/code-post', authMiddleware, MasterDataController.codePostList);
 router.post('/code-post', authMiddleware, MasterDataController.codePostCreate);
+router.get('/code-post/get-charge', authMiddleware, MasterDataController.getCharge);
+router.get('/code-post/get-code-items', authMiddleware, MasterDataController.getCodeItems);
 router.get('/code-post/:id', authMiddleware, MasterDataController.codePostShow);
 router.put('/code-post/:id', authMiddleware, MasterDataController.codePostUpdate);
 router.delete('/code-post/:id', authMiddleware, MasterDataController.codePostDestroy);
@@ -145,6 +147,8 @@ router.delete('/code-posts/:id', authMiddleware, MasterDataController.codePostDe
 // Singular aliases for frontend compatibility
 router.get('/code-post', authMiddleware, MasterDataController.codePostList);
 router.post('/code-post', authMiddleware, MasterDataController.codePostCreate);
+router.get('/code-post/get-charge', authMiddleware, MasterDataController.getCharge);
+router.get('/code-post/get-code-items', authMiddleware, MasterDataController.getCodeItems);
 router.get('/code-post/:id', authMiddleware, MasterDataController.codePostShow);
 router.put('/code-post/:id', authMiddleware, MasterDataController.codePostUpdate);
 router.delete('/code-post/:id', authMiddleware, MasterDataController.codePostDestroy);

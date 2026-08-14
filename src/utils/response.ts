@@ -18,6 +18,7 @@ export interface ApiMeta {
   folio?: any;
   market_property?: any;
   building?: any;
+  ledger?: any;
   meta?: any;
 }
 
@@ -54,6 +55,7 @@ export function success(
     ...(meta?.folio ? { folio: meta.folio } : {}),
     ...(meta?.market_property ? { market_property: meta.market_property } : {}),
     ...(meta?.building !== undefined ? { building: meta.building } : {}),
+    ...(meta?.ledger !== undefined ? { ledger: meta.ledger } : {}),
     ...(meta?.meta !== undefined ? { meta: meta.meta } : {}),
   });
 }

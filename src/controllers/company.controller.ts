@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
+import { STATUSES, REGIONS, BILLINGS, TERMS } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -54,24 +55,72 @@ export class CompanyController {
     try { const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id; if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; } const id = BigInt(raw); const d = await prisma.company_profiles.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bn(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
+  // Replicates Laravel CompanyProfileController@create/edit master.
+  static async buildCompanyMaster(req: Request): Promise<{ [key: string]: any }> {
+    const pid = BigInt(req.user?.lastProperty ?? 0);
+    const groupFilter = ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'company-type', 'guest-status', 'source'];
+    const [mktSeg, staff, property, countries, cities] = await Promise.all([
+      prisma.types.findMany({
+        where: { deleted_at: null, status: 1, group: { in: groupFilter } },
+        select: { id: true, name: true, group: true },
+        orderBy: { name: 'asc' },
+      }),
+      prisma.users.findMany({
+        where: { deleted_at: null, ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+      prisma.properties.findUnique({ where: { id: pid } }),
+      prisma.countries.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.cities.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    ]);
+    const byGroup = (g: string) =>
+      mktSeg.filter((t: any) => t.group === g).map((t: any) => ({ value: Number(t.id), label: t.name }));
+    const statusGuest = byGroup('guest-status');
+    const statusGuestOrdered = [...statusGuest.filter((s: any) => String(s.label).toLowerCase().includes('normal')), ...statusGuest.filter((s: any) => !String(s.label).toLowerCase().includes('normal'))];
+    const statusBlacklist = statusGuest.filter((s: any) => String(s.label).toLowerCase().includes('blacklist'));
+    return {
+      statuses: STATUSES,
+      statusGuest: statusGuestOrdered,
+      regions: REGIONS,
+      typeCompany: byGroup('company-type'),
+      billings: BILLINGS,
+      terms: TERMS,
+      market_segment_1: byGroup('market-segment-1'),
+      market_segment_2: byGroup('market-segment-2'),
+      market_segment_3: byGroup('market-segment-3'),
+      market_segment_4: byGroup('market-segment-4'),
+      source: byGroup('source'),
+      staff: staff.map((u: any) => ({ value: Number(u.id), label: u.name })),
+      markets: property
+        ? {
+            id: Number(property.id),
+            name: property.name,
+            email: property.email,
+            telp: property.telp,
+            is_tax: { value: !!property.is_tax, label: property.is_tax ? 'Yes' : 'No' },
+            is_tax_exclude_restaurant: { value: !!property.is_tax_exclude_restaurant, label: property.is_tax_exclude_restaurant ? 'Yes' : 'No' },
+            is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is_tax_exclude_room ? 'Yes' : 'No' },
+          }
+        : null,
+      statusBlacklist,
+      countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
+      cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
+    };
+  }
+
   static async createForm(req: Request, res: Response): Promise<void> {
     try {
+      const master = await CompanyController.buildCompanyMaster(req);
       if (req.params.id !== undefined) {
         const id = idP(req.params.id);
         const d = await prisma.company_profiles.findUnique({ where: { id } });
         if (!d) { notFound(res); return; }
-        success(res, bn(d), 'Success');
+        success(res, bn(d), 'Success', 200, { master });
         return;
       }
-      const [countries, types] = await Promise.all([
-        prisma.countries.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-        prisma.code_posts.findMany({ where: { type: 'COMPANY', deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-      ]);
       success(res, { status: 1 }, 'Success', 200, {
-        master: {
-          countries: countries.map(c => ({ value: Number(c.id), label: c.name })),
-          type_companies: types.map(t => ({ value: Number(t.id), label: t.name })),
-        },
+        master,
       });
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
   }

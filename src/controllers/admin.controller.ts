@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { TABLES, laravelPaging } from '../utils/tableMeta';
+import { STATUSES, REGIONS, SUBSCRIBE_TYPES, IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS } from '../utils/cmsConfig';
 
 const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adminAdapter = new PrismaPg(adminPool);
@@ -743,18 +744,36 @@ export class AdminController {
     }
   }
 
+  // Replicates Laravel PropertyController@create master (statuses/companies/is_taxs/is_tax_exclude_restaurants/market_segments/subscribe_types/regions) + node extras.
+  private static async buildPropertyMaster(): Promise<{ [key: string]: any }> {
+    const [cities, countries, companies] = await Promise.all([
+      getPrisma().cities.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      getPrisma().company_profiles.findMany({
+        where: { deleted_at: null, status: 1 },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+    ]);
+    return {
+      cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
+      countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
+      statuses: STATUSES,
+      companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
+      is_taxs: IS_TAXS,
+      is_tax_exclude_restaurants: IS_TAX_EXCLUDE_RESTAURANTS,
+      market_segments: STATUSES,
+      subscribe_types: SUBSCRIBE_TYPES,
+      regions: REGIONS,
+    };
+  }
+
   static async propertyCreate(req: Request, res: Response): Promise<void> {
     try {
-      const [cities, countries] = await Promise.all([
-        getPrisma().cities.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-        getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-      ]);
+      const master = await AdminController.buildPropertyMaster();
       success(res, { status: 1 }, 'Success', 200, {
         table: [],
-        master: {
-          cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
-          countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
-        },
+        master,
         search_data: [],
         permission: { view: true, add: true, edit: true, delete: true },
       });
@@ -804,16 +823,10 @@ export class AdminController {
       const id = BigInt(String(req.params.id));
       const property = await getPrisma().properties.findUnique({ where: { id } });
       if (!property) { notFound(res, 'Property not found'); return; }
-      const [cities, countries] = await Promise.all([
-        getPrisma().cities.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-        getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-      ]);
+      const master = await AdminController.buildPropertyMaster();
       success(res, { ...bigintToNumber(property), id: Number(property.id) }, 'Success', 200, {
         table: [],
-        master: {
-          cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
-          countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
-        },
+        master,
         search_data: [],
         permission: { view: true, add: true, edit: true, delete: true },
       });

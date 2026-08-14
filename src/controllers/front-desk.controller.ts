@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { STATUSES, moneyFormat } from '../utils/cmsConfig';
+import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -379,6 +381,110 @@ export class FrontDeskController {
       if (!data) { notFound(res, 'Transaction not found'); return; }
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to load transaction', 500); }
+  }
+
+  // Replicates Laravel TransactionController@create (GET /transaction/create?folio_id=&type_button=)
+  static async transactionCreate(req: Request, res: Response): Promise<void> {
+    try {
+      const folioId = String(req.query.folio_id ?? '');
+      if (!folioId || !/^\d+$/.test(folioId)) { badRequest(res, 'The folio id field is required.'); return; }
+      const id = BigInt(folioId);
+      const folio = await prisma.folios.findUnique({
+        where: { id },
+        include: {
+          company_profiles_folios_company_profile_idTocompany_profiles: { select: { id: true, name: true } },
+        },
+      });
+      if (!folio) { badRequest(res, 'The selected folio id is invalid.'); return; }
+      const guest = folio.guest_profile_id ? await prisma.guest_profiles.findUnique({ where: { id: folio.guest_profile_id } }).catch(() => null) : null;
+
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const [typePayments, postCodeManual, transferFolios] = await Promise.all([
+        prisma.type_payments.findMany({
+          where: { deleted_at: null, status: 1, ...(req.user?.lastProperty ? { property_id: pid } : {}), code_posts: { type: 'IS_PAYMENT' } },
+          include: { code_posts: { select: { id: true, name: true } } },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.code_posts.findMany({
+          where: { deleted_at: null, status: 1, type: 'DEFAULT', ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        String(req.query.type_button ?? '') === 'transfer'
+          ? prisma.folios.findMany({
+              where: { deleted_at: null, id: { not: id }, status_reservation: 0 },
+              select: { id: true, folio_number: true },
+              orderBy: { id: 'desc' },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      const ledgers: { value: string; label: string }[] = [];
+      const company = folio.company_profiles_folios_company_profile_idTocompany_profiles;
+      if (company?.name) ledgers.push({ value: `${Number(company.id)}-company`, label: company.name });
+      if (guest?.id) ledgers.push({ value: `${Number(guest.id)}-guest`, label: `${guest.first_name || ''} ${guest.last_name || ''}`.trim() });
+
+      const txns = await prisma.transactions.findMany({ where: { folio_id: id }, select: { total: true, type_amount: true } });
+      let total = txns.reduce((sum: number, t: any) => sum + (t.type_amount === 'MINUS' ? -Number(t.total) : Number(t.total)), 0);
+      if (total === 0 && folio.cash_on_arrival) {
+        const resv = await prisma.reservations.findMany({ where: { folio_id: id }, select: { total: true } });
+        total = resv.reduce((sum: number, r: any) => sum + Number(r.total ?? 0), 0);
+      }
+
+      success(res, bigintToNumber(folio), 'Success', 200, {
+        master: {
+          statuses: STATUSES,
+          ledgers,
+          code_posts: typePayments.map((tp: any) => ({ value: Number(tp.id), label: `${tp.code_posts?.name || ''} - ${tp.name}` })),
+          postCodeManual: postCodeManual.map((cp: any) => ({ value: Number(cp.id), label: cp.name })),
+          folios: transferFolios.map((f: any) => ({ value: Number(f.id), label: f.folio_number })),
+          paid_out: total < 0 ? moneyFormat(-total) : 0,
+          payment: total > 0 ? moneyFormat(total) : 0,
+          bussiness_date: await AuthController.getBusinessDate(req.user?.lastProperty ?? null),
+        },
+      });
+    } catch (err: any) { console.error('Transaction create error:', err); error(res, 'Failed to load transaction form', 500); }
+  }
+
+  // Replicates Laravel TransactionController@folio (GET /transaction/folio?folio_id=)
+  static async transactionFolio(req: Request, res: Response): Promise<void> {
+    try {
+      const folioId = String(req.query.folio_id ?? '');
+      if (!folioId || !/^\d+$/.test(folioId)) { badRequest(res, 'The folio id field is required.'); return; }
+      const id = BigInt(folioId);
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const folios = await prisma.folios.findMany({
+        where: { deleted_at: null, id: { not: id }, status_reservation: 0, ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+        include: {
+          company_profiles_folios_company_profile_idTocompany_profiles: { select: { name: true } },
+        },
+        orderBy: { id: 'desc' },
+      });
+      const guestIds = folios.map((f: any) => f.guest_profile_id).filter(Boolean);
+      const guests = guestIds.length
+        ? await prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } })
+        : [];
+      const guestMap = new Map(guests.map((g: any) => [Number(g.id), g]));
+      success(res, folios.map((f: any) => ({
+        value: Number(f.id),
+        label: `${f.folio_number || ''} - ${f.company_profiles_folios_company_profile_idTocompany_profiles?.name || ''} - ${(guestMap.get(Number(f.guest_profile_id))?.first_name || '') + ' ' + (guestMap.get(Number(f.guest_profile_id))?.last_name || '')}`.trim(),
+      })), 'Success');
+    } catch (err: any) { console.error('Transaction folio error:', err); error(res, 'Failed to load folios', 500); }
+  }
+
+  // PUT /front-desk/data/:id - save folio remark/message fields (Laravel frontend flow)
+  static async updateData(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const whitelist = ['remark', 'remark_ins', 'check_in_instruction', 'check_out_instruction', 'posting_instruction', 'image'];
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
+      for (const key of whitelist) {
+        if (req.body && req.body[key] !== undefined) data[key] = req.body[key];
+      }
+      if (Object.keys(data).length <= 2) { badRequest(res, 'No fields to update'); return; }
+      const folio = await prisma.folios.update({ where: { id }, data });
+      success(res, bigintToNumber(folio), 'Success');
+    } catch (err: any) { console.error('Front desk update data error:', err); error(res, 'Failed to update', 500); }
   }
 
   static async transactionVoid(req: Request, res: Response): Promise<void> {

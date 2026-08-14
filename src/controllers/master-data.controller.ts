@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
+import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -215,6 +216,107 @@ export class MasterDataController {
       success(res, null, 'Code post deleted');
     } catch (err: any) {
       error(res, 'Failed to delete code post', 500);
+    }
+  }
+
+  // Replicates Laravel CodePostController@getCharge (surcharge + tax calculation + ledger).
+  static async getCharge(req: Request, res: Response): Promise<void> {
+    try {
+      const codePostId = String(req.query.code_post_id ?? '');
+      const amountRaw = String(req.query.amount ?? '');
+      const type = String(req.query.type ?? '');
+      const folioId = String(req.query.folio_id ?? '');
+      if (!/^\d+$/.test(codePostId) || !amountRaw || !type || !/^\d+$/.test(folioId)) {
+        badRequest(res, 'code_post_id, amount, type and folio_id are required');
+        return;
+      }
+      const sumPrice = parseFloat(amountRaw);
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const isPaymentType = type === 'payment' || type === 'paidout' || type === 'refund';
+
+      let surcharge = 0;
+      let codePost: any = null;
+      let typePayment: any = null;
+      if (isPaymentType) {
+        typePayment = await prisma.type_payments.findUnique({
+          where: { id: BigInt(codePostId) },
+          include: { code_posts: true },
+        });
+        if (!typePayment) { badRequest(res, 'Type payment not found'); return; }
+        if (typePayment.surcharge_type === 1) {
+          surcharge += Number(typePayment.surcharge ?? 0);
+        } else {
+          surcharge += sumPrice * (Number(typePayment.surcharge ?? 0) / 100);
+        }
+        codePost = typePayment.code_posts;
+      } else {
+        codePost = await prisma.code_posts.findUnique({ where: { id: BigInt(codePostId) } });
+      }
+
+      let calc = { amount: sumPrice, service: 0, tax3: 0, pb1: 0, total: sumPrice };
+      if (codePost) {
+        const property = codePost.property_id ? await prisma.properties.findUnique({ where: { id: codePost.property_id } }) : null;
+        calc = calculateCodePost(codePost, sumPrice, !!(property?.is_tax));
+      }
+
+      const data: any = {};
+      if (calc.pb1 > 0) data.pb1 = moneyFormat(calc.pb1);
+      if (calc.service > 0) data.svr_chrg = moneyFormat(calc.service);
+      if (calc.tax3 > 0) data.tax3 = moneyFormat(calc.tax3);
+      if (surcharge > 0) data.surcharge = moneyFormat(surcharge);
+      if (isPaymentType) {
+        data.amount = moneyFormat(sumPrice - surcharge);
+      } else {
+        data.amount = moneyFormat((calc.amount ?? 0) - surcharge);
+      }
+      data.total = moneyFormat(calc.total);
+
+      const folio = await prisma.folios.findUnique({
+        where: { id: BigInt(folioId) },
+        include: { company_profiles_folios_company_profile_idTocompany_profiles: { select: { id: true, name: true } } },
+      });
+      if (!folio) { badRequest(res, 'Folio not found'); return; }
+
+      let getLedger: { value: string; label: string } = {
+        value: `${folio.company_profile_id}-company`,
+        label: folio.company_profiles_folios_company_profile_idTocompany_profiles?.name || '',
+      };
+      const codeBillingId = codePost?.code_billing_id;
+      if (codeBillingId) {
+        const ledger = await prisma.billing_tos.findFirst({
+          where: { folio_id: BigInt(folioId), billing_code: BigInt(codeBillingId), deleted_at: null },
+        });
+        if (ledger) {
+          if (ledger.model_type === 'company') {
+            const prof = await prisma.company_profiles.findUnique({ where: { id: ledger.model_id } });
+            getLedger = { value: `${Number(ledger.model_id)}-company`, label: prof?.name || '' };
+          } else {
+            const prof = await prisma.guest_profiles.findUnique({ where: { id: ledger.model_id } });
+            getLedger = { value: `${Number(ledger.model_id)}-guest`, label: prof ? `${prof.first_name || ''} ${prof.last_name || ''}`.trim() : '' };
+          }
+        }
+      }
+
+      success(res, data, 'Success', 200, { ledger: getLedger });
+    } catch (err: any) {
+      console.error('Code post getCharge error:', err);
+      error(res, 'Failed to calculate charge', 500);
+    }
+  }
+
+  // Replicates Laravel CodePostController@getCodeItems.
+  static async getCodeItems(req: Request, res: Response): Promise<void> {
+    try {
+      const codePostId = String(req.query.code_post_id ?? '');
+      const search = String(req.query.search ?? '');
+      const where: any = { deleted_at: null, status: 1 };
+      if (/^\d+$/.test(codePostId)) where.code_post_id = BigInt(codePostId);
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+      const items = await prisma.code_items.findMany({ where, orderBy: { name: 'asc' } });
+      success(res, items.map((it: any) => ({ value: Number(it.id), label: it.name, amount: moneyFormat(it.sales) })), 'Success');
+    } catch (err: any) {
+      console.error('Code post getCodeItems error:', err);
+      error(res, 'Failed to load code items', 500);
     }
   }
 

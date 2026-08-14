@@ -15,6 +15,8 @@ const router = Router();
 router.get('/code-post', authMiddleware, requirePermission(69, 'view'), MasterDataController.codePostList);
 router.get('/code-post/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_posts'; MasterDataController.masterForm(req, res); });
 router.post('/code-post', authMiddleware, requirePermission(69, 'add'), MasterDataController.codePostCreate);
+router.get('/code-post/get-charge', authMiddleware, requirePermission(69, 'view'), MasterDataController.getCharge);
+router.get('/code-post/get-code-items', authMiddleware, requirePermission(69, 'view'), MasterDataController.getCodeItems);
 router.get('/code-post/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codePostShow);
 router.get('/code-post/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codePostEdit);
 router.get('/code-post/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codePostEdit);

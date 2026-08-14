@@ -4,6 +4,9 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { STATUSES } from '../utils/cmsConfig';
+import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
+import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -114,6 +117,43 @@ export class HousekeepingController {
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Room status error:', err); error(res, 'Failed to fetch room status', 500); }
+  }
+
+  // Replicates Laravel HouseKeepingRoomStatusController@masterFilter
+  static async roomStatusMaster(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const mapConfig = (list: { id: number; name: string }[]) => list.map((item) => ({ value: item.id, label: item.name }));
+      const types = await prisma.types.findMany({
+        where: { deleted_at: null, status: 1, group: { in: ['building', 'floor'] } },
+        select: { id: true, name: true, group: true },
+        orderBy: { name: 'asc' },
+      });
+      const builders = types.filter((t: any) => t.group === 'building').map((t: any) => ({ value: Number(t.id), label: t.name }));
+      const floors = types.filter((t: any) => t.group === 'floor').map((t: any) => ({ value: Number(t.id), label: t.name }));
+      const [housekeepers, roomTypes] = await Promise.all([
+        prisma.users.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.room_types.findMany({
+          where: { deleted_at: null, status: 1, ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+      const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+      success(res, null, 'Success', 200, {
+        master: {
+          statuses: STATUSES.map((s) => ({ value: s.value, label: s.label })),
+          maidStatuses: mapConfig(Object.values(MAID_STATUSES)),
+          roomStatuses: mapConfig(Object.values(ROOM_STATUSES)),
+          housekeepers: housekeepers.map((u: any) => ({ value: Number(u.id), label: u.name })),
+          houseKeeperHistory: null,
+          builder: builders,
+          floor: floors,
+          business_date: businessDate,
+          roomTypes: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
+        },
+      });
+    } catch (err: any) { console.error('Room status master error:', err); error(res, 'Failed to load master', 500); }
   }
 
   // ==================== WORK ORDER ====================
