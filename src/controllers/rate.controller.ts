@@ -400,24 +400,7 @@ export class RateController {
 
       const { name, code, start_date, end_date, code_post_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, status } = req.body;
 
-      const errors: Record<string, string[]> = {};
-      if (!name) errors.name = ['The name field is required.'];
-      if (!code) errors.code = ['The code field is required.'];
-      if (!code_post_id) errors.code_post_id = ['The code post id field is required.'];
-      if (!start_date) errors.start_date = ['The start date field is required.'];
-      if (!end_date) errors.end_date = ['The end date field is required.'];
-
-      if (Object.keys(errors).length > 0) {
-        validationError(res, errors);
-        return;
-      }
-
       const data: any = {
-        name,
-        code,
-        code_post_id: BigInt(code_post_id),
-        start_date: new Date(start_date),
-        end_date: new Date(end_date),
         description: description || null,
         rate_type: rate_type || null,
         term_condition: term_condition || null,
@@ -428,12 +411,17 @@ export class RateController {
         sync_staah: staah === true || staah === 'true' || staah === 1,
         min_advance_booking: min_advance_booking || 0,
         max_advance_booking: max_advance_booking || 0,
-        minimum_rate: minimum_rate || 0,
+        minimum_rate: minimum_rate !== undefined && minimum_rate !== null && minimum_rate !== '' ? Number(minimum_rate) : existing.minimum_rate,
         grouping: grouping || null,
         status: status !== undefined ? status : existing.status,
         updated_by: userId,
         updated_at: new Date(),
       };
+      if (name !== undefined && name !== null && name !== '') data.name = name;
+      if (code !== undefined && code !== null && code !== '') data.code = code;
+      if (code_post_id !== undefined && code_post_id !== null && code_post_id !== '') data.code_post_id = BigInt(code_post_id);
+      if (start_date !== undefined && start_date !== null && start_date !== '') data.start_date = new Date(start_date);
+      if (end_date !== undefined && end_date !== null && end_date !== '') data.end_date = new Date(end_date);
 
       await prisma.rates.update({ where: { id }, data });
 
@@ -1062,13 +1050,13 @@ export class RateController {
 
       const rateId = BigInt(rateIdParam);
 
-      const rate = await prisma.rates.findUnique({
+      const bar = await prisma.bars.findUnique({
         where: { id: rateId },
-        select: { id: true, name: true, code: true, module: true },
+        select: { id: true, name: true },
       });
 
-      if (!rate) {
-        notFound(res, 'Rate not found');
+      if (!bar) {
+        notFound(res, 'Bar is not found');
         return;
       }
 
@@ -1153,10 +1141,8 @@ export class RateController {
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
         fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
         bar_info: {
-          id: Number(rate.id),
-          name: rate.name,
-          code: rate.code,
-          module: rate.module,
+          id: Number(bar.id),
+          name: bar.name,
         },
       };
 

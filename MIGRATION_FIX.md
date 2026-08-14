@@ -321,8 +321,16 @@ Audit probe (`probe-all.js`) hit every frontend GLOBALURI; fixed all 5xx, verifi
 ---
 
 **Started**: 2026-07-15
-**Last Updated**: 2026-08-13
-**Next**: Phase 7 done — Bar master + Rate form fixed. Outstanding: guest-request Prisma model, route alias audit, source-maps warning. Next menu to verify: other "Failed to load form data" pages (user, room, reservation, event, dynamic-rate, promotion, guest, company-contract-rate).
+**Last Updated**: 2026-08-14
+**Next**: verify session fixes live (rate update, bar tab-rate, guest POST, rate form dropdowns) after watchlogs restart; crosscheck remaining menu pages (rate-bar/bar inclusive endpoints may still need bar_inclusives/bar_rates mapping); close issues #6 #7 #8.
+
+## 2026-08-14 (session 3)
+- **rate.controller.ts update()**: validation relaxed to Laravel parity (name/start_date/end_date/code/code_post_id optional, applied only when present) — fixes PUT /cms/rate/:id 422 (frontend rate form sends no name/start_date/end_date).
+- **barRateIndex**: was querying rates by bar_id (rate not found -> 404 -> frontend "Tab Rate" crash); now bars.findUnique parity with Laravel BarRateController.
+- **extra.routes.ts**: POST /profile/guest store route added (was 404 on guest form save).
+- **frontend-node rate form**: options index misalignment fixed (data[7]=code_posts, data[8]=company_types, data[9]=cancelations, data[11]=code_posts) — Post Code/Grouping/Extra Bed dropdowns were empty.
+- **prisma client regenerated** (stale generated types — bars model missing).
+- tsc clean + jest 69/69. Commits c114e5b + 2d92e61 pushed; current batch uncommitted.
 
 ## 2026-08-14
 - **guest.controller.ts**: static methods called unbound (GuestController.list) crash on 	his.formatGuest → replaced with GuestController.formatGuest (5 sites). Guests list was 500 in prod.

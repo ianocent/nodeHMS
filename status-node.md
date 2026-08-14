@@ -155,3 +155,24 @@ Other notes:
 - guest update: guest_status virtual field removed from data (PUT profile/guest 500 fix)
 - verified: USER ACCOUNT 1116 -> /user?parent=1116&module= kids 3,4; cityByCountry undefined -> 200 []; PUT 71819 -> 200
 - verify5.js untracked probe
+
+## 2026-08-14 route aliases + BigInt + property CRUD (c114e5b, pushed)
+- kebab alias CRUD in extra.routes.ts: stop-sell-booking->stop_sells, content-room->content_rooms, channel-manager-interface->channel_manager_interfaces, payment-matrix->payment_matrices, rate-room->rates, staah-manager->staah_interfaces, staah-reservation->staah_reservations, staah-ota-mapping->staah_ota_company_mappings; allotment/room->room_allotments (registered before /allotment/:id); DELETE /stop-sell-booking bare w/ body id
+- generic.controller.ts: kebabOverrides in toPlural; sanitizeBody() strips audit keys + empty-object dates + coerces date strings; create injects property_id from req.user.lastProperty (retry without on unknown-arg); generic list honors _id query filters via BigInt(String(v))
+- BigInt fixes: rate-addon barRelationLink + dynamic-rate results wrap bigintToNumber (created_by/updated_by leaking); rate show guards non-numeric id
+- rate.routes.ts: /rate/inclusives + /rate/extra-beds aliases (query rate_id -> param rateId) registered BEFORE /rate/:id
+- property CRUD in admin.controller.ts + admin.routes.ts (GET /property/create, POST /property, GET /property/:id/update, PUT/DELETE /property/:id)
+
+## 2026-08-14 master-data coercion + guest/room masters (2d92e61, pushed)
+- master-data.controller.ts: num(v, fallback=0) + bool(v, fallback=false) helpers; coerced code-billing/post/item/gls + type-payment + holidays create/update: sort/status/isPOS/pay_commission/tax*/sales/cost/pos/front_office/surcharge* -> num(), is_online/is_event -> bool(); string fields kept plain (bad num(name) etc. reverted)
+- guest.controller.ts create+edit masters: + countries (no deleted_at filter) + cities: [] (Nationality dropdown fix)
+- room.controller.ts create+edit masters: + floors + buildings (types groups) + in_room_equiptments alias (Laravel typo parity)
+- Rate edit master already complete: statuses, room_types, code_posts, comm_codes:[], company_types, cancelations, days, fields
+
+## 2026-08-14 rate update lenient + bar tab-rate + guest store (UNCOMMITTED)
+- rate.controller.ts update(): dropped required name/start_date/end_date/code/code_post_id validation (Laravel parity - all optional); applies fields only when present; minimum_rate Number() guard
+- barRateIndex: was rates.findUnique(rate_id=bar_id) -> "Rate not found" 404 -> bar "Tab Rate" page crash; now bars.findUnique (Laravel BarRateController Bar::find parity), "Bar is not found" 404, master.bar_info from bar
+- extra.routes.ts: + POST /profile/guest (guestStore, requirePermission(82,'add')) - was missing -> 404 on guest form save
+- frontend-node/components/pages/rate/form/index.tsx: options index misaligned - data[5]=comm_codes, data[6]=code_posts, data[7]=company_types, data[8]=cancelations, data[10]=code_posts -> Post Code/Grouping/Extra Bed dropdowns empty; fixed: data[7]=code_posts, data[8]=company_types, data[9]=cancelations, data[11]=code_posts
+- prisma client regenerated (stale since 2026-07-15; bars model missing from generated types)
+- tsc clean + jest 69/69

@@ -328,8 +328,14 @@ async function guestDelete(req: Request, res: Response): Promise<void> {
   const { GuestController } = await import('../controllers/guest.controller');
   await GuestController.destroy(req, res);
 }
+
+async function guestStore(req: Request, res: Response): Promise<void> {
+  const { GuestController } = await import('../controllers/guest.controller');
+  await GuestController.store(req, res);
+}
 router.get('/profile/guest', authMiddleware, requirePermission(82, 'view'), guestList);
 router.get('/profile/guest/create', authMiddleware, requirePermission(82, 'add'), guestCreate);
+router.post('/profile/guest', authMiddleware, requirePermission(82, 'add'), guestStore);
 router.get('/profile/guest/:id/update', authMiddleware, requirePermission(82, 'edit'), guestEdit);
 router.put('/profile/guest/:id', authMiddleware, requirePermission(82, 'edit'), guestUpdate);
 router.delete('/profile/guest/:id', authMiddleware, requirePermission(82, 'delete'), guestDelete);
