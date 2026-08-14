@@ -120,8 +120,25 @@ Other notes:
 - package.json: packageManager yarn@1.22.22 (yarn.lock v1 tracked).
 - .gitignore: next.config.js un-ignored (next.config.local.js + next.config.qa.js ignored instead) — config now committable.
 
+## 2026-08-14 Session (continuation)
+
+### Fix batch 2 (committed `fc61455`, pushed) — menu list parity, night-audit trio, email master, statistic, guest listing
+- `menuListBySlug` (admin.controller.ts): Laravel `MenuController.list` parity — `findFirst uri_table='/cms/'+slug`, meta `{typeTable, uriTable, label, isDrag:true, uriSaveDrag, breadcrumbs}`. Label parses JSON-translatable `menus.name` (`{"en":"Packages"}` → `en ?? id ?? raw`).
+- **`success()` response helper (response.ts): was silently dropping meta keys** — only spread permission/pagging/table/master/search_data. Added `typeTable/uriTable/label/isDrag/uriSaveDrag/breadcrumbs` to `ApiMeta` + spread. Without this, `/cms/list/:slug` returned `{code,message,data:null}` with no meta → tabledrag pages break.
+- `emailSendMaster` (content.controller.ts): email_groups + email_builders → `master.allGroups`/`allTemplate`; route `GET /email/email-send/master` (content.routes.ts).
+- Night-audit trio (system.controller.ts + master-system.routes.ts): `nightAuditRoomChange/NoShow/OverStay` — folio queries, `is_posting:false` (Boolean! `0` → 500), noShow status in [1,0] + check_in_date<=date, overStay status=2 + check_out_date<=date, roomChange via `reservations.some room_type_id_next/room_id_next`; `date` required → 400 (Laravel parity).
+- `workOrderSummary` (housekeeping.controller.ts): all/open/on_process/finish counts; route before `/work-order/:id`.
+- `roomStatisticGrid` (statistic.controller.ts): rooms + building/floor via model_has_types + folio count via `reservations.room_id` (folios has NO room_id); route `GET /statistic` (NOT `/`).
+- `guestListingReport` (guest.controller.ts): status_profile/gender/min_age/max_age/search filters; static route before `/guest/:id`.
+- Live verified (verify3.js, base `http://localhost:3001` — frontend base, NOT `/api`): check-last-user-folio POST 200 status:0, no-show/over-stay 200 (10 rows w/ date), room-change 200, guest-listing-report 200 (5 rows), email-send/master 200, statistic 200, list/event-package + event-list 200 with label.
+- Sweep: 186 URIs → 24 fail, ALL false positives (17 POST-only routes the GET sweep can't hit — helper/check-last-user-folio POST verified 200; 2 date-required 400s; check-value 400; rate/promotion rate_id=1 absent → Laravel parity; companyProfile dead code; bare /cms/list; property/auth/ without id).
+- Gotcha: POST probes must send `Content-Type: application/json` — raw `text/plain` bodies get AES-decrypt attempted (requestParser) and stay strings → 400.
+- Note: `/api/cms/*` 404s for some route files (master-system/statistic/content/admin) despite dist mounting both `/api` and `/cms`; frontend + sweep use `/cms/*` only, so NOT a blocker. Cause unresolved.
+
 ### Next steps
 - [x] Verify guest-request + report mount live
+- [x] Fix batch 2 (menu list, night-audit trio, email master, statistic, guest listing, success() meta) — `fc61455` pushed
 - [ ] Remove package-lock.json from frontend-node (yarn is source of truth)
 - [ ] Clean stale frontend-node/.next
+- [ ] Root-cause `/api/cms` 404 for master-system/statistic/content/admin mounts (frontend unaffected)
 - [ ] Commit + push both repos; close issues #6 #7 #8 (nodeHMS)
