@@ -4,6 +4,21 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { AuthController } from './auth.controller';
+import {
+  ROOM_STATUSES,
+  MAID_STATUSES,
+  STATUS_RESERVATION_MAP,
+  getColorRoom,
+  getColorCodeRoom,
+  getColorMaid,
+  getColorCodeMaid,
+  getColorCodeReservation,
+  dashLabel,
+  ucfirst,
+  folioUrl,
+} from '../utils/cmsStatus';
+import { laravelPaging } from '../utils/tableMeta';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -11,21 +26,6 @@ const prisma = new PrismaClient({ adapter });
 
 const STATUS_ACTIVE = 1;
 const MENU_ID = 1120;
-
-// Room statuses (config cms.room_status)
-const ROOM_STATUSES = {
-  vacant: { id: 0, name: 'Vacant' },
-  occupied: { id: 1, name: 'Occupied' },
-  dirty: { id: 2, name: 'Dirty' },
-  out_of_order: { id: 3, name: 'Out of Order' },
-};
-
-// Maid statuses (config cms.maid_status)
-const MAID_STATUSES = {
-  clean: { id: 0, name: 'Clean' },
-  dirty: { id: 1, name: 'Dirty' },
-  inspect: { id: 2, name: 'Inspect' },
-};
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -482,19 +482,33 @@ export class RoomController {
   static async statistics(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
-      const dateParam = req.query.date as string;
-      const businessDate = dateParam ? new Date(dateParam) : new Date();
-      businessDate.setHours(0, 0, 0, 0);
+      const dateParam = (req.query.date as string) || (req.body?.date as string) || '';
+      const businessDate = dateParam || (await AuthController.getBusinessDate(propertyId ?? null));
 
-      const roomTypeIds = parseBigIntArray(req.query.room_types_X as string);
-      const roomStatuses = parseBigIntArray(req.query.room_statuses_X as string);
-      const maidStatuses = parseBigIntArray(req.query.maid_statuses_X as string);
-      const roomConfigIds = parseBigIntArray(req.query.room_configurations_X as string);
-      const buildingIds = parseBigIntArray(req.query.buildings_X as string);
-      const floorIds = parseBigIntArray(req.query.floors_X as string);
+      // Filters: GET ?room_types_X=1,2 OR POST body keys room_types_1: true (Laravel srcstr parity)
+      const prefixIds = (prefix: string): bigint[] | undefined => {
+        const q = parseBigIntArray(req.query[prefix + 'X'] as string);
+        if (q && q.length > 0) return q;
+        const src = req.body && typeof req.body === 'object' ? req.body : {};
+        const ids: bigint[] = [];
+        for (const k of Object.keys(src)) {
+          if (k.startsWith(prefix) && src[k]) {
+            const id = k.slice(prefix.length);
+            if (/^\d+$/.test(id)) ids.push(BigInt(id));
+          }
+        }
+        return ids.length > 0 ? ids : undefined;
+      };
+
+      const roomTypeIds = prefixIds('room_types_');
+      const roomStatuses = prefixIds('room_statuses_');
+      const maidStatuses = prefixIds('maid_statuses_');
+      const roomConfigIds = prefixIds('room_configurations_');
+      const buildingIds = prefixIds('buildings_');
+      const floorIds = prefixIds('floors_');
 
       // Build room filter
-      const roomWhere: any = { deleted_at: null, is_physical: true };
+      const roomWhere: any = { deleted_at: null, status: STATUS_ACTIVE };
       if (propertyId) roomWhere.property_id = propertyId;
       if (roomTypeIds && roomTypeIds.length > 0) {
         roomWhere.room_type_id = { in: roomTypeIds };
@@ -512,6 +526,7 @@ export class RoomController {
         orderBy: { sort: 'asc' },
         include: {
           room_types: { select: { id: true, name: true } },
+          properties: { select: { id: true, name: true } },
           other_rooms: {
             where: { deleted_at: null },
             select: { id: true, name: true, is_physical: true, sort: true },
@@ -519,179 +534,236 @@ export class RoomController {
         },
       });
 
-      // Filter by room configurations via model_has_types
       let roomIds = rooms.map((r) => r.id);
-      if (roomConfigIds && roomConfigIds.length > 0) {
+      const parentRoomName = new Map<bigint, string>();
+      for (const r of rooms) {
+        if (r.room_id) parentRoomName.set(r.room_id, r.name);
+      }
+
+      // Filter by room configurations / buildings / floors via model_has_types
+      if (
+        (roomConfigIds && roomConfigIds.length > 0) ||
+        (buildingIds && buildingIds.length > 0) ||
+        (floorIds && floorIds.length > 0)
+      ) {
         const mht = await prisma.model_has_types.findMany({
-          where: {
-            model_id: { in: roomIds },
-            model_type: 'App\\Models\\Room',
-            type_id: { in: roomConfigIds },
-          },
-          select: { model_id: true },
+          where: { model_id: { in: roomIds }, model_type: 'App\\Models\\Room' },
+          select: { model_id: true, type_id: true },
         });
-        const filteredIds = new Set(mht.map((m) => m.model_id));
-        roomIds = roomIds.filter((id) => filteredIds.has(id));
+        const pass = (ids: bigint[]) => new Set(mht.filter((m) => ids.includes(m.type_id)).map((m) => m.model_id));
+        const confSet = roomConfigIds?.length ? pass(roomConfigIds) : null;
+        const buildSet = buildingIds?.length ? pass(buildingIds) : null;
+        const floorSet = floorIds?.length ? pass(floorIds) : null;
+        roomIds = roomIds.filter(
+          (id) =>
+            (!confSet || confSet.has(id)) &&
+            (!buildSet || buildSet.has(id)) &&
+            (!floorSet || floorSet.has(id))
+        );
       }
 
-      // Filter by buildings and floors (types linked via model_has_types)
-      if ((buildingIds && buildingIds.length > 0) || (floorIds && floorIds.length > 0)) {
-        const typeFilter: any[] = [];
-        if (buildingIds && buildingIds.length > 0) {
-          typeFilter.push({ type_id: { in: buildingIds }, group: 'building' });
-        }
-        if (floorIds && floorIds.length > 0) {
-          typeFilter.push({ type_id: { in: floorIds }, group: 'floor' });
-        }
-        // We'll need to do post-filtering by getting model_has_types for rooms
-      }
-
-      let filteredRooms = rooms.filter((r) => roomIds.includes(r.id));
-
-      // Get reservations for the business date
-      const nextDate = new Date(businessDate);
-      nextDate.setDate(nextDate.getDate() + 1);
+      // Reservations for the business date (folio not cancelled(2) / checked out(1))
+      const dayStart = new Date(businessDate + 'T00:00:00Z');
+      const nextDate = new Date(dayStart);
+      nextDate.setUTCDate(nextDate.getUTCDate() + 1);
 
       const reservations = await prisma.reservations.findMany({
         where: {
           room_id: { in: roomIds, not: null },
-          date: { gte: businessDate, lt: nextDate },
+          date: { gte: dayStart, lt: nextDate },
           deleted_at: null,
           folios: {
             deleted_at: null,
-            status_reservation: { in: [1, 2] }, // reservation or check_in
+            status_reservation: { notIn: [1, 2] },
           },
         },
         select: {
           room_id: true,
-          folio_id: true,
-          status_reservation: true,
-          adult: true,
-          child: true,
           folios: {
             select: {
+              id: true,
               folio_number: true,
+              status_reservation: true,
+              type_reservation: true,
               first_name: true,
               last_name: true,
               company_name: true,
               check_in_date: true,
               check_out_date: true,
-              status_reservation: true,
             },
           },
         },
       });
 
-      const resvByRoom = new Map<bigint, any[]>();
+      const folioByRoom = new Map<bigint, any>();
       for (const r of reservations) {
-        if (!r.room_id) continue;
-        if (!resvByRoom.has(r.room_id)) resvByRoom.set(r.room_id, []);
-        resvByRoom.get(r.room_id)!.push(r);
+        if (!r.room_id || !r.folios) continue;
+        if (!folioByRoom.has(r.room_id)) folioByRoom.set(r.room_id, bigintToNumber(r.folios));
       }
 
-      // Get buildings & floors for each room via model_has_types
+      // Room <-> floor/building/configuration via model_has_types
       const allMht = await prisma.model_has_types.findMany({
-        where: {
-          model_id: { in: roomIds },
-          model_type: 'App\\Models\\Room',
-        },
-        include: {
-          types: { select: { id: true, name: true, group: true } },
-        },
+        where: { model_id: { in: roomIds }, model_type: 'App\\Models\\Room' },
+        include: { types: { select: { id: true, name: true, group: true } } },
       });
-
-      const buildingMap = new Map<bigint, any>();
-      const floorMap = new Map<bigint, any>();
-      const roomBuildingMap = new Map<bigint, bigint>();
-      const roomFloorMap = new Map<bigint, bigint>();
-
-      for (const mht of allMht) {
-        if (mht.types.group === 'building') {
-          buildingMap.set(mht.type_id, { id: Number(mht.type_id), name: mht.types.name });
-          roomBuildingMap.set(mht.model_id, mht.type_id);
-        }
-        if (mht.types.group === 'floor') {
-          floorMap.set(mht.type_id, { id: Number(mht.type_id), name: mht.types.name });
-          roomFloorMap.set(mht.model_id, mht.type_id);
-        }
+      const mhtByRoom = new Map<bigint, any[]>();
+      for (const m of allMht) {
+        if (!mhtByRoom.has(m.model_id)) mhtByRoom.set(m.model_id, []);
+        mhtByRoom.get(m.model_id)!.push(m.types);
       }
 
-      // Filter by building/floor if specified
-      if (buildingIds && buildingIds.length > 0) {
-        filteredRooms = filteredRooms.filter((r) => {
-          const bId = roomBuildingMap.get(r.id);
-          return bId && buildingIds.includes(bId);
+      // Room type groupings (group 'room-type-grouping')
+      const rtIds = rooms.map((r) => r.room_type_id).filter((id): id is bigint => id !== null);
+      let rtGroupMht: { model_id: bigint; types: any }[] = [];
+      if (rtIds.length > 0) {
+        rtGroupMht = await prisma.model_has_types.findMany({
+          where: { model_id: { in: rtIds }, model_type: 'App\\Models\\RoomType' },
+          include: { types: { select: { id: true, name: true, group: true } } },
         });
+        rtGroupMht = rtGroupMht.filter((m) => m.types?.group === 'room-type-grouping');
       }
-      if (floorIds && floorIds.length > 0) {
-        filteredRooms = filteredRooms.filter((r) => {
-          const fId = roomFloorMap.get(r.id);
-          return fId && floorIds.includes(fId);
-        });
+      const rtGroupByName = new Map<bigint, any>();
+      for (const m of rtGroupMht) {
+        if (!rtGroupByName.has(m.model_id)) rtGroupByName.set(m.model_id, m.types);
       }
 
-      // Build nested structure: building -> floor -> rooms
+      // Floor plan templates (group 'template-floor-plan')
+      const templates = await prisma.types.findMany({
+        where: { deleted_at: null, status: STATUS_ACTIVE, group: 'template-floor-plan' },
+        select: { id: true, description: true, text: true },
+        orderBy: { sort: 'asc' },
+      });
+      const templateMeta: any[] = [];
+      if (templates.length > 0) {
+        const tmplMht = await prisma.model_has_types.findMany({
+          where: { model_id: { in: templates.map((t) => t.id) }, model_type: 'App\\Models\\Type' },
+          include: { types: { select: { id: true, name: true, group: true } } },
+        });
+        const tmplBuilding = new Map<bigint, string>();
+        const tmplFloor = new Map<bigint, string>();
+        for (const m of tmplMht) {
+          if (m.types?.group === 'building') tmplBuilding.set(m.model_id, m.types.name);
+          if (m.types?.group === 'floor') tmplFloor.set(m.model_id, m.types.name);
+        }
+        for (const t of templates) {
+          templateMeta.push({
+            value: Number(t.id),
+            label: (t.description || '').toLowerCase().replace(/\s+/g, '-'),
+            code_image: t.text ?? '',
+            building: tmplBuilding.get(t.id) ?? '',
+            floor: tmplFloor.get(t.id) ?? '',
+          });
+        }
+      }
       const buildingGroup: Record<string, any> = {};
-      const dataArray: any[] = [];
-
-      for (const room of filteredRooms) {
-        const bId = roomBuildingMap.get(room.id);
-        const fId = roomFloorMap.get(room.id);
-        const building = bId ? buildingMap.get(bId) : null;
-        const floor = fId ? floorMap.get(fId) : null;
-        const buildingKey = building ? `${building.id}` : '0';
-        const floorKey = floor ? `${floor.id}` : '0';
-
-        const roomReservations = resvByRoom.get(room.id) || [];
-        const currentReservation = roomReservations.length > 0
-          ? bigintToNumber(roomReservations[0].folios)
-          : null;
-
-        const roomData = {
-          id: Number(room.id),
-          name: room.name,
-          room_type_id: Number(room.room_type_id),
-          room_type_name: room.room_types?.name || null,
-          room_status: room.room_status,
-          maid_status: room.maid_status,
-          max_pax: room.max_pax,
-          total_bed: room.total_bed,
-          sort: room.sort,
-          is_physical: room.is_physical,
-          current_reservation: currentReservation,
-          sub_rooms: room.other_rooms?.map((sr: any) => ({
-            id: Number(sr.id),
-            name: sr.name,
-            is_physical: sr.is_physical,
-          })) || [],
-        };
-
-        dataArray.push(roomData);
-
-        if (!buildingGroup[buildingKey]) {
-          buildingGroup[buildingKey] = {
-            id: building?.id || 0,
-            name: building?.name || 'No Building',
-            floors: {},
-          };
+      for (const tmpl of templateMeta) {
+        const bKey = tmpl.building || 'No Building';
+        const fKey = tmpl.floor || 'No Floor';
+        if (!buildingGroup[bKey]) buildingGroup[bKey] = { value: bKey, label: bKey, floors: {} };
+        if (!buildingGroup[bKey].floors[fKey]) {
+          buildingGroup[bKey].floors[fKey] = { ...tmpl, layout: tmpl.label };
         }
-        if (!buildingGroup[buildingKey].floors[floorKey]) {
-          buildingGroup[buildingKey].floors[floorKey] = {
-            id: floor?.id || 0,
-            name: floor?.name || 'No Floor',
-            rooms: [],
-          };
-        }
-        buildingGroup[buildingKey].floors[floorKey].rooms.push(roomData);
       }
-
-      const buildingGrouped = Object.values(buildingGroup).map((b: any) => ({
+      const building = Object.values(buildingGroup).map((b: any) => ({
         ...b,
         floors: Object.values(b.floors),
       }));
 
+      // Rows: Laravel Room::formatData() parity
+      const data = rooms
+        .filter((r) => roomIds.includes(r.id))
+        .map((room: any) => {
+          const types = mhtByRoom.get(room.id) || [];
+          const floor = types.find((t: any) => t.group === 'floor');
+          const buildingT = types.find((t: any) => t.group === 'building');
+          const roomConfig = types
+            .filter((t: any) => t.group === 'room-configuration')
+            .map((t: any) => ({ value: Number(t.id), label: t.name }));
+          const folio = folioByRoom.get(room.id);
+          const roomStatus = room.room_status ?? 0;
+          const maidStatus = room.maid_status ?? 0;
+          return {
+            id: Number(room.id),
+            name: room.name,
+            map_id: ucfirst(room.map_id),
+            floor: floor ? { value: Number(floor.id), label: floor.name } : [],
+            building: buildingT ? { value: Number(buildingT.id), label: buildingT.name } : [],
+            building_name: buildingT?.name || '',
+            floor_name: floor?.name || '',
+            room_status: {
+              value: roomStatus,
+              label: ROOM_STATUSES[Object.keys(ROOM_STATUSES).find((k) => ROOM_STATUSES[k].id === roomStatus) ?? 'vacant']?.name ?? 'Vacant',
+              color: getColorRoom(roomStatus),
+              colorCode: getColorCodeRoom(roomStatus),
+            },
+            room_status_color: {
+              label: dashLabel(roomStatus, Object.fromEntries(Object.values(ROOM_STATUSES).map((s) => [s.id, s.name]))),
+              color: getColorRoom(roomStatus),
+              colorCode: getColorCodeRoom(roomStatus),
+              is_color: true,
+            },
+            maid_status: {
+              value: maidStatus,
+              label: MAID_STATUSES[Object.keys(MAID_STATUSES).find((k) => MAID_STATUSES[k].id === maidStatus) ?? 'clean']?.name ?? 'Clean',
+              color: getColorMaid(maidStatus),
+              colorCode: getColorCodeMaid(maidStatus),
+            },
+            room_clean_status_color: {
+              label: dashLabel(maidStatus, Object.fromEntries(Object.values(MAID_STATUSES).map((s) => [s.id, s.name]))),
+              color: getColorMaid(maidStatus),
+              is_color: true,
+            },
+            room_type_id: {
+              value: room.room_types?.id ? Number(room.room_types.id) : null,
+              label: room.room_types?.name || null,
+            },
+            room_type_grouping: rtGroupByName.get(room.room_type_id)
+              ? {
+                  value: Number(rtGroupByName.get(room.room_type_id).id),
+                  label: rtGroupByName.get(room.room_type_id).name,
+                }
+              : [],
+            status: { value: room.status ?? 0, label: room.status === STATUS_ACTIVE ? 'Active' : 'Inactive' },
+            property: room.properties
+              ? { value: Number(room.properties.id), label: room.properties.name }
+              : [],
+            room_id: room.room_id
+              ? { value: Number(room.room_id), label: parentRoomName.get(room.room_id) || '' }
+              : [],
+            room_configuration: roomConfig,
+            description: room.description,
+            remark: room.remark,
+            phone_ext: room.phone_ext,
+            max_pax: room.max_pax,
+            total_bed: room.total_bed,
+            with_tv: !!room.with_tv,
+            with_shower: !!room.with_shower,
+            address_code: room.address_code,
+            sort: room.sort,
+            is_physical: room.is_physical,
+            housekeeper: '',
+            guest: '',
+            is_do_not_disturb: false,
+            sub_rooms:
+              room.other_rooms?.map((sr: any) => ({
+                id: Number(sr.id),
+                name: sr.name,
+                is_physical: sr.is_physical,
+              })) || [],
+            folio: folio
+              ? {
+                  folio_id: folio.id,
+                  url: folioUrl(folio) || '/reservation/fit?parent=62&add=1&room_id=' + Number(room.id),
+                  folio_status_color_code: getColorCodeReservation(folio.status_reservation ?? 0),
+                  folio_number: folio.folio_number,
+                  folio_status: STATUS_RESERVATION_MAP[folio.status_reservation ?? 0] || 'Pending',
+                }
+              : null,
+          };
+        });
+
       // Master data for filter dropdowns
-      const [roomTypes, roomConfigs, buildingTypes, floorTypes] = await Promise.all([
+      const [roomTypes, roomConfigs, buildingTypes, floorTypes, roomTypeGroups] = await Promise.all([
         prisma.room_types.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE, property_id: propertyId! },
           select: { id: true, name: true },
@@ -712,6 +784,11 @@ export class RoomController {
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-type-grouping' },
+          select: { id: true, name: true },
+          orderBy: { sort: 'asc' },
+        }),
       ]);
 
       const master = {
@@ -721,7 +798,8 @@ export class RoomController {
         room_configurations: roomConfigs.map((rc: any) => ({ value: Number(rc.id), label: rc.name })),
         buildings: buildingTypes.map((b: any) => ({ value: Number(b.id), label: b.name })),
         floors: floorTypes.map((f: any) => ({ value: Number(f.id), label: f.name })),
-        room_type_groups: [],
+        room_type_groups: roomTypeGroups.map((g: any) => ({ value: Number(g.id), label: g.name })),
+        templates: templateMeta,
       };
 
       const meta = {
@@ -731,12 +809,17 @@ export class RoomController {
         room_configurations_X: roomConfigIds?.map((id) => Number(id)) || [],
         buildings_X: buildingIds?.map((id) => Number(id)) || [],
         floors_X: floorIds?.map((id) => Number(id)) || [],
-        date: businessDate.toISOString().split('T')[0],
+        date: businessDate,
       };
 
-      success(res, buildingGrouped, 'Success', 200, {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+
+      success(res, data, 'Success', 200, {
         master,
-        data: dataArray,
+        building,
+        pagging: laravelPaging(data.length, limit, page),
+        permission: getPermissionFlags(req.user, MENU_ID),
         meta,
       } as any);
     } catch (err: any) {

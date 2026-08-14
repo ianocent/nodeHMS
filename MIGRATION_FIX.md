@@ -337,3 +337,9 @@ Audit probe (`probe-all.js`) hit every frontend GLOBALURI; fixed all 5xx, verifi
 - **front-desk.routes.ts**: /front-desk/:id shadowed /front-desk/shifts (static-after-param). Reordered.
 - **Test suite**: 66/70 failing at HEAD — responses are AES ciphertext (res.text, not res.body); helpers.ts now decrypts. Wrong route paths corrected. TEST_USER.lastProperty 999n (property 1 missing in dev DB). 69/69 green.
 - **tsconfig.json**: isolatedModules moved from jest config to compilerOptions (kills ts-jest v30 deprecation warning).
+## 2026-08-14 (session 4)
+- **Floor Plan crash** (room-statistic): data rows lacking map_id -> frontend replaceAll crash. /cms/room-statistic rewritten to Laravel RoomStatisticController.index parity (formatData rows, folio per business date, building tree from template-floor-plan types, room_type_groups master).
+- **Room Availability "Not Data"**: /cms/statistic/room-availability rewritten to Laravel StatisticController.roomAvailability parity (grid rooms x dates, reservation/blocked/OOO/vacant cells, colspan logic).
+- **Rate Setup Edit Rate dropdowns No Options**: rate edit() response missing top-level master meta (same bug class as fd1503c Tab Rate fix).
+- **Room Type list scope**: rate create/edit/barRateCreate room_types now property-scoped.
+- New shared utils/cmsStatus.ts; ApiMeta extended with building/meta. tsc clean + jest 69/69.

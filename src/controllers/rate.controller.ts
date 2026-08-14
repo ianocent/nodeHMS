@@ -194,7 +194,7 @@ export class RateController {
 
       const [roomTypes, codePosts, companyTypes, cancelations] = await Promise.all([
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -354,8 +354,9 @@ export class RateController {
   // ─────────────────────────────────────────────
   // GET /api/rates/:id/edit
   // ─────────────────────────────────────────────
-  static async edit(req: Request, res: Response): Promise<void> {
+static async edit(req: Request, res: Response): Promise<void> {
     try {
+      const propertyId = req.user?.lastProperty;
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
 
@@ -364,8 +365,8 @@ export class RateController {
           where: { id },
           include: { code_posts: { select: { id: true, name: true } } },
         }),
-        prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+prisma.room_types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -377,12 +378,12 @@ export class RateController {
         prisma.types.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type' },
           select: { id: true, name: true },
-          orderBy: { name: 'asc' },
+          orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
           select: { id: true, name: true },
-          orderBy: { name: 'asc' },
+          orderBy: { sort: 'asc' },
         }),
       ]);
 
@@ -414,10 +415,9 @@ export class RateController {
         deleted_by: rate.deleted_by ? Number(rate.deleted_by) : null,
         code_post: rate.code_posts ? { id: Number(rate.code_posts.id), name: rate.code_posts.name } : null,
         code_posts: undefined,
-        master,
       };
 
-      success(res, result, 'Success');
+      success(res, result, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Rate edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -1215,7 +1215,7 @@ export class RateController {
 
       const [roomTypes, codePosts, rates] = await Promise.all([
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),

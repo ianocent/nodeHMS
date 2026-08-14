@@ -17,6 +17,8 @@ export interface ApiMeta {
   isNotAdmin?: boolean;
   folio?: any;
   market_property?: any;
+  building?: any;
+  meta?: any;
 }
 
 function sendEncrypted(res: Response, statusCode: number, payload: Record<string, any>): Response {
@@ -51,6 +53,8 @@ export function success(
     ...(meta?.isNotAdmin !== undefined ? { isNotAdmin: meta.isNotAdmin } : {}),
     ...(meta?.folio ? { folio: meta.folio } : {}),
     ...(meta?.market_property ? { market_property: meta.market_property } : {}),
+    ...(meta?.building !== undefined ? { building: meta.building } : {}),
+    ...(meta?.meta !== undefined ? { meta: meta.meta } : {}),
   });
 }
 

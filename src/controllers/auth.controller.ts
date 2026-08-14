@@ -474,7 +474,7 @@ export class AuthController {
    * Business date: latest log_audits.date for the property + 1 day.
    * Matches LogAudit::getBusinessDate($request).
    */
-  private static async getBusinessDate(lastProperty: bigint | null): Promise<string> {
+  static async getBusinessDate(lastProperty: bigint | null): Promise<string> {
     const logAudit = await prisma.log_audits.findFirst({
       where: lastProperty ? { property_id: Number(lastProperty) } : undefined,
       orderBy: { date: 'desc' },
