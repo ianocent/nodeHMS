@@ -27,6 +27,17 @@ function idParam(val: any): bigint {
   return BigInt(val);
 }
 
+function num(v: any, fallback = 0): number {
+  if (v === undefined || v === null || v === '') return fallback;
+  const n = Number(v);
+  return isNaN(n) ? fallback : n;
+}
+
+function bool(v: any, fallback = false): boolean {
+  if (v === undefined || v === null || v === '') return fallback;
+  return v === true || v === 1 || v === '1' || v === 'true';
+}
+
 function parsePagination(query: any) {
   const page = parseInt(query.page as string) || 1;
   const limit = parseInt(query.limit as string) || 10;
@@ -116,18 +127,18 @@ export class MasterDataController {
           type: type || 'DEFAULT',
           code_billing_id: code_billing_id ? BigInt(code_billing_id) : null,
           code_gl_id: code_gl_id ? BigInt(code_gl_id) : null,
-          pay_commission: pay_commission ?? 0,
-          is_pos: is_pos ?? 0,
-          local_tax: local_tax ?? 0,
-          local_tax_percentage: local_tax_percentage ?? 0,
-          service_charge: service_charge ?? 0,
-          service_charge_percentage: service_charge_percentage ?? 0,
-          service_charge_include_local_tax: service_charge_include_local_tax ?? 0,
-          tax: tax ?? 0,
-          tax_percentage: tax_percentage ?? 0,
-          tax_include_local_tax: tax_include_local_tax ?? 0,
-          sort: sort ?? 0,
-          status: status ?? 0,
+          pay_commission: num(pay_commission),
+          is_pos: num(is_pos),
+          local_tax: num(local_tax),
+          local_tax_percentage: num(local_tax_percentage),
+          service_charge: num(service_charge),
+          service_charge_percentage: num(service_charge_percentage),
+          service_charge_include_local_tax: num(service_charge_include_local_tax),
+          tax: num(tax),
+          tax_percentage: num(tax_percentage),
+          tax_include_local_tax: num(tax_include_local_tax),
+          sort: num(sort),
+          status: num(status),
           created_at: new Date(),
           updated_at: new Date(),
         },
@@ -175,18 +186,18 @@ export class MasterDataController {
       if (type !== undefined) data.type = type;
       if (code_billing_id !== undefined) data.code_billing_id = BigInt(code_billing_id);
       if (code_gl_id !== undefined) data.code_gl_id = BigInt(code_gl_id);
-      if (pay_commission !== undefined) data.pay_commission = pay_commission;
-      if (is_pos !== undefined) data.is_pos = is_pos;
-      if (local_tax !== undefined) data.local_tax = local_tax;
-      if (local_tax_percentage !== undefined) data.local_tax_percentage = local_tax_percentage;
-      if (service_charge !== undefined) data.service_charge = service_charge;
-      if (service_charge_percentage !== undefined) data.service_charge_percentage = service_charge_percentage;
-      if (service_charge_include_local_tax !== undefined) data.service_charge_include_local_tax = service_charge_include_local_tax;
-      if (tax !== undefined) data.tax = tax;
-      if (tax_percentage !== undefined) data.tax_percentage = tax_percentage;
-      if (tax_include_local_tax !== undefined) data.tax_include_local_tax = tax_include_local_tax;
-      if (sort !== undefined) data.sort = sort;
-      if (status !== undefined) data.status = status;
+      if (pay_commission !== undefined) data.pay_commission = num(pay_commission);
+      if (is_pos !== undefined) data.is_pos = num(is_pos);
+      if (local_tax !== undefined) data.local_tax = num(local_tax);
+      if (local_tax_percentage !== undefined) data.local_tax_percentage = num(local_tax_percentage);
+      if (service_charge !== undefined) data.service_charge = num(service_charge);
+      if (service_charge_percentage !== undefined) data.service_charge_percentage = num(service_charge_percentage);
+      if (service_charge_include_local_tax !== undefined) data.service_charge_include_local_tax = num(service_charge_include_local_tax);
+      if (tax !== undefined) data.tax = num(tax);
+      if (tax_percentage !== undefined) data.tax_percentage = num(tax_percentage);
+      if (tax_include_local_tax !== undefined) data.tax_include_local_tax = num(tax_include_local_tax);
+      if (sort !== undefined) data.sort = num(sort);
+      if (status !== undefined) data.status = num(status);
 
       const result = await prisma.code_posts.update({ where: { id }, data });
       success(res, bigintToNumber(result), 'Code post updated');
@@ -251,13 +262,13 @@ export class MasterDataController {
           property_id: pid,
           code_post_id: BigInt(code_post_id),
           name,
-          is_online: is_online ?? false,
-          is_event: is_event ?? false,
+          is_online: bool(is_online),
+          is_event: bool(is_event),
           description: description || null,
-          sales: sales ?? 0,
-          cost: cost ?? 0,
-          sort: sort ?? 0,
-          status: status ?? 0,
+          sales: num(sales),
+          cost: num(cost),
+          sort: num(sort),
+          status: num(status),
           created_at: new Date(),
           updated_at: new Date(),
         },
@@ -309,13 +320,13 @@ export class MasterDataController {
       const data: any = { updated_at: new Date() };
       if (code_post_id !== undefined) data.code_post_id = BigInt(code_post_id);
       if (name !== undefined) data.name = name;
-      if (is_online !== undefined) data.is_online = is_online;
-      if (is_event !== undefined) data.is_event = is_event;
+      if (is_online !== undefined) data.is_online = bool(is_online);
+      if (is_event !== undefined) data.is_event = bool(is_event);
       if (description !== undefined) data.description = description;
-      if (sales !== undefined) data.sales = sales;
-      if (cost !== undefined) data.cost = cost;
-      if (sort !== undefined) data.sort = sort;
-      if (status !== undefined) data.status = status;
+      if (sales !== undefined) data.sales = num(sales);
+      if (cost !== undefined) data.cost = num(cost);
+      if (sort !== undefined) data.sort = num(sort);
+      if (status !== undefined) data.status = num(status);
 
       const result = await prisma.code_items.update({ where: { id }, data });
       success(res, bigintToNumber(result), 'Code item updated');
@@ -378,9 +389,9 @@ export class MasterDataController {
           property_id: pid,
           name,
           description: description || null,
-          isPOS: isPOS ?? 0,
-          sort: sort ?? 0,
-          status: status ?? 0,
+          isPOS: num(isPOS),
+          sort: num(sort),
+          status: num(status),
           created_at: new Date(),
           updated_at: new Date(),
         },
@@ -426,9 +437,9 @@ export class MasterDataController {
       const data: any = { updated_at: new Date() };
       if (name !== undefined) data.name = name;
       if (description !== undefined) data.description = description;
-      if (isPOS !== undefined) data.isPOS = isPOS;
-      if (sort !== undefined) data.sort = sort;
-      if (status !== undefined) data.status = status;
+      if (isPOS !== undefined) data.isPOS = num(isPOS);
+      if (sort !== undefined) data.sort = num(sort);
+      if (status !== undefined) data.status = num(status);
 
       const result = await prisma.code_billings.update({ where: { id }, data });
       success(res, bigintToNumber(result), 'Code billing updated');
@@ -498,8 +509,8 @@ export class MasterDataController {
           controlname: controlname || null,
           leveltype: leveltype || null,
           balancetype: balancetype || null,
-          sort: sort ?? 0,
-          status: status ?? 0,
+          sort: num(sort),
+          status: num(status),
           created_at: new Date(),
           updated_at: new Date(),
         },
@@ -552,8 +563,8 @@ export class MasterDataController {
       if (controlname !== undefined) data.controlname = controlname;
       if (leveltype !== undefined) data.leveltype = leveltype;
       if (balancetype !== undefined) data.balancetype = balancetype;
-      if (sort !== undefined) data.sort = sort;
-      if (status !== undefined) data.status = status;
+      if (sort !== undefined) data.sort = num(sort);
+      if (status !== undefined) data.status = num(status);
 
       const result = await prisma.code_gls.update({ where: { id }, data });
       success(res, bigintToNumber(result), 'Code GL updated');
@@ -601,7 +612,7 @@ export class MasterDataController {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0); const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status } = req.body;
       if (!name) { badRequest(res, 'name required'); return; }
-      const d = await prisma.type_payments.create({ data: { property_id: pid, code_post_id: BigInt(code_post_id), code_billing_id: code_billing_id ? BigInt(code_billing_id) : null, name, pos: pos ?? 0, front_office: front_office ?? 0, surcharge_type: surcharge_type ?? 0, surcharge: surcharge ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date() } });
+      const d = await prisma.type_payments.create({ data: { property_id: pid, code_post_id: BigInt(code_post_id), code_billing_id: code_billing_id ? BigInt(code_billing_id) : null, name, pos: num(pos), front_office: num(front_office), surcharge_type: num(surcharge_type), surcharge: num(surcharge), status: num(status, 1), created_at: new Date(), updated_at: new Date() } });
       success(res, bigintToNumber(d), 'Created');
     } catch (err: any) { error(res, 'Failed to create', 500); }
   }
@@ -612,8 +623,8 @@ export class MasterDataController {
       const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status } = req.body;
       const data: any = { updated_at: new Date() };
       if (code_post_id !== undefined) data.code_post_id = BigInt(code_post_id); if (code_billing_id !== undefined) data.code_billing_id = code_billing_id ? BigInt(code_billing_id) : null;
-      if (name !== undefined) data.name = name; if (pos !== undefined) data.pos = pos; if (front_office !== undefined) data.front_office = front_office;
-      if (surcharge_type !== undefined) data.surcharge_type = surcharge_type; if (surcharge !== undefined) data.surcharge = surcharge; if (status !== undefined) data.status = status;
+      if (name !== undefined) data.name = name; if (pos !== undefined) data.pos = num(pos); if (front_office !== undefined) data.front_office = num(front_office);
+      if (surcharge_type !== undefined) data.surcharge_type = num(surcharge_type); if (surcharge !== undefined) data.surcharge = num(surcharge); if (status !== undefined) data.status = num(status);
       await prisma.type_payments.update({ where: { id }, data }); success(res, null, 'Updated');
     } catch (err: any) { error(res, 'Failed to update', 500); }
   }
@@ -664,7 +675,7 @@ export class MasterDataController {
   }
   static async cityShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.cities.findUnique({ where: { id }, include: { countries: { select: { id: true, name: true } } } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }
   static async cityStore(req: Request, res: Response): Promise<void> {
-    try { const { name, country_id, state_id, country_code, state_code, latitude, longitude, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.cities.create({ data: { name, country_id: BigInt(country_id), state_id: state_id ? BigInt(state_id) : null, country_code, state_code, latitude: latitude ?? 0, longitude: longitude ?? 0, status: status ?? true, created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const { name, country_id, state_id, country_code, state_code, latitude, longitude, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.cities.create({ data: { name, country_id: BigInt(country_id), state_id: state_id ? BigInt(state_id) : null, country_code, state_code, latitude: num(latitude), longitude: num(longitude), status: status ?? true, created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async cityUpdate(req: Request, res: Response): Promise<void> {
     try { const id = idParam(req.params.id); const { name, country_id, state_id, country_code, state_code, latitude, longitude, status } = req.body; const data: any = { updated_at: new Date() }; if (name !== undefined) data.name = name; if (country_id !== undefined) data.country_id = BigInt(country_id); if (state_id !== undefined) data.state_id = state_id ? BigInt(state_id) : null; if (latitude !== undefined) data.latitude = latitude; if (longitude !== undefined) data.longitude = longitude; if (status !== undefined) data.status = status === true || status === 1 ? true : false; await prisma.cities.update({ where: { id }, data }); success(res, null, 'Updated'); } catch (err: any) { error(res, 'Failed', 500); }
@@ -677,10 +688,10 @@ export class MasterDataController {
   static async holidayList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.holidays, req, res); }
   static async holidayShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.holidays.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }
   static async holidayStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { name, start_date, end_date, sort, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.holidays.create({ data: { property_id: pid, name, start_date: new Date(start_date), end_date: new Date(end_date), sort: sort ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { name, start_date, end_date, sort, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.holidays.create({ data: { property_id: pid, name, start_date: new Date(start_date), end_date: new Date(end_date), sort: num(sort), status: num(status, 1), created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async holidayUpdate(req: Request, res: Response): Promise<void> {
-    try { const id = idParam(req.params.id); const { name, start_date, end_date, sort, status } = req.body; const data: any = { updated_at: new Date() }; if (name !== undefined) data.name = name; if (start_date !== undefined) data.start_date = new Date(start_date); if (end_date !== undefined) data.end_date = new Date(end_date); if (sort !== undefined) data.sort = sort; if (status !== undefined) data.status = status; await prisma.holidays.update({ where: { id }, data }); success(res, null, 'Updated'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const id = idParam(req.params.id); const { name, start_date, end_date, sort, status } = req.body; const data: any = { updated_at: new Date() }; if (name !== undefined) data.name = name; if (start_date !== undefined) data.start_date = new Date(start_date); if (end_date !== undefined) data.end_date = new Date(end_date); if (sort !== undefined) data.sort = num(sort); if (status !== undefined) data.status = num(status); await prisma.holidays.update({ where: { id }, data }); success(res, null, 'Updated'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async holidayDestroy(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); await prisma.holidays.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); } }
 }

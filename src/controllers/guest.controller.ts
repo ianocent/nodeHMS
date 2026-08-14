@@ -194,10 +194,11 @@ export class GuestController {
    */
   static async create(req: Request, res: Response): Promise<void> {
     try {
-      const [titles, statusGuest, blackList] = await Promise.all([
+      const [titles, statusGuest, blackList, countries] = await Promise.all([
         prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null }, select: { id: true, name: true } })
+        prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null }, select: { id: true, name: true } }),
+        prisma.countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } })
       ]);
 
       const normal = statusGuest.filter((s: any) => s.name.toLowerCase().includes('normal'));
@@ -210,6 +211,8 @@ export class GuestController {
         statusGuest: filteredStatusGuest.map(s => ({ value: Number(s.id), label: s.name })),
         genders: GENDERS.map(g => ({ value: g.name, label: g.name })),
         regions: REGIONS.map(r => ({ value: r.name, label: r.name })),
+        countries: countries.map(c => ({ value: Number(c.id), label: c.name })),
+        cities: [],
         statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
       };
 
@@ -362,12 +365,13 @@ export class GuestController {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
-      const [guest, titles, statusGuest, blackList, types] = await Promise.all([
+      const [guest, titles, statusGuest, blackList, types, countries] = await Promise.all([
         this.getGuestWithRelations(id),
         prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.model_has_types.findMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' }, include: { types: true } })
+        prisma.model_has_types.findMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' }, include: { types: true } }),
+        prisma.countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } })
       ]);
 
       if (!guest || guest.deleted_at) {
@@ -388,6 +392,8 @@ export class GuestController {
         statusGuest: filteredStatusGuest.map(s => ({ value: Number(s.id), label: s.name })),
         genders: GENDERS.map(g => ({ value: g.name, label: g.name })),
         regions: REGIONS.map(r => ({ value: r.name, label: r.name })),
+        countries: countries.map(c => ({ value: Number(c.id), label: c.name })),
+        cities: [],
         statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
       };
 

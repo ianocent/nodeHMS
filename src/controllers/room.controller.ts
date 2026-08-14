@@ -752,7 +752,7 @@ export class RoomController {
     try {
       const propertyId = req.user?.lastProperty;
 
-      const [statuses, activeRooms, roomTypes, roomConfigs, inRoomEquipments] = await Promise.all([
+      const [statuses, activeRooms, roomTypes, roomConfigs, inRoomEquipments, floors, buildings] = await Promise.all([
         Promise.resolve([
           { value: 1, label: 'Active' },
           { value: 0, label: 'Inactive' },
@@ -777,6 +777,16 @@ export class RoomController {
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor' },
+          select: { id: true, name: true },
+          orderBy: { sort: 'asc' },
+        }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building' },
+          select: { id: true, name: true },
+          orderBy: { sort: 'asc' },
+        }),
       ]);
 
       const master = {
@@ -785,6 +795,9 @@ export class RoomController {
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         room_configurations: roomConfigs.map((rc: any) => ({ value: Number(rc.id), label: rc.name })),
         in_room_equipments: inRoomEquipments.map((e: any) => ({ value: Number(e.id), label: e.name })),
+        in_room_equiptments: inRoomEquipments.map((e: any) => ({ value: Number(e.id), label: e.name })),
+        floors: floors.map((f: any) => ({ value: Number(f.id), label: f.name })),
+        buildings: buildings.map((b: any) => ({ value: Number(b.id), label: b.name })),
       };
 
       success(res, master, 'Success');
@@ -928,7 +941,7 @@ export class RoomController {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
 
-      const [room, activeRooms, roomTypes, roomConfigs, inRoomEquipments] = await Promise.all([
+      const [room, activeRooms, roomTypes, roomConfigs, inRoomEquipments, floors, buildings] = await Promise.all([
         prisma.rooms.findUnique({
           where: { id },
           include: {
@@ -956,6 +969,16 @@ export class RoomController {
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor' },
+          select: { id: true, name: true },
+          orderBy: { sort: 'asc' },
+        }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building' },
+          select: { id: true, name: true },
+          orderBy: { sort: 'asc' },
+        }),
       ]);
 
       if (!room || room.deleted_at) {
@@ -979,6 +1002,9 @@ export class RoomController {
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         room_configurations: roomConfigs.map((rc: any) => ({ value: Number(rc.id), label: rc.name })),
         in_room_equipments: inRoomEquipments.map((e: any) => ({ value: Number(e.id), label: e.name })),
+        in_room_equiptments: inRoomEquipments.map((e: any) => ({ value: Number(e.id), label: e.name })),
+        floors: floors.map((f: any) => ({ value: Number(f.id), label: f.name })),
+        buildings: buildings.map((b: any) => ({ value: Number(b.id), label: b.name })),
         selected_room_configurations: selectedConfigIds,
       };
 
