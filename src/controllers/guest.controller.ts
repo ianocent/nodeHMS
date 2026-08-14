@@ -466,7 +466,6 @@ export class GuestController {
         address,
         postal_code,
         car_reg_number,
-        guest_status,
         status,
         image: imagePath
       };

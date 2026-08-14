@@ -734,46 +734,51 @@ export class AdminController {
   }
 
   // ================================================================
-  //  SIDEBAR MENU (flat list with relation.children for sidebar render)
+  //  SIDEBAR MENU (Laravel MenuResources parity: url with ?parent=&module=)
   // ================================================================
   static async menuListAll(req: Request, res: Response): Promise<void> {
     try {
-      const menus = await getPrisma().menus.findMany({
-        where: { deleted_at: null },
+      const allMenus = await getPrisma().menus.findMany({
+        where: { deleted_at: null, status: 1 },
         orderBy: [{ left: 'asc' }, { sort: 'asc' }],
       });
 
-      const parsed = menus.map(m => ({
-        id: Number(m.id),
-        parent_id: m.parent_id ? Number(m.parent_id) : null,
-        name: parseJsonField(m.name, {}),
-        url: m.url || null,
-        media: parseJsonField(m.media, {}),
-        target: m.target,
-        status: m.status,
-        sort: m.sort,
-        child_type: m.child_type,
-        created_at: m.created_at,
-      }));
+      // Property market-segment filters (menus 19-22)
+      const pid = req.user?.lastProperty ?? null;
+      const property = pid ? await getPrisma().properties.findUnique({ where: { id: pid } }) : null;
+      const excluded: bigint[] = [];
+      if (property) {
+        if (!property.market_segment_1) excluded.push(19n);
+        if (!property.market_segment_2) excluded.push(20n);
+        if (!property.market_segment_3) excluded.push(21n);
+        if (!property.market_segment_4) excluded.push(22n);
+      }
 
-      // Attach children as relation
-      const withChildren = parsed.map(m => ({
-        ...m,
-        relation: {
-          children: parsed.filter(c => c.parent_id === m.id).map(c => ({
-            id: c.id,
-            parent_id: c.parent_id,
-            name: c.name,
-            url: c.url,
-            media: c.media,
-            target: c.target,
-            status: c.status,
-            sort: c.sort,
-          })),
-        },
-      }));
+      // Sidebar request has no ischildren param -> Laravel MenuResources uses mappedId for every row
+      const roots = allMenus.filter(m => !m.parent_id && !excluded.includes(m.id));
+      const data = roots.map(m => toMenuResource(m, allMenus, excluded, 0, 0, req.user));
 
-      success(res, withChildren, 'Success');
+      const page = parseInt(String(req.query.page)) || 1;
+      const limit = parseInt(String(req.query.limit)) || 99999;
+      const totalPages = Math.max(1, Math.ceil(allMenus.length / limit));
+      const pagging = {
+        limit_data: limit,
+        total_data: allMenus.length,
+        start_paging: page,
+        end_paging: totalPages,
+        prev_jump: page > 1 ? 1 : 0,
+        prev: page > 1 ? page - 1 : 0,
+        next: page < totalPages ? page + 1 : 0,
+        next_jump: page < totalPages ? totalPages : 0,
+      };
+
+      const perms = menuPermissions(1115n, req.user);
+      success(res, data, 'Success', 200, {
+        pagging,
+        permission: { view: perms.view, add: perms.edit, edit: perms.edit, delete: perms.edit },
+        datas: allMenus.map(m => ({ ...bigintToNumber(m), name: parseJsonField(m.name, {}) })),
+        isNotAdmin: false,
+      });
     } catch (err: any) {
       console.error('Menu list all error:', err);
       error(res, 'Failed to list menus', 500);

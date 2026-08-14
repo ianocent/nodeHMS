@@ -3,14 +3,7 @@ import { encrypt } from './encryption';
 
 export interface ApiMeta {
   permission?: Record<string, boolean>;
-  pagging?: {
-    current_page: number;
-    last_page: number;
-    per_page: number;
-    total: number;
-    from: number;
-    to: number;
-  };
+  pagging?: Record<string, number>;
   table?: any[];
   master?: any;
   search_data?: any[];
@@ -20,6 +13,8 @@ export interface ApiMeta {
   isDrag?: any;
   uriSaveDrag?: any;
   breadcrumbs?: any[];
+  datas?: any[];
+  isNotAdmin?: boolean;
 }
 
 function sendEncrypted(res: Response, statusCode: number, payload: Record<string, any>): Response {
@@ -50,6 +45,8 @@ export function success(
     ...(meta?.isDrag !== undefined ? { isDrag: meta.isDrag } : {}),
     ...(meta?.uriSaveDrag !== undefined ? { uriSaveDrag: meta.uriSaveDrag } : {}),
     ...(meta?.breadcrumbs ? { breadcrumbs: meta.breadcrumbs } : {}),
+    ...(meta?.datas ? { datas: meta.datas } : {}),
+    ...(meta?.isNotAdmin !== undefined ? { isNotAdmin: meta.isNotAdmin } : {}),
   });
 }
 

@@ -1232,8 +1232,9 @@ export class ReportController {
     try {
       // Laravel parity (CountryController@getCityByCountry): param name is `country`
       const countryId = (req.query.country as string) || (req.query.country_id as string);
-      if (!countryId) {
-        badRequest(res, 'country is required');
+      if (!countryId || countryId === 'undefined' || countryId === 'null' || countryId === '') {
+        // Frontend may send literal "undefined" -> return empty list, not 500 (matches Laravel empty result)
+        success(res, [], 'Success');
         return;
       }
 
