@@ -123,6 +123,7 @@ router.delete('/code-billing/:id', authMiddleware, MasterDataController.codeBill
 
 // Code GL (menuId: ~)
 router.get('/code-gls', authMiddleware, MasterDataController.codeGlList);
+router.get('/code-gls/get-gl', authMiddleware, MasterDataController.codeGlGetGl);
 router.post('/code-gls', authMiddleware, MasterDataController.codeGlCreate);
 router.get('/code-gls/:id', authMiddleware, MasterDataController.codeGlShow);
 router.put('/code-gls/:id', authMiddleware, MasterDataController.codeGlUpdate);

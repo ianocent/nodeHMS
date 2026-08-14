@@ -18,7 +18,7 @@ import {
   ucfirst,
   folioUrl,
 } from '../utils/cmsStatus';
-import { laravelPaging } from '../utils/tableMeta';
+import { laravelPaging, TABLES, listPermission } from '../utils/tableMeta';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -220,6 +220,7 @@ export class RoomController {
   static async typeShow(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idParam || !/^\d+$/.test(String(idParam))) { notFound(res, 'Not Found'); return; }
       const id = BigInt(idParam);
 
       const roomType = await prisma.room_types.findUnique({
@@ -241,6 +242,202 @@ export class RoomController {
       success(res, bigintToNumber(roomType), 'Success');
     } catch (err: any) {
       console.error('Room type show error:', err);
+      error(res, 'Failed to fetch room type', 500);
+    }
+  }
+
+  /**
+   * GET /api/room-type/get-configuration/:id — Laravel RoomTypeController@getRoomConfiguration parity
+   */
+  static async getRoomConfiguration(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idParam || !/^\d+$/.test(String(idParam))) { notFound(res, 'Not Found'); return; }
+      const id = BigInt(idParam);
+      const roomType = await prisma.room_types.findUnique({ where: { id } });
+      if (!roomType || roomType.deleted_at) { notFound(res, 'Not Found'); return; }
+      const mht = await prisma.model_has_types.findMany({
+        where: { model_type: 'App\\Models\\Room', model_id: { in: (await prisma.rooms.findMany({ where: { room_type_id: id, deleted_at: null }, select: { id: true } })).map((r: any) => r.id) } },
+        select: { type_id: true },
+      });
+      const types = await prisma.types.findMany({
+        where: { id: { in: mht.map((m: any) => m.type_id) }, group: 'room-configuration', deleted_at: null },
+        select: { id: true, name: true },
+      });
+      const seen = new Set<string>();
+      const data = types.filter((t: any) => { const k = String(t.id); if (seen.has(k)) return false; seen.add(k); return true; }).map((t: any) => ({ value: 'idx_' + t.id, label: t.name }));
+      success(res, data, 'Success');
+    } catch (err: any) {
+      console.error('Room type get-configuration error:', err);
+      error(res, 'Failed to fetch room type', 500);
+    }
+  }
+
+  /**
+   * GET /api/room-type/get-room/:id — Laravel RoomTypeController@getRoom parity (available rooms for room type)
+   */
+  static async getRoom(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idParam || !/^\d+$/.test(String(idParam))) {
+        success(res, [], 'Success', 200, {
+          table: TABLES.room,
+          pagging: laravelPaging(0, 9999, 1),
+          permission: listPermission(req, { add: true }),
+          search_data: [],
+        });
+        return;
+      }
+      const id = BigInt(idParam);
+      const roomType = await prisma.room_types.findUnique({ where: { id } });
+      if (!roomType || roomType.deleted_at) {
+        success(res, [], 'Success', 200, {
+          table: TABLES.room,
+          pagging: laravelPaging(0, 9999, 1),
+          permission: listPermission(req, { add: true }),
+          search_data: [],
+        });
+        return;
+      }
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 9999;
+      const startDate = req.query.check_in_date as string;
+      const endDate = req.query.check_out_date as string;
+      if (!startDate || !endDate) { badRequest(res, 'Check In Date and Check Out Date is required'); return; }
+      let folioId: bigint | null = null;
+      const rawFolio = req.query.folio_id as string;
+      if (rawFolio && rawFolio !== '0' && /^\d+$/.test(rawFolio)) {
+        const f = await prisma.folios.findUnique({ where: { id: BigInt(rawFolio) } });
+        if (f) folioId = f.id;
+      }
+
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      const [blockedByAvailability, blockedByWorkOrder, busyReservations, rooms] = await Promise.all([
+        prisma.room_availabilities.findMany({ where: { date: { gte: start, lt: end } }, select: { room_id: true } }),
+        prisma.work_orders.findMany({ where: { date: { lte: start }, deleted_at: null, OR: [{ end_date: { gt: end } }, { end_date: null }] }, select: { room_id: true } }),
+        prisma.reservations.findMany({
+          where: {
+            date: { gte: start, lt: end },
+            OR: [{ room_type_id: id }, { room_type_id_next: id }],
+            folios: { status_reservation: { in: [0, 3] }, deleted_at: null, ...(folioId ? { id: { not: folioId } } : {}) },
+            room_id: { gt: 0 },
+          },
+          select: { room_id: true },
+        }),
+        prisma.rooms.findMany({
+          where: { room_type_id: id, status: 1, deleted_at: null, room_status: { not: 4 } },
+          orderBy: [{ room_status: 'asc' }, { sort: 'asc' }],
+        }),
+      ]);
+
+      const blocked = new Set<string>();
+      for (const b of blockedByAvailability) blocked.add(String(b.room_id));
+      for (const w of blockedByWorkOrder) blocked.add(String(w.room_id));
+      for (const r of busyReservations) blocked.add(String(r.room_id));
+      const available = rooms.filter((r) => !blocked.has(String(r.id)));
+
+      const mht = await prisma.model_has_types.findMany({
+        where: { model_type: 'App\\Models\\Room', model_id: { in: available.map((r) => r.id) } },
+        include: { types: { select: { id: true, name: true, group: true } } },
+      });
+      const mhtByRoom = new Map<bigint, any[]>();
+      for (const m of mht) { const arr = mhtByRoom.get(m.model_id) || []; arr.push(m.types); mhtByRoom.set(m.model_id, arr); }
+
+      const table = [
+        { label: 'No', key: 'no', type: 'none', is_search: false },
+        { label: 'Room', key: 'name', type: 'link', is_search: true },
+        { label: 'Floor', key: 'floor', type: 'none', is_search: false },
+        { label: 'Building', key: 'building', type: 'none', is_search: false },
+        { label: 'Room Status', key: 'room_status', type: 'badge', is_search: false },
+        { label: 'Maid Status', key: 'maid_status', type: 'badge', is_search: false },
+        { label: 'Room Type', key: 'room_type_id', type: 'select', is_search: false },
+        { label: 'Status', key: 'status', type: 'badge', is_search: false },
+      ];
+
+      const data = available.map((room: any, i: number) => {
+        const types = mhtByRoom.get(room.id) || [];
+        const floor = types.find((t: any) => t.group === 'floor');
+        const buildingT = types.find((t: any) => t.group === 'building');
+        const roomStatus = room.room_status ?? 0;
+        const maidStatus = room.maid_status ?? 0;
+        return {
+          no: i + 1,
+          id: Number(room.id),
+          name: room.name,
+          floor: floor ? { value: Number(floor.id), label: floor.name } : [],
+          building: buildingT ? { value: Number(buildingT.id), label: buildingT.name } : [],
+          room_status: {
+            value: roomStatus,
+            label: ROOM_STATUSES[Object.keys(ROOM_STATUSES).find((k) => ROOM_STATUSES[k].id === roomStatus) ?? 'vacant']?.name ?? 'Vacant',
+            color: getColorRoom(roomStatus),
+            colorCode: getColorCodeRoom(roomStatus),
+          },
+          maid_status: {
+            value: maidStatus,
+            label: MAID_STATUSES[Object.keys(MAID_STATUSES).find((k) => MAID_STATUSES[k].id === maidStatus) ?? 'clean']?.name ?? 'Clean',
+            color: getColorMaid(maidStatus),
+            colorCode: getColorCodeMaid(maidStatus),
+          },
+          room_type_id: { value: Number(id), label: roomType.name },
+          status: { value: room.status ?? 0, label: room.status === STATUS_ACTIVE ? 'Active' : 'Inactive' },
+        };
+      });
+
+      success(res, data, 'Success', 200, {
+        table,
+        pagging: laravelPaging(data.length, limit, page),
+        permission: listPermission(req, { add: true }),
+        search_data: [],
+        folio_id: folioId ? Number(folioId) : 0,
+        getAvailableRoom: data.map((d: any) => d.id),
+      } as any);
+    } catch (err: any) {
+      console.error('Room type get-room error:', err);
+      error(res, 'Failed to fetch room type', 500);
+    }
+  }
+
+  /**
+   * GET /api/room-type/get-room-v2/:id — Laravel RoomTypeController@getRoomFormatSelect parity
+   */
+  static async getRoomFormatSelect(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idParam || !/^\d+$/.test(String(idParam))) { success(res, [], 'Success'); return; }
+      const id = BigInt(idParam);
+      const roomType = await prisma.room_types.findUnique({ where: { id } });
+      if (!roomType || roomType.deleted_at) { success(res, [], 'Success'); return; }
+      const startDate = req.query.check_in_date as string;
+      const endDate = req.query.check_out_date as string;
+      if (!startDate || !endDate) { badRequest(res, 'The check in date field is required.'); return; }
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      const [blockedByAvailability, blockedByWorkOrder, busyReservations, rooms] = await Promise.all([
+        prisma.room_availabilities.findMany({ where: { date: { gte: start, lt: end } }, select: { room_id: true } }),
+        prisma.work_orders.findMany({ where: { date: { lte: start }, deleted_at: null, OR: [{ end_date: { gt: end } }, { end_date: null }] }, select: { room_id: true } }),
+        prisma.reservations.findMany({
+          where: {
+            date: { gte: start, lt: end },
+            OR: [{ room_type_id: id }, { room_type_id_next: id }],
+            folios: { status_reservation: { in: [0, 3] }, deleted_at: null },
+            room_id: { gt: 0n },
+          },
+          select: { room_id: true },
+        }),
+        prisma.rooms.findMany({
+          where: { room_type_id: id, status: 1, deleted_at: null, room_status: { not: 4 } },
+          orderBy: [{ room_status: 'asc' }, { sort: 'asc' }],
+        }),
+      ]);
+      const blocked = new Set<string>();
+      for (const b of blockedByAvailability) blocked.add(String(b.room_id));
+      for (const w of blockedByWorkOrder) blocked.add(String(w.room_id));
+      for (const r of busyReservations) blocked.add(String(r.room_id));
+      const data = rooms.filter((r) => !blocked.has(String(r.id))).map((r: any) => ({ value: Number(r.id), label: r.name }));
+      success(res, data, 'Success');
+    } catch (err: any) {
+      console.error('Room type get-room-v2 error:', err);
       error(res, 'Failed to fetch room type', 500);
     }
   }

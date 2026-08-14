@@ -23,13 +23,16 @@ router.post('/room-types/:id/restore', authMiddleware, requirePermission(1120, '
 router.get('/room-type', authMiddleware, requirePermission(1120, 'view'), RoomController.typeList);
 router.get('/room-type/create', authMiddleware, requirePermission(1120, 'add'), RoomController.typeCreate);
 router.post('/room-type', authMiddleware, requirePermission(1120, 'add'), RoomController.typeStore);
+// Static sub-routes BEFORE /room-type/:id (param shadowing)
+router.get('/room-type/get-configuration/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.getRoomConfiguration);
+router.get('/room-type/get-room/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.getRoom);
+router.get('/room-type/get-room-v2/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.getRoomFormatSelect);
 router.get('/room-type/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.typeShow);
 router.get('/room-type/:id/edit', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeEdit);
 router.put('/room-type/:id', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeUpdate);
 router.delete('/room-type/:id', authMiddleware, requirePermission(1120, 'delete'), RoomController.typeDestroy);
 router.post('/room-type/:id/restore', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeRestore);
 router.get('/room-type/:id/update', authMiddleware, requirePermission(1120, 'edit'), RoomController.typeEdit);
-router.get('/room-type/get-configuration/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.typeShow);
 
 // ── Rooms ──
 router.get('/rooms', authMiddleware, requirePermission(1120, 'view'), RoomController.list);

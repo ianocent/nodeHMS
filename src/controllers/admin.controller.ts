@@ -131,7 +131,7 @@ export class AdminController {
         getPrisma().role_menu_crud.findMany({ where: { role_id: id } }),
       ]);
       if (!role) { notFound(res, 'Role not found'); return; }
-      success(res, { ...bigintToNumber(role), menus, templates: bigintToNumber(templates), menu_cruds: bigintToNumber(menuCruds) }, 'Success');
+      success(res, { ...bigintToNumber(role), menus: bigintToNumber(menus), templates: bigintToNumber(templates), menu_cruds: bigintToNumber(menuCruds) }, 'Success');
     } catch (err: any) { error(res, 'Failed to load role', 500); }
   }
 
@@ -229,6 +229,14 @@ export class AdminController {
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { error(res, 'Failed to list permissions', 500); }
+  }
+
+  static async permissionCreate(req: Request, res: Response): Promise<void> {
+    try {
+      success(res, { status: 1 }, 'Success', 200, {
+        master: { statuses: STATUSES },
+      });
+    } catch (err: any) { error(res, 'Failed to load permission', 500); }
   }
 
   static async permissionStore(req: Request, res: Response): Promise<void> {

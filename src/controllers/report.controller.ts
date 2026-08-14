@@ -755,7 +755,7 @@ export class ReportController {
 
       const permissions = await prisma.report_permissions.findMany({
         where: {
-          role_id: user ? BigInt(user.role_id) : 0n,
+          role_id: user && user.role_id != null ? BigInt(user.role_id) : 0n,
           status: 1,
         },
       });

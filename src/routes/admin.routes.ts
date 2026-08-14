@@ -80,6 +80,7 @@ router.delete('/property/:id', authMiddleware, AdminController.propertyDestroy);
 // Singular aliases for permissions
 router.get('/permission', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionList);
 router.post('/permission', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionStore);
+router.get('/permission/create', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionCreate);
 router.get('/permission/:id', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionShow);
 router.put('/permission/:id', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionUpdate);
 router.delete('/permission/:id', authMiddleware, requirePermission(1118, 'delete'), AdminController.permissionDestroy);
@@ -105,6 +106,7 @@ router.post('/generic/:model/:id/restore', authMiddleware, genericController.res
 router.get('/menu', authMiddleware, AdminController.menuListAll);
 router.get('/role', authMiddleware, AdminController.roleList);
 router.get('/role/create', authMiddleware, AdminController.roleCreate);
+router.get('/role/template', authMiddleware, requirePermission(1117, 'view'), AdminController.roleGetTemplates);
 router.post('/role', authMiddleware, AdminController.roleStore);
 router.get('/role/:id', authMiddleware, AdminController.roleShow);
 router.get('/role/:id/update', authMiddleware, AdminController.roleEdit);

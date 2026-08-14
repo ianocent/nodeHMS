@@ -54,6 +54,7 @@ router.delete('/code-billing/:id', authMiddleware, requirePermission(69, 'delete
 // ═════════════════════════════════════════════════════════
 
 router.get('/code-gls', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlList);
+router.get('/code-gls/get-gl', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlGetGl);
 router.get('/code-gls/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_gls'; MasterDataController.masterForm(req, res); });
 router.post('/code-gls', authMiddleware, requirePermission(69, 'add'), MasterDataController.codeGlCreate);
 router.get('/code-gls/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeGlShow);

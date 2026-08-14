@@ -98,7 +98,7 @@ export class CompanyController {
             id: Number(property.id),
             name: property.name,
             email: property.email,
-            telp: property.telp,
+            telp: property.telp == null ? '' : String(property.telp),
             is_tax: { value: !!property.is_tax, label: property.is_tax ? 'Yes' : 'No' },
             is_tax_exclude_restaurant: { value: !!property.is_tax_exclude_restaurant, label: property.is_tax_exclude_restaurant ? 'Yes' : 'No' },
             is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is_tax_exclude_room ? 'Yes' : 'No' },

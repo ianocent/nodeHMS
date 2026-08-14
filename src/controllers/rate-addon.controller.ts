@@ -31,6 +31,14 @@ export class RateAddonController {
   static async inclusiveList(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
+      if (!rateIdParam || !/^\d+$/.test(String(rateIdParam))) {
+        success(res, [], 'Success', 200, {
+          table: [],
+          permission: { view: true, add: true, edit: true, delete: true },
+          master: { code_posts: [], room_types: [] },
+        });
+        return;
+      }
       const rateId = BigInt(rateIdParam);
       const propertyId = req.user?.lastProperty;
 
@@ -229,6 +237,14 @@ export class RateAddonController {
   static async extraBedList(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
+      if (!rateIdParam || !/^\d+$/.test(String(rateIdParam))) {
+        success(res, [], 'Success', 200, {
+          table: [],
+          permission: { view: true, add: true, edit: true, delete: true },
+          master: { code_posts: [], room_types: [] },
+        });
+        return;
+      }
       const rateId = BigInt(rateIdParam);
       const propertyId = req.user?.lastProperty;
 

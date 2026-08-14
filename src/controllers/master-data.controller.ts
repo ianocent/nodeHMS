@@ -592,6 +592,31 @@ export class MasterDataController {
     }
   }
 
+  static async codeGlGetGl(req: Request, res: Response): Promise<void> {
+    try {
+      // Laravel CodeGLSController@getGL parity: search name/description -> {id, name: description(name)}
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+      const where: any = { deleted_at: null };
+      if (search) where.OR = [{ name: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } }];
+      const data = await prisma.code_gls.findMany({
+        where,
+        select: { id: true, description: true, name: true },
+        orderBy: { name: 'asc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      });
+      const mapped = data.map((c: any) => ({ id: Number(c.id), name: `${c.description ?? ''}(${c.name ?? ''})` }));
+      success(res, mapped, 'Success', 200, {
+        pagging: { current_page: page, last_page: 1, per_page: limit, total: mapped.length, from: mapped.length ? 1 : 0, to: mapped.length },
+      });
+    } catch (err: any) {
+      console.error('CodeGl get-gl error:', err);
+      error(res, 'Failed to load code GL', 500);
+    }
+  }
+
   static async codeGlCreate(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);

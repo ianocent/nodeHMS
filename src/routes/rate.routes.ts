@@ -222,6 +222,19 @@ router.put('/rate-inclusives/:id', authMiddleware, requirePermission(86, 'edit')
 router.delete('/rate-inclusives/:id', authMiddleware, requirePermission(86, 'delete'), RateAddonController.inclusiveDestroy);
 router.delete('/rate-inclusives/:id/force', authMiddleware, requirePermission(86, 'delete'), RateAddonController.inclusiveDelete);
 
+// ── /rate/extra-bed/inclusives — RateExtraBedInclusiveController parity (must precede /rate/:rateId/inclusives) ──
+router.get('/rate/extra-bed/inclusives', authMiddleware, requirePermission(86, 'view'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? req.query.id ?? '');
+  RateAddonController.extraBedList(req, res);
+});
+router.post('/rate/extra-bed/inclusives', authMiddleware, requirePermission(86, 'add'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? req.query.id ?? '');
+  RateAddonController.extraBedStore(req, res);
+});
+router.put('/rate/extra-bed/inclusives/:id', authMiddleware, requirePermission(86, 'edit'), RateAddonController.extraBedUpdate);
+router.delete('/rate/extra-bed/inclusives/:id', authMiddleware, requirePermission(86, 'delete'), RateAddonController.extraBedDestroy);
+router.delete('/rate/extra-bed/inclusives/:id/delete', authMiddleware, requirePermission(86, 'delete'), RateAddonController.extraBedDelete);
+
 // Singular aliases for rate inclusives
 router.get('/rate/:rateId/inclusives', authMiddleware, requirePermission(86, 'view'), RateAddonController.inclusiveList);
 router.post('/rate/:rateId/inclusives', authMiddleware, requirePermission(86, 'add'), RateAddonController.inclusiveStore);
