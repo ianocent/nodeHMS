@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { moneyFormat } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -386,17 +387,105 @@ export class EventController {
     try {
       const { page, limit } = parsePagination(req.query);
       const pid = req.user?.lastProperty ?? 0n;
+      const eventIdRaw = String(req.query.event_id ?? '').replace('?sort=', '');
+      if (!req.query.event_id) {
+        success(res, [], 'event_management_id is required', 400);
+        return;
+      }
+      const eventId = parseInt(eventIdRaw, 10) || 0;
       const where: any = { property_id: pid };
+      if (eventId) where.event_management_id = BigInt(eventId);
 
       const [data, total] = await Promise.all([
         prisma.event_management_items.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
         prisma.event_management_items.count({ where }),
       ]);
 
+      const codeItems = await prisma.code_items.findMany({ where: { deleted_at: null }, orderBy: { name: 'asc' } });
+      const table = [
+        {
+          label: 'Item', key: 'code_item_id', type: 'select', is_search: false, is_related: true,
+          related: ['description', 'cost', 'frequency', 'cost_on'],
+          options: codeItems.map((c: any) => ({
+            value: Number(c.id), label: c.name, description: c.description,
+            cost: moneyFormat(Number(c.sales)),
+            frequency: { value: 'Daily', label: 'Daily' },
+            cost_on: { value: 'Actual Day', label: 'Actual Day' },
+          })),
+        },
+        { label: 'Description', key: 'description', type: 'text', is_search: false },
+        { label: 'Cost', key: 'cost', type: 'number', is_search: false },
+        {
+          label: 'Frequency', key: 'frequency', type: 'select', is_search: false,
+          options: [
+            { value: 'Daily', label: 'Daily' },
+            { value: 'Once', label: 'Once' },
+            { value: 'Twice', label: 'Twice' },
+          ],
+        },
+        {
+          label: 'Cost On', key: 'cost_on', type: 'select', is_search: false,
+          options: [{ value: 'Actual Day', label: 'Actual Day' }],
+        },
+        { label: 'QTY', key: 'qty', type: 'number', is_search: false },
+      ];
+
       success(res, bigintToNumber(data), 'Success', 200, {
+        table,
+        permission: getPermissionFlags(req.user, 1133),
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Item list error:', err); error(res, 'Failed to list items', 500); }
+  }
+
+  static async itemStore(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : 0n;
+      const { code_item_id, frequency, description, cost_on, cost, qty } = req.body;
+      const eventIdRaw = String(req.query.event_id ?? '').replace('?sort=', '');
+      const eventId = parseInt(eventIdRaw, 10) || 0;
+      if (!eventId) { badRequest(res, 'event_id is required'); return; }
+      if (code_item_id === undefined || frequency === undefined || description === undefined || cost_on === undefined || cost === undefined || qty === undefined) {
+        badRequest(res, 'code_item_id, frequency, description, cost_on, cost, qty are required'); return;
+      }
+      const data = await prisma.event_management_items.create({
+        data: {
+          property_id: pid,
+          event_management_id: BigInt(eventId),
+          code_item_id: BigInt(code_item_id),
+          frequency: String(frequency),
+          description: description ?? null,
+          cost_on: cost_on ?? 0,
+          cost: cost ?? 0,
+          qty: Number(qty) || 0,
+        },
+      });
+      success(res, bigintToNumber(data), 'Success', 200);
+    } catch (err: any) { console.error('Item store error:', err); error(res, 'Failed to create item', 500); }
+  }
+
+  static async itemUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = toId(req.params.id);
+      const { code_item_id, frequency, description, cost_on, cost, qty } = req.body;
+      const data: any = {};
+      if (code_item_id !== undefined) data.code_item_id = BigInt(code_item_id);
+      if (frequency !== undefined) data.frequency = String(frequency);
+      if (description !== undefined) data.description = description;
+      if (cost_on !== undefined) data.cost_on = cost_on;
+      if (cost !== undefined) data.cost = cost;
+      if (qty !== undefined) data.qty = Number(qty);
+      await prisma.event_management_items.update({ where: { id: BigInt(id) }, data });
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Item update error:', err); error(res, 'Failed to update item', 500); }
+  }
+
+  static async itemDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = toId(req.params.id);
+      await prisma.event_management_items.delete({ where: { id: BigInt(id) } });
+      success(res, [], 'Success');
+    } catch (err: any) { console.error('Item delete error:', err); error(res, 'Failed to delete item', 500); }
   }
 
   // ==================== DEPOSIT PLAN ====================

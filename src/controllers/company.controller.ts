@@ -59,7 +59,7 @@ export class CompanyController {
   static async buildCompanyMaster(req: Request): Promise<{ [key: string]: any }> {
     const pid = BigInt(req.user?.lastProperty ?? 0);
     const groupFilter = ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'company-type', 'guest-status', 'source'];
-    const [mktSeg, staff, property, countries, cities] = await Promise.all([
+    const [mktSeg, staff, property, countries, cities, codePosts] = await Promise.all([
       prisma.types.findMany({
         where: { deleted_at: null, status: 1, group: { in: groupFilter } },
         select: { id: true, name: true, group: true },
@@ -73,6 +73,7 @@ export class CompanyController {
       prisma.properties.findUnique({ where: { id: pid } }),
       prisma.countries.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       prisma.cities.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.code_posts.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
     const byGroup = (g: string) =>
       mktSeg.filter((t: any) => t.group === g).map((t: any) => ({ value: Number(t.id), label: t.name }));
@@ -106,6 +107,7 @@ export class CompanyController {
       statusBlacklist,
       countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
       cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
+      code_posts: codePosts.map((c: any) => ({ value: Number(c.id), label: c.name })),
     };
   }
 

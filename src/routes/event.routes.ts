@@ -110,6 +110,9 @@ router.get('/event-managements', authMiddleware, requirePermission(211, 'view'),
 router.get('/event-management', authMiddleware, requirePermission(211, 'view'), EventController.managementList);
 router.get('/event-management-item', authMiddleware, requirePermission(211, 'view'), EventController.itemList);
 router.get('/event-management-items', authMiddleware, requirePermission(211, 'view'), EventController.itemList);
+router.post('/event-management-item', authMiddleware, requirePermission(211, 'add'), EventController.itemStore);
+router.put('/event-management-item/:id', authMiddleware, requirePermission(211, 'edit'), EventController.itemUpdate);
+router.delete('/event-management-item/:id', authMiddleware, requirePermission(211, 'delete'), EventController.itemDestroy);
 
 // Event Timeline
 router.get('/event-timeline/timeline', authMiddleware, requirePermission(211, 'view'), EventController.timeline);

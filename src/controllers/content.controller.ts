@@ -11,6 +11,17 @@ const prisma = new PrismaClient({ adapter });
 
 const MENU_ID = 69;
 
+const TEMPLATE_TYPES = [
+  { value: 'Pre Check In', label: 'Pre Check In' },
+  { value: 'Check In', label: 'Check In' },
+  { value: 'Check Out', label: 'Check Out' },
+  { value: 'confirmation-letter', label: 'Confirmation Letter' },
+  { value: 'guest-invoice-all-billing', label: 'Guest Invoice All Billing' },
+  { value: 'guest-invoice-ledger', label: 'Guest Invoice Ledger' },
+  { value: 'booking-confirmation', label: 'Booking Confirmation' },
+  { value: 'guest-booking-confirmation', label: 'Guest Booking Confirmation' },
+];
+
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
@@ -367,10 +378,10 @@ export class ContentController {
       if (idRaw && /^\d+$/.test(idRaw)) {
         const data = await prisma.email_builders.findUnique({ where: { id: BigInt(idRaw) } });
         if (!data || data.deleted_at) { notFound(res, 'Email builder not found'); return; }
-        success(res, bigintToNumber(data), 'Success', 200);
+        success(res, bigintToNumber(data), 'Success', 200, { master: { templateTypes: TEMPLATE_TYPES } });
         return;
       }
-      success(res, { status: 1 }, 'Success', 200);
+      success(res, { status: 1 }, 'Success', 200, { master: { templateTypes: TEMPLATE_TYPES } });
     } catch (err: any) { error(res, 'Failed to load email builder form', 500); }
   }
 
@@ -437,13 +448,18 @@ export class ContentController {
   static async emailGroupForm(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const allUsers = (await prisma.users.findMany({ where: { deleted_at: null }, orderBy: { email: 'asc' } }))
+        .map((u: any) => ({ value: Number(u.id), label: u.email }));
       if (idRaw && /^\d+$/.test(idRaw)) {
         const data = await prisma.email_groups.findUnique({ where: { id: BigInt(idRaw) } });
         if (!data || data.deleted_at) { notFound(res, 'Email group not found'); return; }
-        success(res, bigintToNumber(data), 'Success', 200);
+        const emails = String(data.group_list || '').split(',').filter(Boolean);
+        const groupUsers = (await prisma.users.findMany({ where: { email: { in: emails }, deleted_at: null }, select: { id: true, email: true } }))
+          .map((u: any) => ({ value: Number(u.id), label: u.email }));
+        success(res, { ...bigintToNumber(data), group_list: groupUsers }, 'Success', 200, { master: { users: allUsers } });
         return;
       }
-      success(res, { status: 1 }, 'Success', 200);
+      success(res, { status: 1 }, 'Success', 200, { master: { users: allUsers } });
     } catch (err: any) { error(res, 'Failed to load email group form', 500); }
   }
 
@@ -452,8 +468,11 @@ export class ContentController {
       const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
       const { group_name, group_list, status } = req.body;
       if (!group_name) { badRequest(res, 'group_name is required'); return; }
+      const groupListString = Array.isArray(group_list)
+        ? group_list.map((item: any) => item?.label ?? item).join(',')
+        : String(group_list ?? '');
       const data = await prisma.email_groups.create({
-        data: { property_id: pid, group_name, group_list, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, group_name, group_list: groupListString, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Email group created', 201);
     } catch (err: any) { console.error('Email group store error:', err); error(res, 'Failed to create email group', 500); }
@@ -466,7 +485,9 @@ export class ContentController {
       const { group_name, group_list, status } = req.body;
       const data: any = { updated_at: new Date(), updated_by: req.user?.id };
       if (group_name !== undefined) data.group_name = group_name;
-      if (group_list !== undefined) data.group_list = group_list;
+      if (group_list !== undefined) data.group_list = Array.isArray(group_list)
+        ? group_list.map((item: any) => item?.label ?? item).join(',')
+        : String(group_list);
       if (status !== undefined) data.status = status;
       await prisma.email_groups.update({ where: { id: BigInt(idRaw) }, data });
       success(res, null, 'Email group updated');

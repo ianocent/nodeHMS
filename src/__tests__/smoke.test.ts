@@ -448,7 +448,7 @@ describe('Event Management', () => {
   });
 
   test('GET /api/event-items responds', async () => {
-    const res = await request(app).get('/api/event-items');
+    const res = await request(app).get('/api/event-items?event_id=1');
     expect(res.status).toBe(200);
     expectLaravelFormat(res);
   });
