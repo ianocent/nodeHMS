@@ -381,8 +381,29 @@ export class AdminController {
   static async menuListBySlug(req: Request, res: Response): Promise<void> {
     try {
       const slug = String(req.params.slug);
-      const menus = await getPrisma().menus.findMany({ where: { uri_table: slug, deleted_at: null }, orderBy: { sort: 'asc' } });
-      success(res, bigintToNumber(menus), 'Success');
+      const menu = await getPrisma().menus.findFirst({ where: { uri_table: '/cms/' + slug, deleted_at: null } });
+      if (!menu) {
+        success(res, { code: 404, message: 'Not Found' }, 'Not Found', 404);
+        return;
+      }
+      const breadcrumbs = req.path.split('/').filter(Boolean).map((segment, index, arr) => ({
+        label: segment,
+        url: '/' + arr.slice(0, index + 1).join('/'),
+      }));
+      let label = String(menu.name ?? '');
+      try {
+        const parsed = JSON.parse(label);
+        label = parsed.en ?? parsed.id ?? parsed.name ?? label;
+      } catch (e) { /* plain string name */ }
+      const meta: any = {
+        typeTable: menu.type_table,
+        uriTable: menu.uri_table,
+        label,
+        isDrag: true,
+        uriSaveDrag: (menu.uri_table || '') + '/sort',
+        breadcrumbs,
+      };
+      success(res, null, 'Success', 200, meta);
     } catch (err: any) { error(res, 'Failed to list menus by slug', 500); }
   }
 

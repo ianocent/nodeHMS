@@ -138,6 +138,11 @@ router.post('/night-audit/check-audit', authMiddleware, SystemController.nightAu
 // Night Audit — Audit date (for header business date)
 router.get('/night-audit/audit', authMiddleware, SystemController.nightAuditAudit);
 
+// Night Audit — Room change / No show / Over stay lists
+router.get('/night-audit/room-change', authMiddleware, SystemController.nightAuditRoomChange);
+router.get('/night-audit/no-show', authMiddleware, SystemController.nightAuditNoShow);
+router.get('/night-audit/over-stay', authMiddleware, SystemController.nightAuditOverStay);
+
 // Dashboard data
 router.get('/get-dashboard', authMiddleware, SystemController.getDashboard);
 router.get('/get-dashboard/:code', authMiddleware, SystemController.getDashboardDetail);

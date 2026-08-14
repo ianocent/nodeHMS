@@ -117,6 +117,20 @@ export class HousekeepingController {
   }
 
   // ==================== WORK ORDER ====================
+  static async workOrderSummary(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid };
+      const [all, open, onProcess, finish] = await Promise.all([
+        prisma.work_orders.count({ where }),
+        prisma.work_orders.count({ where: { ...where, start_date: null } }),
+        prisma.work_orders.count({ where: { ...where, start_date: { not: null }, end_date: null } }),
+        prisma.work_orders.count({ where: { ...where, start_date: { not: null }, end_date: { not: null } } }),
+      ]);
+      success(res, { all, open, on_process: onProcess, finish }, 'Success');
+    } catch (err: any) { console.error('Work order summary error:', err); error(res, 'Failed to load work order summary', 500); }
+  }
+
   static async workOrderList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);

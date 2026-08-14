@@ -1610,6 +1610,51 @@ export class ReservationController {
   }
 
   // ─────────────────────────────────────────────
+  // GET /cms/reservation/master
+  // Laravel parity (ReservationController@getMaster)
+  // ─────────────────────────────────────────────
+  static async getMaster(req: Request, res: Response): Promise<void> {
+    try {
+      // config/cms.php status_reservation, filtered per Laravel
+      const allStatus = [
+        { value: 'check_in', label: 'Check In', id: 0 },
+        { value: 'check_out', label: 'Check Out', id: 1 },
+        { value: 'cancel_reservation', label: 'Cancelled', id: 2 },
+        { value: 'reservation', label: 'Reservation', id: 3 },
+        { value: 'in_house', label: 'In House', id: 4 },
+        { value: 'pending', label: 'Pending', id: 5 },
+      ];
+      const stayDates = allStatus
+        .filter((s) => [1, 0].includes(s.id))
+        .map((s) => ({ value: s.value, label: s.label }));
+
+      const displayStatus = allStatus
+        .filter((s) => s.id !== 4)
+        .map((s) => ({ value: s.value, label: s.label }));
+
+      const displayTypes = [
+        { value: 'fit', label: 'FIT' },
+        { value: 'git', label: 'GIT' },
+        { value: 'vr', label: 'VR' },
+      ];
+
+      const reasons = await prisma.types.findMany({
+        where: { group: 'cancellation-reservation', status: 1, deleted_at: null },
+        orderBy: { sort: 'asc' },
+      });
+
+      success(res, null, 'Success', 200, {
+        master: {
+          stay_dates: stayDates,
+          display_types: displayTypes,
+          display_status: displayStatus,
+          reasons: reasons.map((t) => ({ value: t.name, label: t.name })),
+        },
+      });
+    } catch (err: any) { console.error('Reservation master error:', err); error(res, 'Failed to fetch reservation master', 500); }
+  }
+
+  // ─────────────────────────────────────────────
   // GET /cms/reservation/subfolio/:id
   // ─────────────────────────────────────────────
   static async subfolioList(req: Request, res: Response): Promise<void> {

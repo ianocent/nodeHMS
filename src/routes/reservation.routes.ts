@@ -51,6 +51,7 @@ router.get('/reservation/code-item', authMiddleware, requirePermission(80, 'view
 router.post('/reservation/code-item', authMiddleware, requirePermission(80, 'add'), ReservationController.codeItemList);
 router.get('/reservation/inclusive', authMiddleware, requirePermission(80, 'view'), ReservationController.inclusiveList);
 router.get('/reservation/masterInclusive', authMiddleware, requirePermission(80, 'view'), ReservationController.masterInclusiveList);
+router.get('/reservation/master', authMiddleware, requirePermission(80, 'view'), ReservationController.getMaster);
 router.get('/reservation/subfolio/:id', authMiddleware, requirePermission(80, 'view'), ReservationController.subfolioList);
 
 // ── Singular param routes ──

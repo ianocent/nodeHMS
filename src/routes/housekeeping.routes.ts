@@ -31,6 +31,7 @@ router.get('/housekeeping/checklist-history', authMiddleware, requirePermission(
 router.get('/housekeeping/housekeeper-history', authMiddleware, requirePermission(158, 'view'), HousekeepingController.housekeeperHistory);
 
 // ── Work Order singular aliases (frontend uses /housekeeping/work-order) ──
+router.get('/housekeeping/work-order/summary', authMiddleware, requirePermission(158, 'view'), HousekeepingController.workOrderSummary);
 router.get('/housekeeping/work-order', authMiddleware, requirePermission(158, 'view'), HousekeepingController.workOrderList);
 router.get('/housekeeping/work-order/create', authMiddleware, requirePermission(158, 'add'), HousekeepingController.workOrderForm);
 router.post('/housekeeping/work-order', authMiddleware, requirePermission(158, 'add'), HousekeepingController.workOrderStore);

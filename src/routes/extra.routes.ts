@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 import { success, error, notFound } from '../utils/response';
+import { encrypt } from '../utils/encryption';
 import { GenericController } from '../controllers/generic.controller';
 
 function bigintToNumber(val: any): any {
@@ -159,17 +160,31 @@ router.get('/statistic/occupancy', authMiddleware, requirePermission(80, 'view')
 });
 
 // ── Country By Region (master data lookup) ──
+// Laravel parity (CountryController@getCountryByRegion): returns [{value, label}];
+// region 'all'/'undefined'/'null' → all countries; else countries filtered by region_id
 router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), async (req: Request, res: Response) => {
   try {
-    const nameFilter = req.query.name as string;
-    const where: any = { deleted_at: null };
-    if (nameFilter) where.name = { contains: nameFilter };
+    const region = (req.query.region as string) || 'all';
+    const toOptions = (rows: any[]) => rows.map((c: any) => ({ value: Number(c.id), label: c.name }));
+
+    if (region === 'all' || region === 'undefined' || region === 'null') {
+      const countries = await prisma.countries.findMany({ orderBy: { name: 'asc' } });
+      success(res, toOptions(countries), 'Success');
+      return;
+    }
+
+    const regionRow = await prisma.regions.findFirst({ where: { name: { contains: region } } });
+    if (!regionRow) {
+      // Laravel: status 404 with code 200 + empty data
+      res.status(404).type('text/plain').send(encrypt(JSON.stringify({ code: '200', message: 'Success', data: [] })));
+      return;
+    }
+
     const countries = await prisma.countries.findMany({
-      where,
-      select: { id: true, iso2: true, name: true, region: true, phonecode: true },
+      where: { region_id: regionRow.id },
       orderBy: { name: 'asc' },
     });
-    success(res, bigintToNumber(countries), 'Success');
+    success(res, toOptions(countries), 'Success');
   } catch (err: any) {
     error(res, err.message || 'Failed to fetch countries', 500);
   }

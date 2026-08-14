@@ -13,5 +13,6 @@ router.get('/statistic/statistic-room-type-grouping', authMiddleware, StatisticC
 router.get('/statistic/room-availability', authMiddleware, StatisticController.roomAvailability);
 router.get('/statistic/messages', authMiddleware, StatisticController.messages);
 router.get('/statistic/rate-codes', authMiddleware, StatisticController.rateCodes);
+router.get('/statistic', authMiddleware, StatisticController.roomStatisticGrid);
 
 export default router;

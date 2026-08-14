@@ -402,6 +402,131 @@ export class SystemController {
     }
   }
 
+  // ==================== NIGHT AUDIT ROOM CHANGE ====================
+  static async nightAuditRoomChange(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const propertyId = req.user?.lastProperty ?? 0n;
+
+      const where: any = {
+        property_id: propertyId,
+        is_posting: false,
+        reservations: {
+          some: {
+            OR: [{ room_type_id_next: { not: null } }, { room_id_next: { not: null } }],
+          },
+        },
+      };
+
+      const [data, total] = await Promise.all([
+        getPrisma().folios.findMany({
+          where,
+          orderBy: { created_at: 'asc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        getPrisma().folios.count({ where }),
+      ]);
+
+      const table = [
+        { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
+        { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
+        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
+        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
+      ];
+
+      success(res, bigintToNumber(data), 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) {
+      console.error('Night audit room change error:', err);
+      error(res, 'Failed to load room change', 500);
+    }
+  }
+
+  // ==================== NIGHT AUDIT NO SHOW ====================
+  static async nightAuditNoShow(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const dateStr = req.query.date as string;
+
+      if (!dateStr) { badRequest(res, 'date is required'); return; }
+
+      const where: any = {
+        property_id: propertyId,
+        status_reservation: { in: [1, 0] },
+        check_in_date: { lte: new Date(dateStr) },
+        is_posting: false,
+      };
+
+      const [data, total] = await Promise.all([
+        getPrisma().folios.findMany({ where, orderBy: { created_at: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        getPrisma().folios.count({ where }),
+      ]);
+
+      const table = [
+        { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
+        { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
+        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
+        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
+      ];
+
+      success(res, bigintToNumber(data), 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) {
+      console.error('Night audit no show error:', err);
+      error(res, 'Failed to load no show', 500);
+    }
+  }
+
+  // ==================== NIGHT AUDIT OVER STAY ====================
+  static async nightAuditOverStay(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const dateStr = req.query.date as string;
+
+      if (!dateStr) { badRequest(res, 'date is required'); return; }
+
+      const where: any = {
+        property_id: propertyId,
+        status_reservation: 2,
+        check_out_date: { lte: new Date(dateStr) },
+        is_posting: false,
+      };
+
+      const [data, total] = await Promise.all([
+        getPrisma().folios.findMany({ where, orderBy: { created_at: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        getPrisma().folios.count({ where }),
+      ]);
+
+      const table = [
+        { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
+        { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
+        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
+        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
+      ];
+
+      success(res, bigintToNumber(data), 'Success', 200, {
+        table,
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) {
+      console.error('Night audit over stay error:', err);
+      error(res, 'Failed to load over stay', 500);
+    }
+  }
+
   // ==================== NIGHT AUDIT CHECK ====================
   static async nightAuditCheck(req: Request, res: Response): Promise<void> {
     try {
@@ -702,13 +827,14 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
 
   static async helperTotalCancelBookingEngine(req: Request, res: Response): Promise<void> {
     try {
+      // Laravel parity (HelperController@totalCancelBO): folios with is_notification 0 + booking_engine_uuid not null
       const propertyId = req.user?.lastProperty ?? 0n;
 
-      const total = await getPrisma().reservations.count({
+      const total = await getPrisma().folios.count({
         where: {
           property_id: propertyId,
-          status: 4,
-          deleted_at: null,
+          is_notification: false,
+          booking_engine_uuid: { not: null },
         },
       });
 
@@ -721,6 +847,8 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
 
   static async helperReleaseLastUserFolio(req: Request, res: Response): Promise<void> {
     try {
+      // Laravel parity (HelperController@releaseLastUserFolio): delete ALL rows for current user
+      await getPrisma().last_user_folios.deleteMany({ where: { user_id: req.user?.id ?? 0n } });
       success(res, { status: 1 }, 'Last user folio released');
     } catch (err: any) {
       console.error('Helper release last user folio error:', err);
@@ -730,9 +858,19 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
 
   static async helperCheckLastUserFolio(req: Request, res: Response): Promise<void> {
     try {
+      // Laravel parity (HelperController@checkLastUserFolio)
       const folioId = req.body.folio_id;
-      // Check if there's an active session for this folio
-      success(res, { status: 1 }, 'Check completed');
+      if (!folioId) { badRequest(res, 'folio_id is required'); return; }
+
+      const lastUserFolio = await getPrisma().last_user_folios.findFirst({
+        where: { folio_id: BigInt(folioId) },
+      });
+
+      if (lastUserFolio) {
+        success(res, { status: 1 }, 'Someone is editing this folio');
+      } else {
+        success(res, { status: 0 }, 'Successfully');
+      }
     } catch (err: any) {
       console.error('Helper check last user folio error:', err);
       error(res, 'Failed to check folio', 500);
@@ -741,9 +879,19 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
 
   static async helperReplaceLastUserFolio(req: Request, res: Response): Promise<void> {
     try {
+      // Laravel parity (HelperController@replaceLastUserFolio): drop user's rows, then insert
       const folioId = req.body.folio_id;
-      // Replace/override the last user session for this folio
-      success(res, { status: 1 }, 'Folio session replaced');
+      if (!folioId) { badRequest(res, 'folio_id is required'); return; }
+
+      const userId = req.user?.id ?? 0n;
+      const propertyId = req.user?.lastProperty ?? 0n;
+
+      await getPrisma().last_user_folios.deleteMany({ where: { user_id: userId } });
+      await getPrisma().last_user_folios.create({
+        data: { user_id: userId, folio_id: BigInt(folioId), property_id: propertyId, datetime: new Date() },
+      });
+
+      success(res, { status: 1 }, 'Successfully');
     } catch (err: any) {
       console.error('Helper replace last user folio error:', err);
       error(res, 'Failed to replace folio session', 500);

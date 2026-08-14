@@ -131,12 +131,72 @@ export class PromotionController {
     }
   }
 
+  // ── RateRelationController::promotion parity (/rate/promotion) ──
+  static async ratePromotionList(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = String(req.query.rate_id ?? '');
+      if (!/^\d+$/.test(rateId)) { notFound(res, 'Rate is not found'); return; }
+      const rate = await prisma.rates.findUnique({ where: { id: BigInt(rateId) } });
+      if (!rate) { notFound(res, 'Rate is not found'); return; }
+      return PromotionController.list(req, res);
+    } catch (err: any) {
+      console.error('Rate promotion list error:', err);
+      error(res, 'Failed to fetch rate promotions', 500);
+    }
+  }
+
+  static async ratePromotionStore(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = req.body.rate_id;
+      if (!/^\d+$/.test(String(rateId ?? ''))) { notFound(res, 'Rate is not found'); return; }
+      const rate = await prisma.rates.findUnique({ where: { id: BigInt(rateId) } });
+      if (!rate) { notFound(res, 'Rate is not found'); return; }
+
+      const idx = req.body.idx;
+      if (idx !== undefined && idx !== null && !(Array.isArray(idx) && idx.length === 0)) {
+        const ids = (Array.isArray(idx) ? idx : [idx]).map((i: any) => BigInt(String(i)));
+        const modelType = 'App\\Models\\Rate';
+        await prisma.$transaction([
+          prisma.model_has_promotions.deleteMany({ where: { model_id: BigInt(rateId), model_type: modelType } }),
+          ...ids.map((promotionId: bigint) =>
+            prisma.model_has_promotions.create({ data: { promotion_id: promotionId, model_id: BigInt(rateId), model_type: modelType } })
+          ),
+        ]);
+      }
+
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Rate promotion store error:', err);
+      error(res, 'Failed to store rate promotions', 500);
+    }
+  }
+
+  static async ratePromotionDelete(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = String(req.query.rate_id ?? '');
+      if (!/^\d+$/.test(rateId)) { notFound(res, 'Rate is not found'); return; }
+      const rate = await prisma.rates.findUnique({ where: { id: BigInt(rateId) } });
+      if (!rate) { notFound(res, 'Rate is not found'); return; }
+
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (/^\d+$/.test(String(raw))) {
+        await prisma.model_has_promotions.deleteMany({
+          where: { promotion_id: BigInt(raw), model_id: BigInt(rateId), model_type: 'App\\Models\\Rate' },
+        });
+      }
+
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Rate promotion delete error:', err);
+      error(res, 'Failed to delete rate promotion', 500);
+    }
+  }
+
   /**
    * GET /api/promotions/create
    * Get master data for promotion creation form
    */
-  static async create(req: Request, res: Response): Promise<void> {
-    try {
+  static async create(req: Request, res: Response): Promise<void> {    try {
       const master = {
         statuses: STATUSES,
         promotion_code: generatePromotionCode()

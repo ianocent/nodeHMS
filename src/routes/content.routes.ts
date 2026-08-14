@@ -63,6 +63,9 @@ router.get('/email/email-group/:id/update', authMiddleware, requirePermission(69
 router.put('/email/email-group/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.emailGroupUpdate);
 router.delete('/email/email-group/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.emailGroupDestroy);
 
+// ── Email Send Master (email-send page) ──
+router.get('/email/email-send/master', authMiddleware, requirePermission(69, 'view'), ContentController.emailSendMaster);
+
 // ── Other Guest (other_guests model) ──
 router.get('/other-guest', authMiddleware, requirePermission(69, 'view'), ContentController.otherGuestList);
 router.post('/other-guest', authMiddleware, requirePermission(69, 'add'), ContentController.otherGuestStore);

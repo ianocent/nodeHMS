@@ -77,6 +77,10 @@ router.delete('/rate/company-applicable/:id', authMiddleware, requirePermission(
 // /rate/code-item alias (rate-promotion modal, must precede /rate/:id)
 router.get('/rate/code-item', authMiddleware, requirePermission(83, 'view'), ReservationController.codeItemList);
 router.post('/rate/code-item', authMiddleware, requirePermission(83, 'add'), ReservationController.codeItemList);
+// ── /rate/promotion — RateRelationController::promotion parity (must precede /rate/:id) ──
+router.get('/rate/promotion', authMiddleware, requirePermission(88, 'view'), PromotionController.ratePromotionList);
+router.post('/rate/promotion', authMiddleware, requirePermission(88, 'edit'), PromotionController.ratePromotionStore);
+router.delete('/rate/promotion/:id', authMiddleware, requirePermission(88, 'edit'), PromotionController.ratePromotionDelete);
 router.get('/rate/:id', authMiddleware, requirePermission(86, 'view'), RateController.show);
 router.get('/rate/:id/edit', authMiddleware, requirePermission(86, 'edit'), RateController.edit);
 router.put('/rate/:id', authMiddleware, requirePermission(86, 'edit'), RateController.update);

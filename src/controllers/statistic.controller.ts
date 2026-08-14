@@ -105,4 +105,99 @@ export class StatisticController {
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to load statistic rate codes', 500); }
   }
+
+  static async roomStatisticGrid(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const dateStr = (req.query.date as string) || new Date().toISOString().split('T')[0];
+      const d = new Date(dateStr); d.setHours(0, 0, 0, 0);
+      const nd = new Date(d); nd.setDate(nd.getDate() + 1);
+
+      const where: any = { property_id: pid, deleted_at: null };
+      const [rooms, total] = await Promise.all([
+        prisma.rooms.findMany({ where, orderBy: { sort: 'asc' }, include: { room_types: { select: { name: true } } } }),
+        prisma.rooms.count({ where }),
+      ]);
+
+      const modelTypes = await prisma.model_has_types.findMany({
+        where: { model_id: { in: rooms.map((r: any) => r.id) }, model_type: 'App\\Models\\Room' },
+        include: { types: { select: { id: true, name: true, group: true } } },
+      });
+      const typeMap = new Map<bigint, any[]>();
+      for (const mt of modelTypes) {
+        if (!typeMap.has(mt.model_id)) typeMap.set(mt.model_id, []);
+        typeMap.get(mt.model_id)!.push(mt.types);
+      }
+
+      const folios = await prisma.folios.findMany({
+        where: {
+          property_id: pid,
+          status_reservation: { notIn: [4, 5] },
+          check_in_date: { lt: nd },
+          check_out_date: { gte: d },
+          deleted_at: null,
+        },
+        select: { id: true, folio_number: true, status_reservation: true, check_in_date: true, check_out_date: true, reservations: { select: { room_id: true } } },
+      });
+      const folioMap = new Map<bigint, any>();
+      for (const f of folios) {
+        const roomId = (f as any).reservations?.[0]?.room_id;
+        if (roomId && !folioMap.has(roomId)) folioMap.set(roomId, f);
+      }
+
+      const data = rooms.map((r: any) => {
+        const types = typeMap.get(r.id) || [];
+        const building = types.find((t: any) => t.group === 'building');
+        const floor = types.find((t: any) => t.group === 'floor');
+        const folio = folioMap.get(r.id);
+        return {
+          id: Number(r.id),
+          name: r.name,
+          room_type_name: r.room_types?.name || null,
+          building: building ? { value: Number(building.id), label: building.name } : [],
+          floor: floor ? { value: Number(floor.id), label: floor.name } : [],
+          building_name: building?.name || '',
+          floor_name: floor?.name || '',
+          room_status: { value: r.room_status, label: '', colorCode: '' },
+          maid_status: { value: r.maid_status, label: '' },
+          max_pax: r.max_pax,
+          total_bed: r.total_bed,
+          folio: folio ? {
+            folio_id: Number(folio.id),
+            folio_number: folio.folio_number,
+            folio_status: String(folio.status_reservation),
+            folio_status_color_code: null,
+            check_in_date: folio.check_in_date,
+            check_out_date: folio.check_out_date,
+            url: null,
+          } : null,
+        };
+      });
+
+      const building = [...new Set(data.map((x: any) => x.building_name))].filter(Boolean).map((bname: any) => ({
+        value: bname, label: bname,
+        floors: [...new Set(data.filter((x: any) => x.building_name === bname).map((x: any) => x.floor_name))].map((fname: any) => ({
+          value: fname, label: fname, layout: '', code_image: '',
+          rooms: data.filter((x: any) => x.building_name === bname && x.floor_name === fname),
+        })),
+      }));
+
+      const meta: any = {
+        building,
+        data,
+        table: [
+          { label: 'Room Name', key: 'name', type: 'none', is_search: true },
+          { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
+          { label: 'Building', key: 'building_name', type: 'none', is_search: false },
+          { label: 'Floor', key: 'floor_name', type: 'none', is_search: false },
+          { label: 'Status', key: 'room_status', type: 'badge', is_search: false },
+        ],
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      };
+      success(res, null, 'Success', 200, meta);
+    } catch (err: any) { console.error('Room statistic grid error:', err); error(res, 'Failed to load room statistic', 500); }
+  }
 }

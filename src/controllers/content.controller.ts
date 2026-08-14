@@ -482,6 +482,18 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete email group', 500); }
   }
 
+  static async emailSendMaster(req: Request, res: Response): Promise<void> {
+    try {
+      const [groups, templates] = await Promise.all([
+        prisma.email_groups.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }),
+        prisma.email_builders.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }),
+      ]);
+      const allGroups = bigintToNumber(groups).map((g: any) => ({ value: g.id, label: g.group_name, list: g.group_list }));
+      const allTemplate = bigintToNumber(templates).map((t: any) => ({ value: t.id, label: t.template_name, subject: t.subject, body: t.body }));
+      success(res, [], 'Success', 200, { master: { allGroups, allTemplate } });
+    } catch (err: any) { console.error('Email send master error:', err); error(res, 'Failed to load email master', 500); }
+  }
+
   // ═══════════ OTHER GUESTS ═══════════
   static async otherGuestList(req: Request, res: Response): Promise<void> {
     try {

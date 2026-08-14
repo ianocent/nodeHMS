@@ -14,6 +14,12 @@ export interface ApiMeta {
   table?: any[];
   master?: any;
   search_data?: any[];
+  typeTable?: any;
+  uriTable?: any;
+  label?: any;
+  isDrag?: any;
+  uriSaveDrag?: any;
+  breadcrumbs?: any[];
 }
 
 function sendEncrypted(res: Response, statusCode: number, payload: Record<string, any>): Response {
@@ -38,6 +44,12 @@ export function success(
     ...(meta?.table ? { table: meta.table } : {}),
     ...(meta?.master ? { master: meta.master } : {}),
     ...(meta?.search_data ? { search_data: meta.search_data } : {}),
+    ...(meta?.typeTable !== undefined ? { typeTable: meta.typeTable } : {}),
+    ...(meta?.uriTable !== undefined ? { uriTable: meta.uriTable } : {}),
+    ...(meta?.label !== undefined ? { label: meta.label } : {}),
+    ...(meta?.isDrag !== undefined ? { isDrag: meta.isDrag } : {}),
+    ...(meta?.uriSaveDrag !== undefined ? { uriSaveDrag: meta.uriSaveDrag } : {}),
+    ...(meta?.breadcrumbs ? { breadcrumbs: meta.breadcrumbs } : {}),
   });
 }
 

@@ -634,11 +634,15 @@ async function getGuestLedgerReport(params: any): Promise<any[]> {
   }));
 }
 
+function safeStringify(v: any): string {
+  return JSON.stringify(v, (_k: string, val: any) => (typeof val === 'bigint' ? val.toString() : val));
+}
+
 function getGenericReport(name: string, params: any): any[] {
   return [{
     report: name,
     message: 'Report data not yet implemented',
-    params: JSON.stringify(params),
+    params: safeStringify(params),
   }];
 }
 
@@ -1226,19 +1230,20 @@ export class ReportController {
 
   static async cityByCountry(req: Request, res: Response): Promise<void> {
     try {
-      const countryId = req.query.country_id as string;
+      // Laravel parity (CountryController@getCityByCountry): param name is `country`
+      const countryId = (req.query.country as string) || (req.query.country_id as string);
       if (!countryId) {
-        badRequest(res, 'country_id is required');
+        badRequest(res, 'country is required');
         return;
       }
 
       const cities = await prisma.cities.findMany({
-        where: { country_id: BigInt(countryId), status: true },
+        where: { country_id: BigInt(countryId) },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });
 
-      success(res, cities.map((c: any) => bigintToNumber(c)), 'Success');
+      success(res, cities.map((c: any) => ({ value: Number(c.id), label: c.name })), 'Success');
     } catch (err: any) {
       console.error('Report cityByCountry error:', err);
       error(res, 'Failed to fetch cities', 500);

@@ -26,6 +26,7 @@ router.get('/user', authMiddleware, requirePermission(1116, 'view'), UserControl
 router.get('/user/create', authMiddleware, requirePermission(1116, 'add'), UserController.create);
 router.post('/user', authMiddleware, requirePermission(1116, 'add'), UserController.store);
 router.get('/user/online/list', authMiddleware, requirePermission(1116, 'view'), UserController.onlineList);
+router.get('/user/online', authMiddleware, requirePermission(1116, 'view'), UserController.onlineList);
 router.get('/user/simple/list', authMiddleware, requirePermission(1116, 'view'), UserController.simpleList);
 router.get('/user/all/list', authMiddleware, requirePermission(1116, 'view'), UserController.listAll);
 router.get('/user/:id', authMiddleware, requirePermission(1116, 'view'), UserController.show);
@@ -77,6 +78,7 @@ router.delete('/guests/loyalty-cards/:id', authMiddleware, requirePermission(82,
 // Singular aliases for guest and nested resources
 // IMPORTANT: Static paths must be BEFORE /guest/:id to avoid BigInt crash
 router.get('/guest', authMiddleware, requirePermission(82, 'view'), GuestController.list);
+router.get('/guest/guest-listing-report', authMiddleware, requirePermission(82, 'view'), GuestController.guestListingReport);
 router.get('/guest/create', authMiddleware, requirePermission(82, 'add'), GuestController.create);
 router.post('/guest', authMiddleware, requirePermission(82, 'add'), GuestController.store);
 router.get('/guest/simple/list', authMiddleware, requirePermission(82, 'view'), GuestController.simpleList);

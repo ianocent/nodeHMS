@@ -923,4 +923,90 @@ export class GuestController {
       folios: folios ? bigintToNumber(folios) : []
     };
   }
+
+  /**
+   * GET /api/guest/guest-listing-report
+   * Guest listing report (Laravel GuestListingController@index parity)
+   */
+  static async guestListingReport(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 20;
+      const search = req.query.search as string;
+      const status = req.query.status as string;
+      const gender = req.query.gender as string;
+      const minAge = req.query.min_age as string;
+      const maxAge = req.query.max_age as string;
+
+      const where: any = { deleted_at: null };
+      if (status !== undefined && status !== '') where.status_profile = parseInt(status);
+      if (gender && gender !== 'all') where.gender = gender;
+
+      const now = new Date();
+      if (minAge) {
+        const cut = new Date(now); cut.setFullYear(cut.getFullYear() - parseInt(minAge));
+        where.birth_of_date = { ...(where.birth_of_date || {}), lte: cut };
+      }
+      if (maxAge) {
+        const cut = new Date(now); cut.setFullYear(cut.getFullYear() - parseInt(maxAge));
+        where.birth_of_date = { ...(where.birth_of_date || {}), gte: cut };
+      }
+
+      if (search) {
+        where.OR = [
+          { first_name: { contains: search, mode: 'insensitive' } },
+          { last_name: { contains: search, mode: 'insensitive' } },
+          { account: { contains: search, mode: 'insensitive' } },
+          { short_code: { contains: search, mode: 'insensitive' } },
+          { telp: { contains: search, mode: 'insensitive' } },
+          { mobile_phone: { contains: search, mode: 'insensitive' } },
+        ];
+      }
+
+      const [data, total] = await Promise.all([
+        prisma.guest_profiles.findMany({
+          where,
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.guest_profiles.count({ where }),
+      ]);
+
+      const rows = bigintToNumber(data).map((g: any) => ({
+        id: g.id,
+        account: g.account,
+        name_combine: [g.first_name, g.last_name].filter(Boolean).join(' '),
+        nationality_id: g.nationality_id ?? null,
+        gender: g.gender,
+        birth_of_date: g.birth_of_date,
+        telp: g.telp,
+        mobile_phone: g.mobile_phone,
+        email: g.email,
+        address: g.address,
+        status_profile: g.status_profile,
+        status: g.status,
+      }));
+
+      const table = [
+        { label: 'Account No.', key: 'account', type: 'text', is_search: true },
+        { label: 'Guest Name', key: 'name_combine', type: 'text', is_search: true },
+        { label: 'Nationality', key: 'nationality_id', type: 'text', is_search: false },
+        { label: 'Gender', key: 'gender', type: 'text', is_search: false },
+        { label: 'DOB', key: 'birth_of_date', type: 'date', is_search: false },
+        { label: 'Address', key: 'address', type: 'text', is_search: false },
+        { label: 'Status Profile', key: 'status_profile', type: 'badge', is_search: false },
+      ];
+
+      success(res, rows, 'Success', 200, {
+        table,
+        permission: { view: true, edit: true, delete: true },
+        search_data: [],
+        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) {
+      console.error('Guest listing report error:', err);
+      error(res, 'Failed to load guest listing report', 500);
+    }
+  }
 }
