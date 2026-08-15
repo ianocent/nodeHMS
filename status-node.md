@@ -362,3 +362,26 @@ Keluhan baru: di Master Setup/Billing Setup (code-billing, code-post, code-item,
 
 ### Verify
 - backend tsc bersih, frontend tsc bersih. BELUM rebuild. Rebuild: sidebar (Shift/Work Orders/User Account), status icon di semua list, PB1 Percentage angka, scroll horizontal, Rate grid table muncul setelah Search.
+
+## 2026-08-15 sesi 4c: Not Data fix + shift-roster 500 + property scope + toast (kecommit backend 4cb6a7d, frontend d4f1fa4, kepush)
+
+### Keluhan user: "Not Data" di 10 menu
+- ROOT CAUSE: TableView render kolom HANYA kalau response punya meta `table` (table-edit/index.tsx:1175 `datatable?.table?.map`). List endpoint yang kirim data tanpa `table` -> area kolom kosong -> "Not Data". Kena: Report Permission + semua tab Security Audit (fetch `/cms/log`), Statistic Occupancy/Room Types/Room Type Groupings, semua menu Account Receivable (Invoice/Payment/Refund/Adjustment/Credit Note/Debit Note/Allocation), Concierge Phone Book/Baggage/CarPark/Lost and Found.
+- FIX:
+  - `src/utils/table.ts` (baru): `buildDefaultTable(records)` — build table dari keys record (id/*_id/*_by -> none, status -> checkbox, name/code/description -> text+search, sisanya string) + kolom Action.
+  - Concierge 4 list + `AccountingController.list` + `ReportController.reportPermissionList` + `SystemController.logList`: tambah `table` meta. Accounting pakai parity `Accounting::formatTable` (Date/Doc/Company autocomplete/Amount/Outstanding/source/Description/Processed options status_accounting 1-3). Log pakai parity `LogController@index` (Datetime/Staff/type/Module select/Activity html) + mapping causer=name, type=event. ReportPermission parity formatTable (No/Status checkbox/Name/Role).
+  - `StatisticController.byRoomType` (room-types + room-type-groupings): rewrite parity penuh `statisticsRoomType` — table dinamis (Room Type + Total Room + kolom per tanggal, is_html, double_click_action add-rate-code/add-message) + rows: Message (html), Daily Rate Code (html), blank, per room type (total + per-date total+overbooking), 3 blank, Total Room, Room Sold, Out of Order, Blocked, Available Room.
+  - Occupancy (extra.routes.ts): data object -> array 1 row + table meta.
+- Shift/Roster tampil data lintas property: `GenericController.list` — whitelist `PROPERTY_SCOPED_MODELS` (shift_roster/roster_list/rosters): kalau tidak ada query property_id, pakai `req.user.lastProperty`. (front-desk shiftList/shiftRosterList sudah filter sejak awal).
+
+### 500 "Failed to update" shift-roster (time_start "11:26")
+- ROOT CAUSE: `shifts.time_start` dkk = DateTime di Prisma; payload `"11:26"` time-only lewat `sanitizeBody` apa adanya -> Prisma "Expected ISO-8601 DateTime". Laravel kolomnya MySQL TIME (string), node Postgres timestamp.
+- FIX `sanitizeBody` (generic.controller): key match `/time/i` + value `HH:MM(:SS)` -> `new Date(Date.UTC(1970,0,1,h,m,s))`; string kosong -> skip. Output list/show/editForm: TIME_FIELDS DateTime -> `HH:MM` (toISOString slice 11,16) via formatTimeRows — konsisten dengan payload round-trip.
+- Frontend `shift-roster/form` kirim `time_start: timeRanges[0]?.start ?? ""` — guard '' juga sudah di-cover.
+
+### Toast error seperti Laravel
+- FetchData sudah toast sukses/error untuk response non-200; yang hilang: fetch GAGAL (network/decrypt error) -> silent. FIX components/helper/index.tsx: catch -> toast error "Failed to connect to server" (hanya POST/PUT/DELETE + !isNotToast, biar GET list tidak spam).
+
+### Verify
+- backend + frontend tsc bersih. BELUM rebuild — user perlu rebuild (npx tsc backend + restart, npm run dev frontend) sebelum verifikasi visual: 10 menu Not Data, shift-roster update, property scope Shift/Roster.
+- BELUM dikerjakan (butuh repro dari user): "Application Error" saat cancel dari create/edit beberapa menu — semua halaman form pakai optional chaining, RouteChange aman; dugaan render-time crash spesifik menu tertentu, perlu nama menu + langkah repro.
