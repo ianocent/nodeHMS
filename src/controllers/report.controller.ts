@@ -966,8 +966,8 @@ async function getRoomTypeUtilization(params: any): Promise<any[]> {
   });
   const totalRoomsByType = new Map(roomCounts.map((r: any) => [r.room_type_id, r._count.id]));
 
-  const getPeriodStats = async (start: Date, end: Date, isToday: boolean) => {
-    const reservations = await prisma.reservations.findMany({
+const getPeriodStats = async (start: Date, end: Date, isToday: boolean) => {
+const reservations = await prisma.reservations.findMany({
       where: {
         property_id: pid,
         room_type_id: { in: typeIds },
@@ -1801,6 +1801,1825 @@ async function getRoomRevenueBreakdown(params: any): Promise<any[]> {
   }];
 }
 
+async function getCommissionForBooking(params: any, byCompany: boolean): Promise<any[]> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || (byCompany ? addDays(startDate, 30) : startDate);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const folios = await prisma.folios.findMany({
+    where: {
+      property_id: pid,
+      booking_agent_id: { not: null },
+      check_in_date: { gte: start, lte: end },
+      deleted_at: null,
+    },
+    include: {
+      company_profiles_folios_booking_agent_idTocompany_profiles: true,
+      company_profiles_folios_company_profile_idTocompany_profiles: true,
+      reservations: { select: { data: true } },
+    },
+  });
+
+  const guestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null && v !== undefined))];
+  const guests = guestIds.length
+    ? await prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } })
+    : [];
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+
+  const grouped: Record<string, any> = {};
+  for (const folio of folios) {
+    const agent: any = folio.company_profiles_folios_booking_agent_idTocompany_profiles;
+    const company: any = folio.company_profiles_folios_company_profile_idTocompany_profiles;
+    const agentId = folio.booking_agent_id?.toString() ?? 'null';
+    const key = byCompany ? `${agentId}-${folio.company_profile_id?.toString() ?? 'null'}` : agentId;
+
+    if (!grouped[key]) {
+      grouped[key] = {
+        agentInfo: {
+          name: agent?.name || 'N/A',
+          commissionRate: Number(agent?.commission_rate ?? 0),
+          accountNo: agent?.account || 'N/A',
+          businessReg: agent?.IATA || 'N/A',
+          address: agent?.billing_address || 'N/A',
+          city: '',
+          country: '',
+          postalCode: agent?.billing_postal_code || '',
+        },
+        companyInfo: byCompany ? {
+          name: company?.name || 'N/A',
+          accountNo: company?.account || 'N/A',
+          address: company?.billing_address || 'N/A',
+          city: '',
+          country: '',
+          postalCode: company?.billing_postal_code || '',
+        } : undefined,
+        folios: [],
+        totalCharges: 0,
+        totalCommission: 0,
+      };
+    }
+    if (byCompany) {
+      grouped[key].companyInfo = {
+        name: company?.name || 'N/A',
+        accountNo: company?.account || 'N/A',
+        address: company?.billing_address || 'N/A',
+        city: '',
+        country: '',
+        postalCode: company?.billing_postal_code || '',
+      };
+    }
+
+    const charges = folio.reservations.reduce((sum: number, r: any) => sum + Number(safeParseJson(r.data)?.rate_price ?? 0), 0);
+    const commissionPercentage = Number(agent?.commission_rate ?? 0);
+    const payableCommission = charges * (commissionPercentage / 100);
+    const guest = guestById.get(folio.guest_profile_id);
+
+    grouped[key].folios.push({
+      folioNo: folio.folio_number || '',
+      checkInDate: fmtDMY(folio.check_in_date),
+      checkOutDate: fmtDMY(folio.check_out_date),
+      guestName: guest ? `${guest.first_name || ''} ${guest.last_name || ''}`.trim() : 'N/A',
+      charges,
+      payableCommission,
+    });
+    grouped[key].totalCharges += charges;
+    grouped[key].totalCommission += payableCommission;
+  }
+
+  return [{
+    reportTitle: byCompany
+      ? 'Commission For Booking Agent By Company Report'
+      : 'Commission For Booking Agent Report',
+    reportStartDate: fmtDMY(start),
+    reportEndDate: fmtDMY(end),
+    groupedData: grouped,
+    currentPage: 1,
+    totalPages: 1,
+    startDate,
+    endDate,
+  }];
+}
+
+async function getTaxBreakdownSummary(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const rows = await prisma.transaction_breakdowns.groupBy({
+    by: ['code'],
+    where: { property_id: pid, date: { gte: start, lte: end } },
+    _sum: { amount: true, pb1: true, svr_chrg: true, surcharge: true, total: true },
+  });
+  const sign = (typeAmount: string | null, val: any) =>
+    typeAmount === 'PLUS' ? Number(val ?? 0) : -Number(val ?? 0);
+
+  const codeIds = [...new Set(rows.map((r: any) => r.code).filter(Boolean))];
+  const codePosts = codeIds.length
+    ? await prisma.code_posts.findMany({ where: { id: { in: codeIds.map((c: string) => BigInt(c)) } }, include: { code_billings: true } })
+    : [];
+  const codePostById = new Map(codePosts.map((c: any) => [c.id, c]));
+
+  const rawTransactions = await prisma.transaction_breakdowns.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end } },
+    select: { code: true, type_amount: true, amount: true, pb1: true, svr_chrg: true, surcharge: true, total: true },
+  });
+  const byCode: Record<string, any> = {};
+  for (const t of rawTransactions) {
+    const key = t.code ?? 'null';
+    if (!byCode[key]) byCode[key] = { amount: 0, pb1: 0, svc: 0, surcharge: 0, total: 0 };
+    byCode[key].amount += sign(t.type_amount, t.amount);
+    byCode[key].pb1 += sign(t.type_amount, t.pb1);
+    byCode[key].svc += sign(t.type_amount, t.svr_chrg);
+    byCode[key].surcharge += sign(t.type_amount, t.surcharge);
+    byCode[key].total += sign(t.type_amount, t.total);
+  }
+
+  const grouped: Record<string, any> = {};
+  for (const [key, val] of Object.entries(byCode)) {
+    const cp = codePostById.get(key === 'null' ? -1n : BigInt(key));
+    const billingName = cp?.code_billings?.name ?? 'Other Revenue';
+    if (!grouped[billingName]) {
+      grouped[billingName] = {
+        name: billingName,
+        postCodes: [],
+        totals: { amount: 0, pb1: 0, svc: 0, surcharge: 0, total: 0 },
+      };
+    }
+    const postCodeData = {
+      name: cp?.name || 'Unknown',
+      amount: val.amount,
+      pb1: val.pb1,
+      svc: val.svc,
+      surcharge: val.surcharge,
+      total: val.total,
+    };
+    grouped[billingName].postCodes.push(postCodeData);
+    grouped[billingName].totals.amount += val.amount;
+    grouped[billingName].totals.pb1 += val.pb1;
+    grouped[billingName].totals.svc += val.svc;
+    grouped[billingName].totals.surcharge += val.surcharge;
+    grouped[billingName].totals.total += val.total;
+  }
+
+  const grandTotals = { amount: 0, pb1: 0, svc: 0, surcharge: 0, total: 0 };
+  const reportData = Object.values(grouped).map((b: any) => {
+    grandTotals.amount += b.totals.amount;
+    grandTotals.pb1 += b.totals.pb1;
+    grandTotals.svc += b.totals.svc;
+    grandTotals.surcharge += b.totals.surcharge;
+    grandTotals.total += b.totals.total;
+    return b;
+  });
+
+  const paymentRows = await prisma.transaction_breakdowns.groupBy({
+    by: ['type_payment_id'],
+    where: { property_id: pid, date: { gte: start, lte: end }, type_amount: 'MINUS' },
+    _sum: { total: true },
+  });
+  const paymentIds = [...new Set(paymentRows.map((p: any) => p.type_payment_id).filter(Boolean))];
+  const typePayments = paymentIds.length
+    ? await prisma.type_payments.findMany({ where: { id: { in: paymentIds } }, select: { id: true, name: true } })
+    : [];
+  const tpById = new Map(typePayments.map((t: any) => [t.id, t.name]));
+  const paymentData = paymentRows.map((p: any) => ({
+    payment_type: tpById.get(p.type_payment_id) || 'Unknown',
+    total: Math.abs(Number(p._sum.total ?? 0)),
+  }));
+  const totalPayment = paymentData.reduce((s: number, p: any) => s + p.total, 0);
+
+  return [{
+    reportTitle: 'Tax Breakdown Summary',
+    reportData,
+    grandTotals,
+    paymentData,
+    startDate,
+    endDate,
+    totalPayment,
+  }];
+}
+
+async function getInHouseFolioBalHistory(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const date = params.date || formatDate(new Date());
+  const dayEnd = new Date(`${date}T23:59:59Z`);
+
+  const folios = await prisma.folios.findMany({
+    where: {
+      property_id: pid,
+      status_reservation: STATUS_RESERVATION_CHECK_IN,
+      is_virtual: false,
+      deleted_at: null,
+      check_in_date: { lte: dayEnd },
+      check_out_date: { gte: new Date(`${date}T00:00:00Z`) },
+      reservations: { some: { room_id: { not: null } } },
+    },
+    include: {
+      company_profiles_folios_company_profile_idTocompany_profiles: true,
+      reservations: { orderBy: { id: 'desc' }, take: 1, include: { room_types: true, rates: true } },
+    },
+  });
+
+  const roomIds = [...new Set(folios.map((f: any) => f.reservations?.[0]?.room_id).filter((v: any) => v !== null && v !== undefined))];
+  const guestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null && v !== undefined))];
+  const parentIds = [...new Set(folios.filter((f: any) => f.type_reservation === 'git' && f.parent && Number(f.parent) !== 0).map((f: any) => f.parent as bigint))];
+  const [rooms, guests, parents] = await Promise.all([
+    roomIds.length ? prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : Promise.resolve([] as any[]),
+    guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : Promise.resolve([] as any[]),
+    parentIds.length ? prisma.folios.findMany({ where: { id: { in: parentIds } }, select: { id: true, company_profiles_folios_company_profile_idTocompany_profiles: { select: { id: true, name: true, credit_limit: true } } } }) : Promise.resolve([] as any[]),
+  ]);
+  const roomById = new Map(rooms.map((r: any) => [r.id, r.name]));
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const parentById = new Map(parents.map((p: any) => [p.id, p]));
+
+  const folioIds = folios.map((f: any) => f.id);
+  const txns = folioIds.length
+    ? await prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, type_amount: true, total: true } })
+    : [];
+  const balanceByFolio = new Map<string, number>();
+  for (const t of txns) {
+    const key = t.folio_id.toString();
+    const cur = balanceByFolio.get(key) ?? 0;
+    balanceByFolio.set(key, cur + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)));
+  }
+
+  const grouped: Record<string, any> = {};
+  let grandTotal = 0;
+  for (const folio of folios) {
+    const res = folio.reservations?.[0];
+    if (!res) continue;
+    const isSubGit = folio.type_reservation === 'git' && folio.parent && Number(folio.parent) !== 0;
+    const parent = isSubGit ? parentById.get(folio.parent as bigint) : null;
+    const company: any = parent?.company_profiles_folios_company_profile_idTocompany_profiles || folio.company_profiles_folios_company_profile_idTocompany_profiles;
+    const companyId = parent?.company_profiles_folios_company_profile_idTocompany_profiles?.id?.toString()
+      || folio.company_profiles_folios_company_profile_idTocompany_profiles?.id?.toString()
+      || 'unknown';
+    const companyName = parent?.company_profiles_folios_company_profile_idTocompany_profiles?.name
+      || folio.company_profiles_folios_company_profile_idTocompany_profiles?.name
+      || 'Unknown';
+
+    const balance = balanceByFolio.get(folio.id.toString()) ?? 0;
+    grandTotal += balance;
+    if (!grouped[companyId]) {
+      grouped[companyId] = { company_name: companyName, folios: [], total_balance: 0, credit_limit: Number(company?.credit_limit ?? 0) };
+    }
+    grouped[companyId].total_balance += balance;
+    grouped[companyId].folios.push({
+      folio: folio.folio_number || '',
+      room_type: res.room_types?.name || '',
+      room: roomById.get(res.room_id) || '',
+      guest: guestById.get(folio.guest_profile_id) ? `${guestById.get(folio.guest_profile_id)?.first_name || ''} ${guestById.get(folio.guest_profile_id)?.last_name || ''}`.trim() : '',
+      group_name: companyName,
+      arrival: fmtDMY(folio.check_in_date),
+      departure: fmtDMY(folio.check_out_date),
+      rate_code: res.rates?.name || '',
+      balance,
+    });
+  }
+
+  const reportData = Object.values(grouped).filter((g: any) => g.folios.length);
+  return [{
+    reportTitle: 'In House Folio Balances',
+    reportDate: new Date(dayEnd).toLocaleDateString('en-US', { day: '2-digit', month: 'long', year: 'numeric' }),
+    reportData,
+    grandTotal,
+    startDate: date,
+    endDate: date,
+  }];
+}
+
+async function getTransactionReportByStaff(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const date = params.date || formatDate(new Date());
+  const staffId = params.staffId || 'all';
+  const dayStart = new Date(`${date}T00:00:00Z`);
+  const dayEnd = new Date(`${date}T23:59:59Z`);
+
+  const billingCodes = await prisma.code_billings.findMany({
+    where: { property_id: pid, status: 1, deleted_at: null },
+    include: { code_posts: { where: { deleted_at: null } } },
+    orderBy: { id: 'asc' },
+  });
+
+  const reportData: any[] = [];
+  for (const billingCode of billingCodes) {
+    const billingData: any = { name: billingCode.name, transactions: [], total: 0 };
+    for (const postCode of billingCode.code_posts) {
+      const where: any = {
+        property_id: pid,
+        code: postCode.id.toString(),
+        date: { gte: dayStart, lte: dayEnd },
+        deleted_at: null,
+      };
+      if (staffId === 'system') {
+        where.type = { in: ['room_revenue', 'additional_item'] };
+      } else if (staffId !== 'all') {
+        where.created_by = BigInt(staffId);
+      }
+      const transactions = await prisma.transactions.findMany({
+        where,
+        include: { folios: { include: { reservations: { orderBy: { date: 'desc' }, take: 1 } } } },
+      });
+      if (!transactions.length) continue;
+
+      const codeItemIds = [...new Set(transactions.map((t: any) => t.code_item_id).filter((v: any) => v !== null && v !== undefined))];
+      const codeItems = codeItemIds.length ? await prisma.code_items.findMany({ where: { id: { in: codeItemIds } }, select: { id: true, name: true } }) : [];
+      const codeItemById = new Map(codeItems.map((c: any) => [c.id, c.name]));
+
+      const shiftInfo = /^\d+$/.test(staffId)
+        ? (async () => {
+            const latestShift = await prisma.shifts.findFirst({ where: { user_id: BigInt(staffId), property_id: pid }, orderBy: { id: 'desc' } });
+            return latestShift ? `${String(Number(latestShift.id)).padStart(8, '0')} (${latestShift.start ? formatDate(latestShift.start).slice(0, 5) : ''})`.replace('(', ' (') : '00000000 (-)';
+          })()
+        : `${staffId.toUpperCase()} (-)`;
+
+      const guestIds = [...new Set(transactions.map((t: any) => t.folios?.guest_profile_id).filter((v: any) => v !== null && v !== undefined))];
+      const guests = guestIds.length ? await prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : [];
+      const guestById = new Map(guests.map((g: any) => [g.id, g]));
+      const roomIds = [...new Set(transactions.map((t: any) => t.folios?.reservations?.[0]?.room_id).filter((v: any) => v !== null && v !== undefined))];
+      const rooms = roomIds.length ? await prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : [];
+      const roomById = new Map(rooms.map((r: any) => [r.id, r.name]));
+
+      const postCodeData: any = { name: postCode.name, shift: await shiftInfo, items: [], total: 0 };
+      for (const t of transactions) {
+        const folio: any = t.folios;
+        const guest = guestById.get(folio?.guest_profile_id);
+        const roomName = roomById.get(folio?.reservations?.[0]?.room_id) || '';
+        const itemCodeName = codeItemById.get(t.code_item_id) || '';
+        const folioNumber = folio?.folio_number || 'N/A';
+        let description = '';
+        if (String(t.type).toUpperCase() === 'ROOM_REVENUE') {
+          description = `Room Charge - ${folioNumber}`;
+        } else if (t.type === 'extra_bed') {
+          description = `Extra Bed - ${folioNumber}`;
+        } else if (['manual_posting', 'additional_item', 'room_inclusive', 'extra_bed_inclusive'].includes(t.type as string)) {
+          description = `${folioNumber}${itemCodeName ? ` - ${itemCodeName}` : ''} - ${t.remark ?? ''}`;
+        } else if (t.is_transfer === 1 || t.is_transfer === 2) {
+          description = `${(t.type || '').replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())} ${t.remark ?? ''}`;
+        } else {
+          description = `${(t.type || '').replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())} - ${folioNumber}`;
+        }
+        postCodeData.items.push({
+          folio: folioNumber,
+          room: roomName,
+          guest: guest ? `${guest.first_name || ''} ${guest.last_name || ''}`.trim() : '',
+          post_date: t.created_at ? `${fmtDMY(t.created_at).slice(0, 2)} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][new Date(t.created_at).getUTCMonth()]} ${new Date(t.created_at).getUTCFullYear()} ${String(new Date(t.created_at).getUTCHours()).padStart(2, '0')}:${String(new Date(t.created_at).getUTCMinutes()).padStart(2, '0')}:${String(new Date(t.created_at).getUTCSeconds()).padStart(2, '0')}` : '',
+          description,
+          card_name: t.card_name || '',
+          last_digit_card: String(t.last_digit_card || 0).padStart(4, '0'),
+          total: t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0),
+        });
+        postCodeData.total += t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0);
+      }
+      if (postCodeData.items.length) {
+        billingData.transactions.push(postCodeData);
+        billingData.total += postCodeData.total;
+      }
+    }
+    if (billingData.transactions.length) {
+      reportData.push(billingData);
+    }
+  }
+
+  const staffName = /^\d+$/.test(staffId)
+    ? (await prisma.users.findUnique({ where: { id: BigInt(staffId) }, select: { name: true } }))?.name
+    : (staffId === 'system' ? 'SYSTEM' : 'ALL STAFF');
+
+  return [{
+    reportData,
+    date: `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(dayStart).getUTCDay()]}, ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][new Date(dayStart).getUTCMonth()]} ${String(new Date(dayStart).getUTCDate()).padStart(2, '0')}, ${date.slice(0, 4)}`,
+    staffName,
+    printDate: fmtDMYHMS(new Date()),
+  }];
+}
+
+async function getAsyncJobReport(name: string, params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const method = name.replace(/-/g, '_');
+  const requestId = `${startDate}-${endDate}-${pid}-${method}`;
+  const existing = await prisma.requests.findFirst({
+    where: { request_id: requestId, created_at: { gte: new Date(Date.now() - 10 * 60 * 1000) } },
+    orderBy: { id: 'desc' },
+  });
+  if (!existing) {
+    await prisma.requests.create({
+      data: {
+        request_id: requestId,
+        property_id: Number(pid),
+        method,
+        start_date: new Date(`${startDate}T00:00:00Z`),
+        end_date: new Date(`${endDate}T00:00:00Z`),
+        created_at: new Date(),
+        status: 0,
+      },
+    });
+  }
+  return [{
+    status: 'success',
+    message: 'Report is being generated. Please check back later.',
+    request_id: requestId,
+  }];
+}
+
+async function revenueBetween(pid: bigint, start: Date, end: Date, type: string): Promise<number> {
+  const txns = await prisma.transaction_breakdowns.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, type: { notIn: ['payment', 'paidout', 'refund'] } },
+    select: { code: true, type_amount: true, amount: true },
+  });
+  if (!txns.length) return 0;
+  const codeIds = [...new Set(txns.map((t: any) => t.code).filter(Boolean))];
+  const cps = codeIds.length
+    ? await prisma.code_posts.findMany({ where: { id: { in: codeIds.map((c: string) => BigInt(c)) } }, include: { code_billings: true } })
+    : [];
+  const cpById = new Map(cps.map((c: any) => [c.id, c]));
+
+  const nameLike = (v: string, needle: string) => v.toLowerCase().includes(needle);
+  let total = 0;
+  for (const t of txns) {
+    const cp: any = cpById.get(t.code ? BigInt(t.code) : -1n);
+    if (!cp) continue;
+    const cpName = (cp.name || '').toLowerCase();
+    const billingName = (cp.code_billings?.name || '').toLowerCase();
+    const def = cp.type === 'DEFAULT';
+    let match = false;
+    if (type === 'room revenue' || type === 'banquet') {
+      match = nameLike(billingName, type);
+    } else if (type === 'other') {
+      match = nameLike(billingName, 'expenses') || nameLike(billingName, 'other');
+    } else if (['breakfast', 'dine in', 'room service', 'minimart'].includes(type)) {
+      match = def && cpName.startsWith(type);
+    } else if (type === 'fb') {
+      match = def
+        && !cpName.startsWith('breakfast')
+        && !cpName.startsWith('dine in')
+        && !cpName.startsWith('room service')
+        && !cpName.startsWith('minimart')
+        && nameLike(billingName, 'restaurant revenue');
+    }
+    if (match) {
+      total += t.type_amount === 'PLUS' ? Number(t.amount ?? 0) : -Number(t.amount ?? 0);
+    }
+  }
+  return total;
+}
+
+async function getAccountDailySalesReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const date = params.date || formatDate(new Date());
+  const kurs = Number(String(params.kurs || '100').replace(',', '.')) || 100;
+  const toJPY = (v: number) => Number((v / kurs).toFixed(2));
+  const dayStart = new Date(`${date}T00:00:00Z`);
+  const dayEnd = new Date(`${date}T23:59:59Z`);
+  const d = new Date(`${date}T00:00:00Z`);
+  const monthStart = new Date(`${date.slice(0, 8)}01T00:00:00Z`);
+  const yearStart = new Date(`${date.slice(0, 4)}-01-01T00:00:00Z`);
+  const lastYearStart = new Date(`${Number(date.slice(0, 4)) - 1}-${date.slice(5)}T00:00:00Z`);
+  const lastYearEnd = new Date(`${Number(date.slice(0, 4)) - 1}-${date.slice(5)}T23:59:59Z`);
+  const lastYearMonthStart = new Date(`${Number(date.slice(0, 4)) - 1}-${date.slice(5, 7)}-01T00:00:00Z`);
+  const lastYearMonthEnd = new Date(`${Number(date.slice(0, 4)) - 1}-${date.slice(5)}T23:59:59Z`);
+
+  const totalRooms = await prisma.rooms.count({ where: { property_id: pid, status: 1, deleted_at: null } });
+  const daysInMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+
+  const resvWhere = (s: Date, e: Date) => ({
+    property_id: pid,
+    date: { gte: s, lte: e },
+    deleted_at: null,
+    folios: {
+      is: {
+        status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] },
+        type_reservation: { in: ['fit', 'git'] },
+        is_house_use: false,
+        complimentary: false,
+      },
+    },
+  });
+
+  const [todayResvs, mtdResvs, forecastResvs, lastYearSold, lastYearMonthSold] = await Promise.all([
+    prisma.reservations.findMany({ where: resvWhere(dayStart, dayEnd), select: { id: true, adult: true, child: true, rates: { include: { rate_inclusives: { where: { status: 1 } } } } } }),
+    prisma.reservations.findMany({ where: resvWhere(monthStart, dayEnd), select: { id: true, adult: true, child: true, rates: { include: { rate_inclusives: { where: { status: 1 } } } } } }),
+    prisma.reservations.findMany({ where: resvWhere(new Date(`${date}T00:00:00Z`).getTime() + 86400000 >= 0 ? new Date(`${date.slice(0, 4)}-${date.slice(5, 7)}-${String(Number(date.slice(8, 10)) + 1).padStart(2, '0')}T00:00:00Z`) : new Date(), new Date(`${date.slice(0, 4)}-${date.slice(5, 7)}-${String(Number(date.slice(8, 10)) + 1).padStart(2, '0')}T23:59:59Z`)), select: { id: true, adult: true, child: true } }),
+    prisma.reservations.count({ where: { property_id: pid, date: { gte: lastYearStart, lte: lastYearEnd }, deleted_at: null, folios: { is: { status_reservation: { notIn: [2, 5] } } } } }),
+    prisma.reservations.count({ where: { property_id: pid, date: { gte: lastYearMonthStart, lte: lastYearMonthEnd }, deleted_at: null, folios: { is: { status_reservation: { notIn: [2, 5] } } } } }),
+  ]);
+
+  const stockIds = [...new Set(todayResvs.flatMap((r: any) => r.rates?.rate_inclusives ?? []).map((ri: any) => ri.stock).filter(Boolean))];
+  const stockItems = stockIds.length ? await prisma.code_items.findMany({ where: { id: { in: stockIds.map((s: string) => BigInt(s)) } }, include: { code_posts: true } }) : [];
+  const hasBreakfast = (res: any) => (res.rates?.rate_inclusives ?? []).some((ri: any) => {
+    const ci = stockItems.find((c: any) => c.id === (ri.stock ? BigInt(ri.stock) : -1n));
+    const name = (ci?.code_posts?.name || '').toLowerCase();
+    return name.includes('breakfast additional') || name.includes('breakfast room');
+  });
+
+  const todayRoomSold = todayResvs.length;
+  const mtdRoomSold = mtdResvs.length;
+  const todayPax = todayResvs.reduce((s: number, r: any) => s + (r.adult ?? 0) + (r.child ?? 0), 0);
+  const mtdPax = mtdResvs.reduce((s: number, r: any) => s + (r.adult ?? 0) + (r.child ?? 0), 0);
+  const forecastRoomSold = forecastResvs.length;
+  const forecastPax = forecastResvs.reduce((s: number, r: any) => s + (r.adult ?? 0) + (r.child ?? 0), 0);
+  const totalRoomsMTD = totalRooms * daysInMonth;
+
+  const todayRevenue = await revenueBetween(pid, dayStart, dayEnd, 'room revenue');
+  const lastYearDailyRevenue = await revenueBetween(pid, lastYearStart, lastYearEnd, 'room revenue');
+  const mtdRevenue = await revenueBetween(pid, monthStart, dayEnd, 'room revenue');
+  const lastYearMTDRevenue = await revenueBetween(pid, lastYearMonthStart, lastYearMonthEnd, 'room revenue');
+  const tomorrow = new Date(new Date(`${date}T00:00:00Z`).getTime() + 86400000);
+  const tmrStart = new Date(`${formatDate(tomorrow)}T00:00:00Z`);
+  const tmrEnd = new Date(`${formatDate(tomorrow)}T23:59:59Z`);
+
+  const occupancy = totalRooms > 0 ? (todayRoomSold / totalRooms) * 100 : 0;
+  const lastYearOccupancy = totalRooms > 0 ? (lastYearSold / totalRooms) * 100 : 0;
+  const mtdOccupancy = totalRoomsMTD > 0 ? (mtdRoomSold / totalRoomsMTD) * 100 : 0;
+  const lastYearMtdOccupancy = totalRoomsMTD > 0 ? (lastYearMonthSold / totalRoomsMTD) * 100 : 0;
+
+  const dailyStats = {
+    total_rooms: totalRooms,
+    room_sold: todayRoomSold,
+    total_pax: todayPax,
+    breakfast_rooms: todayResvs.filter(hasBreakfast).length,
+    breakfast_pax: todayResvs.filter(hasBreakfast).reduce((s: number, r: any) => s + (r.adult ?? 0) + (r.child ?? 0), 0),
+    last_year_room_sold: lastYearSold,
+    occupancy: Number(occupancy.toFixed(2)),
+    last_year_occupancy: Number(lastYearOccupancy.toFixed(2)),
+    variance: Number((occupancy - lastYearOccupancy).toFixed(2)),
+  };
+
+  const forecastResvsWithRate = await prisma.reservations.findMany({ where: resvWhere(tmrStart, tmrEnd), select: { id: true, adult: true, child: true, rates: { include: { rate_inclusives: { where: { status: 1 } } } } } });
+  const forecastStockIds = [...new Set(forecastResvsWithRate.flatMap((r: any) => r.rates?.rate_inclusives ?? []).map((ri: any) => ri.stock).filter(Boolean))];
+  const forecastStockItems = forecastStockIds.length ? await prisma.code_items.findMany({ where: { id: { in: forecastStockIds.map((s: string) => BigInt(s)) } }, include: { code_posts: true } }) : [];
+  const forecastHasBreakfast = (res: any) => (res.rates?.rate_inclusives ?? []).some((ri: any) => {
+    const ci = forecastStockItems.find((c: any) => c.id === (ri.stock ? BigInt(ri.stock) : -1n));
+    const name = (ci?.code_posts?.name || '').toLowerCase();
+    return name.includes('breakfast additional') || name.includes('breakfast room');
+  });
+  const fOccupancy = totalRooms > 0 ? (forecastRoomSold / totalRooms) * 100 : 0;
+  const forecastStats = {
+    total_rooms: totalRooms,
+    room_sold: forecastRoomSold,
+    total_pax: forecastPax,
+    breakfast_rooms: forecastResvsWithRate.filter(forecastHasBreakfast).length,
+    breakfast_pax: forecastResvsWithRate.filter(forecastHasBreakfast).reduce((s: number, r: any) => s + (r.adult ?? 0) + (r.child ?? 0), 0),
+    last_year_room_sold: 0,
+    occupancy: Number(fOccupancy.toFixed(2)),
+    last_year_occupancy: 0,
+    variance: 0,
+  };
+
+  const getBudgetCost = async (needle: string, month: number, year: number) => {
+    const cps = await prisma.code_posts.findMany({ where: { name: { contains: needle, mode: 'insensitive' }, property_id: pid }, select: { id: true } });
+    if (!cps.length) return 0;
+    const budgets = await prisma.post_code_budgets.findMany({ where: { code_post_id: { in: cps.map((c: any) => c.id) }, month, year }, select: { budget: true } });
+    return budgets.reduce((s: number, b: any) => s + Number(b.budget ?? 0), 0);
+  };
+
+  const getBalance = async (s: Date, e: Date) => {
+    const txns = await prisma.transaction_breakdowns.findMany({
+      where: { property_id: pid, date: { gte: s, lte: e }, type: { notIn: ['payment', 'paidout', 'refund'] } },
+      select: { code: true, type_amount: true, total: true },
+    });
+    const codeIds = [...new Set(txns.map((t: any) => t.code).filter(Boolean))];
+    const cps = codeIds.length ? await prisma.code_posts.findMany({ where: { id: { in: codeIds.map((c: string) => BigInt(c)) } }, include: { code_billings: true } }) : [];
+    const cpById = new Map(cps.map((c: any) => [c.id, c]));
+    const total = txns.reduce((sum: number, t: any) => {
+      const cp: any = cpById.get(t.code ? BigInt(t.code) : -1n);
+      if (!cp) return sum;
+      if ((cp.code_billings?.name || '').toLowerCase().includes('payment')) return sum;
+      return sum + (t.type_amount === 'PLUS' ? Number(t.total ?? 0) : -Number(t.total ?? 0));
+    }, 0);
+    return total;
+  };
+
+  const variableCost = await getBudgetCost('variable', d.getUTCMonth() + 1, d.getUTCFullYear());
+  const fixedCost = await getBudgetCost('fixed', d.getUTCMonth() + 1, d.getUTCFullYear());
+  const monthDays = daysInMonth;
+
+  const actualRevenue = await getBalance(dayStart, dayEnd);
+  const mtdActualRevenue = await getBalance(monthStart, dayEnd);
+  const diffActual = actualRevenue - variableCost / monthDays - fixedCost / monthDays;
+  const diffMtd = mtdActualRevenue - variableCost - fixedCost;
+  const winLose = (v: number) => (v > 0 ? 'O' : v === 0 ? '△' : 'X');
+
+  const arr = todayRoomSold > 0 ? todayRevenue / todayRoomSold : 0;
+  const lastYearARR = lastYearSold > 0 ? lastYearDailyRevenue / lastYearSold : 0;
+  const avgRatePerPax = todayPax > 0 ? todayRevenue / todayPax : 0;
+  const lastYearAvgRatePerPax = todayPax > 0 ? lastYearDailyRevenue / todayPax : 0;
+  const revpar = totalRooms > 0 ? todayRevenue / totalRooms : 0;
+  const lastYearRevpar = totalRooms > 0 ? lastYearDailyRevenue / totalRooms : 0;
+
+  const dailySales = {
+    daily: {
+      room_revenue_idr: todayRevenue,
+      room_revenue_jpy: toJPY(todayRevenue),
+      last_year_room_revenue: lastYearDailyRevenue,
+      ytd_room_revenue: todayRevenue > 0 && lastYearDailyRevenue > 0 ? (todayRevenue / lastYearDailyRevenue * 100) : 0,
+      room_revenue_variance: todayRevenue - lastYearDailyRevenue,
+      arr_idr: arr,
+      arr_jpy: toJPY(arr),
+      last_year_arr: lastYearARR,
+      ytd_arr: arr > 0 && lastYearARR > 0 ? (arr / lastYearARR * 100) : 0,
+      arr_variance: arr - lastYearARR,
+      avg_rate_pax_idr: avgRatePerPax,
+      avg_rate_pax_jpy: toJPY(avgRatePerPax),
+      last_year_avg_rate_pax: todayPax > 0 ? lastYearDailyRevenue / todayPax : 0,
+      ytd_avg_rate_pax: avgRatePerPax > 0 && lastYearAvgRatePerPax > 0 ? (avgRatePerPax / lastYearAvgRatePerPax * 100) : 0,
+      avg_rate_pax_variance: avgRatePerPax - lastYearAvgRatePerPax,
+      revpar_idr: revpar,
+      revpar_jpy: toJPY(revpar),
+      last_year_revpar: lastYearRevpar,
+      ytd_revpar: revpar > 0 && lastYearRevpar > 0 ? (revpar / lastYearRevpar * 100) : 0,
+      revpar_variance: revpar - lastYearRevpar,
+    },
+    mtd: {
+      room_revenue_idr: mtdRevenue,
+      room_revenue_jpy: toJPY(mtdRevenue),
+      last_year_room_revenue: lastYearMTDRevenue,
+      ytd_room_revenue: mtdRevenue > 0 && lastYearMTDRevenue > 0 ? (mtdRevenue / lastYearMTDRevenue * 100) : 0,
+      room_revenue_variance: mtdRevenue - lastYearMTDRevenue,
+      arr_idr: mtdRoomSold > 0 ? mtdRevenue / mtdRoomSold : 0,
+      arr_jpy: toJPY(mtdRoomSold > 0 ? mtdRevenue / mtdRoomSold : 0),
+      last_year_arr: lastYearMonthSold > 0 ? lastYearMTDRevenue / lastYearMonthSold : 0,
+      ytd_arr: 0,
+      arr_variance: 0,
+      avg_rate_pax_idr: mtdPax > 0 ? mtdRevenue / mtdPax : 0,
+      avg_rate_pax_jpy: toJPY(mtdPax > 0 ? mtdRevenue / mtdPax : 0),
+      last_year_avg_rate_pax: mtdPax > 0 ? lastYearMTDRevenue / mtdPax : 0,
+      ytd_avg_rate_pax: 0,
+      avg_rate_pax_variance: 0,
+      revpar_idr: totalRoomsMTD > 0 ? mtdRevenue / totalRoomsMTD : 0,
+      revpar_jpy: toJPY(totalRoomsMTD > 0 ? mtdRevenue / totalRoomsMTD : 0),
+      last_year_revpar: totalRoomsMTD > 0 ? lastYearMTDRevenue / totalRoomsMTD : 0,
+      ytd_revpar: 0,
+      revpar_variance: 0,
+    },
+  };
+
+  const revType = async (type: string, s: Date, e: Date, ls: Date, le: Date) => {
+    const cur = await revenueBetween(pid, s, e, type);
+    const last = await revenueBetween(pid, ls, le, type);
+    return {
+      idr: cur,
+      jpy: toJPY(cur),
+      last_year: last,
+      ytd: last > 0 ? (cur / last) * 100 : 0,
+      variance: cur - last,
+    };
+  };
+  const dailyRevenue: any = {
+    room_revenue: await revType('room revenue', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    breakfast_revenue: await revType('breakfast', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    dine_in_revenue: await revType('dine in', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    room_service_revenue: await revType('room service', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    minimart_revenue: await revType('minimart', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    fb_other_revenue: await revType('fb', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    banquet_revenue: await revType('banquet', dayStart, dayEnd, lastYearStart, lastYearEnd),
+    others_revenue: await revType('other', dayStart, dayEnd, lastYearStart, lastYearEnd),
+  };
+  const dailyTotal = Object.values<any>(dailyRevenue).reduce((acc: any, v: any) => ({
+    idr: acc.idr + v.idr, jpy: acc.jpy + v.jpy, last_year: acc.last_year + v.last_year, ytd: acc.ytd + v.ytd, variance: acc.variance + v.variance,
+  }), { idr: 0, jpy: 0, last_year: 0, ytd: 0, variance: 0 });
+  dailyRevenue.total_nett_revenue = { ...dailyTotal, ytd: dailyTotal.last_year > 0 ? (dailyTotal.idr / dailyTotal.last_year) * 100 : 0 };
+
+  const mtdRevenueObj: any = {
+    room_revenue: await revType('room revenue', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    breakfast_revenue: await revType('breakfast', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    dine_in_revenue: await revType('dine in', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    room_service_revenue: await revType('room service', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    minimart_revenue: await revType('minimart', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    fb_other_revenue: await revType('fb', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    banquet_revenue: await revType('banquet', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+    others_revenue: await revType('other', monthStart, dayEnd, lastYearMonthStart, lastYearMonthEnd),
+  };
+  const mtdTotal = Object.values<any>(mtdRevenueObj).reduce((acc: any, v: any) => ({
+    idr: acc.idr + v.idr, jpy: acc.jpy + v.jpy, last_year: acc.last_year + v.last_year, ytd: acc.ytd + v.ytd, variance: acc.variance + v.variance,
+  }), { idr: 0, jpy: 0, last_year: 0, ytd: 0, variance: 0 });
+  mtdRevenueObj.total_nett_revenue = { ...mtdTotal, ytd: mtdTotal.last_year > 0 ? (mtdTotal.idr / mtdTotal.last_year) * 100 : 0 };
+
+  const mtdStats = {
+    total_rooms: totalRoomsMTD,
+    room_sold: mtdRoomSold,
+    total_pax: mtdPax,
+    breakfast_rooms: mtdResvs.filter(hasBreakfast).length,
+    breakfast_pax: mtdResvs.filter(hasBreakfast).reduce((s: number, r: any) => s + (r.adult ?? 0) + (r.child ?? 0), 0),
+    last_year_room_sold: lastYearMonthSold,
+    occupancy: Number(mtdOccupancy.toFixed(2)),
+    last_year_occupancy: Number(lastYearMtdOccupancy.toFixed(2)),
+    variance: Number((mtdOccupancy - lastYearMtdOccupancy).toFixed(2)),
+  };
+
+  return [{
+    date,
+    currency: params.currency || 'IDR',
+    exchangeRate: kurs,
+    generalManager: 'KURNIAWAN',
+    createdBy: 'FO MANAGER',
+    actualBalance: {
+      total_revenue_idr: actualRevenue,
+      total_revenue_jpy: toJPY(actualRevenue),
+      variable_cost_idr: variableCost / monthDays,
+      variable_cost_jpy: toJPY(variableCost / monthDays),
+      fixed_cost_idr: fixedCost / monthDays,
+      fixed_cost_jpy: toJPY(fixedCost / monthDays),
+      difference_idr: diffActual,
+      difference_jpy: toJPY(diffActual),
+      win_lose: winLose(diffActual),
+    },
+    mtdBalance: {
+      total_revenue_idr: mtdActualRevenue,
+      total_revenue_jpy: toJPY(mtdActualRevenue),
+      variable_cost_idr: variableCost,
+      variable_cost_jpy: toJPY(variableCost),
+      fixed_cost_idr: fixedCost,
+      fixed_cost_jpy: toJPY(fixedCost),
+      difference_idr: diffMtd,
+      difference_jpy: toJPY(diffMtd),
+      win_lose: winLose(diffMtd),
+    },
+    dailyStats,
+    mtdStats,
+    forecastStats,
+    roomSales: dailySales,
+    dailyRevenue,
+    mtdRevenue: mtdRevenueObj,
+  }];
+}
+
+async function getDailyStatisticReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const date = params.date || formatDate(new Date());
+  const dayStart = new Date(`${date}T00:00:00Z`);
+  const dayEnd = new Date(`${date}T23:59:59Z`);
+  const d = new Date(`${date}T00:00:00Z`);
+  const monthStart = new Date(`${date.slice(0, 8)}01T00:00:00Z`);
+  const yearStart = new Date(`${date.slice(0, 4)}-01-01T00:00:00Z`);
+  const lastMonthStart = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1));
+  const lastMonthEnd = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, d.getUTCDate()));
+
+  const roomTypes = (await prisma.room_types.findMany({
+    where: { property_id: pid, deleted_at: null },
+    select: { id: true, name: true },
+    orderBy: { id: 'asc' },
+  })).filter((t: any) => !t.name.toUpperCase().includes('VIRTUAL'));
+  const typeIds = roomTypes.map((t: any) => t.id);
+
+  const countResv = (s: Date, e: Date, typeId?: bigint) => prisma.reservations.count({
+    where: { property_id: pid, date: { gte: s, lte: e }, deleted_at: null, ...(typeId ? { room_type_id: typeId } : {}) },
+  });
+  const [totalRooms, blockedRooms, todaySold, mtdSold, lastMonthSold, ytdSold, houseUse, complimentary, walkIn, dayUse, inHouseGuests, todayOccupied, mtdOccupied, lastMonthOccupied, ytdOccupied, todayRevenue, mtdRevenue, lastMonthRevenue, ytdRevenue] = await Promise.all([
+    prisma.rooms.count({ where: { property_id: pid, status: 1, deleted_at: null } }),
+    prisma.rooms.count({ where: { property_id: pid, room_status: 2, deleted_at: null } }),
+    countResv(dayStart, dayEnd),
+    countResv(monthStart, dayEnd),
+    countResv(lastMonthStart, lastMonthEnd),
+    countResv(yearStart, dayEnd),
+    prisma.folios.count({ where: { property_id: pid, is_house_use: true, check_in_date: { gte: dayStart, lte: dayEnd } } }),
+    prisma.folios.count({ where: { property_id: pid, complimentary: true, check_in_date: { gte: dayStart, lte: dayEnd } } }),
+    prisma.folios.count({ where: { property_id: pid, is_walk_in: true, check_in_date: { gte: dayStart, lte: dayEnd } } }),
+    countResv(dayStart, dayEnd).then(() => prisma.reservations.count({ where: { property_id: pid, date: { gte: dayStart, lte: dayEnd }, deleted_at: null, folios: { is: { check_in_date: { gte: dayStart, lte: dayEnd }, check_out_date: { gte: dayStart, lte: dayEnd } } } } })),
+    prisma.reservations.aggregate({ where: { property_id: pid, date: { gte: dayStart, lte: dayEnd }, deleted_at: null, folios: { is: { status_reservation: STATUS_RESERVATION_CHECK_IN } } }, _sum: { adult: true, child: true } }),
+    countResv(dayStart, dayEnd),
+    countResv(monthStart, dayEnd),
+    countResv(lastMonthStart, lastMonthEnd),
+    countResv(yearStart, dayEnd),
+    prisma.transactions.aggregate({ where: { property_id: pid, date: { gte: dayStart, lte: dayEnd }, deleted_at: null }, _sum: { amount: true } }),
+    prisma.transactions.aggregate({ where: { property_id: pid, date: { gte: monthStart, lte: dayEnd }, deleted_at: null }, _sum: { amount: true } }),
+    prisma.transactions.aggregate({ where: { property_id: pid, date: { gte: lastMonthStart, lte: lastMonthEnd }, deleted_at: null }, _sum: { amount: true } }),
+    prisma.transactions.aggregate({ where: { property_id: pid, date: { gte: yearStart, lte: dayEnd }, deleted_at: null }, _sum: { amount: true } }),
+  ]);
+
+  const getPeriod = (sold: number, occupied: number, rev: any, blocked: number) => {
+    const available = totalRooms;
+    const saleable = available - blocked;
+    const vacant = saleable - occupied;
+    const revenue = Number(rev._sum?.amount ?? 0);
+    return {
+      totalAvailableRoom: available,
+      totalBlockedRoom: blocked,
+      totalOccupiedRoom: occupied,
+      totalRoomSold: sold,
+      totalHouseUse: 0,
+      totalComplimentary: 0,
+      totalSaleableRoom: saleable,
+      totalVacantRoom: vacant,
+      totalWalkIn: 0,
+      totalDayUse: 0,
+      totalInHouseGuests: 0,
+      averageRoomRate: sold > 0 ? revenue / sold : 0,
+      averageRoomRateIncBF: sold > 0 ? revenue / sold : 0,
+      revenuePerAvailableRoom: available > 0 ? revenue / available : 0,
+      roomSaleableOccupancy: saleable > 0 ? (sold / saleable) * 100 : 0,
+      roomAvailableOccupancy: available > 0 ? (sold / available) * 100 : 0,
+      occupiedRoomOccupancy: available > 0 ? (occupied / available) * 100 : 0,
+      doubleOccupancy: occupied > 0 ? ((inHouseGuests._sum?.adult ?? 0) + (inHouseGuests._sum?.child ?? 0)) / occupied * 100 : 0,
+    };
+  };
+
+  const roomTypeSales: Record<string, any> = {};
+  for (const rt of roomTypes) {
+    roomTypeSales[rt.id.toString()] = {
+      todayActual: await countResv(dayStart, dayEnd, rt.id),
+      mtdActual: await countResv(monthStart, dayEnd, rt.id),
+      mtdLastMonth: await countResv(lastMonthStart, lastMonthEnd, rt.id),
+      ytdActual: await countResv(yearStart, dayEnd, rt.id),
+      mtdBudget: 0,
+      mtdVariance: (await countResv(monthStart, dayEnd, rt.id)) - 0,
+    };
+  }
+
+  return [{
+    reportDate: date,
+    todayActual: getPeriod(todaySold, todayOccupied, todayRevenue, blockedRooms),
+    mtdActual: getPeriod(mtdSold, mtdOccupied, mtdRevenue, blockedRooms),
+    mtdLastMonth: getPeriod(lastMonthSold, lastMonthOccupied, lastMonthRevenue, blockedRooms),
+    mtdBudget: {},
+    ytdActual: getPeriod(ytdSold, ytdOccupied, ytdRevenue, blockedRooms),
+    roomTypes,
+    roomTypeSales,
+    reportTitle: 'Daily Flash Report',
+    mtdVariance: {},
+    startDate: date,
+    endDate: date,
+  }];
+}
+
+async function getFreeOfChargeDetailReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = params.startDate ? new Date(`${params.startDate.slice(0, 10)}T00:00:00Z`) : new Date(`${businessDate}T00:00:00Z`);
+  const endDate = new Date(startDate.getTime() + 30 * 86400000);
+
+  const folios = await prisma.folios.findMany({
+    where: {
+      property_id: pid,
+      type_reservation: { in: ['git', 'fit'] },
+      OR: [{ is_house_use: true }, { complimentary: true }],
+      check_in_date: { gte: startDate, lte: endDate },
+      deleted_at: null,
+    },
+    select: {
+      id: true, folio_number: true, is_house_use: true, complimentary: true, type_reservation: true,
+      guest_profile_id: true, check_in_date: true, check_out_date: true,
+      company_profile_id: true,
+      reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1, select: { id: true, room_id: true, room_type_id: true, rate_id: true, data: true, adult: true, child: true } },
+    },
+  });
+  const guestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null))];
+  const companyIds = [...new Set(folios.map((f: any) => f.company_profile_id).filter((v: any) => v !== null && v !== 0n))];
+  const roomIds = [...new Set(folios.flatMap((f: any) => f.reservations?.[0]?.room_id).filter((v: any) => v !== null))];
+  const [guests, companies, rooms] = await Promise.all([
+    guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : [],
+    companyIds.length ? prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } }) : [],
+    roomIds.length ? prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : [],
+  ]);
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const companyById = new Map(companies.map((c: any) => [c.id, c]));
+  const roomById = new Map(rooms.map((r: any) => [r.id, r]));
+  const typeIds = [...new Set(folios.map((f: any) => f.reservations?.[0]?.room_type_id).filter((v: any) => v !== null))];
+  const types = typeIds.length ? await prisma.room_types.findMany({ where: { id: { in: typeIds } }, select: { id: true, name: true } }) : [];
+  const typeById = new Map(types.map((t: any) => [t.id, t]));
+
+  const rows = folios.map((f: any) => {
+    const res = f.reservations?.[0];
+    let rate = 0;
+    if (res?.data) { try { const d = JSON.parse(res.data); rate = Number(d.amount ?? 0) || 0; } catch { /* ignore */ } }
+    const guest: any = f.guest_profile_id ? guestById.get(f.guest_profile_id) : null;
+    const company: any = f.company_profile_id ? companyById.get(f.company_profile_id) : null;
+    const room: any = res?.room_id ? roomById.get(res.room_id) : null;
+    const roomType: any = res?.room_type_id ? typeById.get(res.room_type_id) : null;
+    const fmt = (d: Date | null) => d ? `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCFullYear()).slice(2)}` : '';
+    return {
+      resType: f.type_reservation.toUpperCase(),
+      folio: f.folio_number,
+      guest: guest ? `${guest.first_name ?? ''} ${guest.last_name ?? ''}`.trim() : '',
+      company: company?.name ?? '',
+      room: room?.name ?? '',
+      roomType: roomType?.name ?? 'Unknown',
+      rateCode: res?.rate_id ? '' : '',
+      rate,
+      oldRate: 0,
+      adult: res?.adult ?? 0,
+      child: res?.child ?? 0,
+      checkInDate: fmt(f.check_in_date),
+      checkOutDate: fmt(f.check_out_date),
+      _group: f.is_house_use ? 'HSE' : 'COMP',
+      _roomType: roomType?.name ?? 'Unknown',
+      _roomName: room?.name ?? '',
+    };
+  });
+  rows.sort((a: any, b: any) => Number(a._roomName.replace(/[^0-9]/g, '')) - Number(b._roomName.replace(/[^0-9]/g, '')));
+
+  const reportData: Record<string, Record<string, any[]>> = {};
+  for (const r of rows) {
+    reportData[r._group] = reportData[r._group] || {};
+    reportData[r._group][r._roomType] = reportData[r._group][r._roomType] || [];
+    reportData[r._group][r._roomType].push(r);
+  }
+
+  return [{
+    startDate: `${String(startDate.getUTCDate()).padStart(2, '0')}/${String(startDate.getUTCMonth() + 1).padStart(2, '0')}/${startDate.getUTCFullYear()}`,
+    endDate: `${String(endDate.getUTCDate()).padStart(2, '0')}/${String(endDate.getUTCMonth() + 1).padStart(2, '0')}/${endDate.getUTCFullYear()}`,
+    reportData,
+    summary: {
+      totalCRTRoom: rows.filter((r: any) => r._roomType === 'CRT').length,
+      totalCRDRoom: rows.filter((r: any) => r._roomType === 'CRD').length,
+      totalBRDRoom: rows.filter((r: any) => r._roomType === 'BRD').length,
+      noOfFolios: rows.length,
+      totalCOMPRoom: folios.filter((f: any) => f.complimentary).length,
+      totalHSERoom: folios.filter((f: any) => f.is_house_use).length,
+      totalInvestorRoom: 0,
+    },
+  }];
+}
+
+async function getReservationsByStaffReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const start = params.startDate ? new Date(`${params.startDate.slice(0, 10)}T00:00:00Z`) : new Date(`${businessDate}T00:00:00Z`);
+  const end = params.endDate ? new Date(`${params.endDate.slice(0, 10)}T23:59:59Z`) : new Date(`${businessDate}T23:59:59Z`);
+  const staffId = params.staffId ? BigInt(params.staffId) : null;
+
+  const baseWhere: any = { property_id: pid, type_reservation: { not: 'vr' }, created_at: { gte: start, lte: end }, deleted_at: null };
+  if (staffId) baseWhere.created_by = staffId;
+
+  const [folios, cancelled] = await Promise.all([
+    prisma.folios.findMany({ where: baseWhere, select: { id: true, folio_number: true, type_reservation: true, status_reservation: true, created_by: true, created_at: true, check_in_date: true, check_out_date: true, guest_profile_id: true, company_profile_id: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1, select: { id: true, room_id: true, room_type_id: true, rate_id: true, data: true, adult: true, child: true } } } }),
+    prisma.folios.findMany({ where: { ...baseWhere, status_reservation: STATUS_RESERVATION_CANCEL }, select: { id: true, folio_number: true, type_reservation: true, updated_at: true, created_by: true, check_in_date: true, check_out_date: true, guest_profile_id: true, company_profile_id: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1, select: { id: true, room_id: true, room_type_id: true, rate_id: true, data: true, adult: true, child: true } } } }),
+  ]);
+  const allFolios = [...folios, ...cancelled];
+  const staffIds = [...new Set(allFolios.map((f: any) => f.created_by).filter((v: any) => v !== null))];
+  const guestIds = [...new Set(allFolios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null))];
+  const companyIds = [...new Set(allFolios.map((f: any) => f.company_profile_id).filter((v: any) => v !== null && v !== 0n))];
+  const roomIds = [...new Set(allFolios.flatMap((f: any) => f.reservations?.[0]?.room_id).filter((v: any) => v !== null))];
+  const [staff, guests, companies, rooms] = await Promise.all([
+    staffIds.length ? prisma.users.findMany({ where: { id: { in: staffIds } }, select: { id: true, name: true } }) : [],
+    guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : [],
+    companyIds.length ? prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } }) : [],
+    roomIds.length ? prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : [],
+  ]);
+  const staffById = new Map(staff.map((s: any) => [s.id, s]));
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const companyById = new Map(companies.map((c: any) => [c.id, c]));
+  const roomById = new Map(rooms.map((r: any) => [r.id, r]));
+  const typeIds = [...new Set(allFolios.flatMap((f: any) => f.reservations?.[0]?.room_type_id).filter((v: any) => v !== null))];
+  const types = typeIds.length ? await prisma.room_types.findMany({ where: { id: { in: typeIds } }, select: { id: true, name: true } }) : [];
+  const typeById = new Map(types.map((t: any) => [t.id, t]));
+
+  const mapRow = (f: any, withCancelDate: boolean) => {
+    const res = f.reservations?.[0];
+    let firstNightRate = 0;
+    if (res?.data) { try { const d = JSON.parse(res.data); firstNightRate = Number(d.rate_price ?? 0) || 0; } catch { /* ignore */ } }
+    const guest: any = f.guest_profile_id ? guestById.get(f.guest_profile_id) : null;
+    const company: any = f.company_profile_id ? companyById.get(f.company_profile_id) : null;
+    const room: any = res?.room_id ? roomById.get(res.room_id) : null;
+    const roomType: any = res?.room_type_id ? typeById.get(res.room_type_id) : null;
+    const stay = f.check_in_date && f.check_out_date
+      ? Math.max(0, Math.round((f.check_out_date.getTime() - f.check_in_date.getTime()) / 86400000))
+      : 0;
+    const fmt = (d: Date | null) => d ? `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}` : 'N/A';
+    const row: any = {
+      resType: f.type_reservation.toUpperCase(),
+      folio: f.folio_number,
+      guest: guest ? `${guest.first_name ?? ''} ${guest.last_name ?? ''}`.trim() : 'N/A',
+      company: company?.name ?? 'N/A',
+      stay,
+      room: room?.name ?? 'N/A',
+      roomType: roomType?.name ?? 'N/A',
+      adult: res?.adult ?? 'N/A',
+      child: res?.child ?? 'N/A',
+      checkInDate: fmt(f.check_in_date),
+      checkOutDate: fmt(f.check_out_date),
+      rateCode: '',
+      firstNightRate,
+    };
+    if (withCancelDate) {
+      row.cancellationDate = fmt(f.updated_at);
+      delete row.resStatus;
+    } else {
+      row.resStatus = f.status_reservation;
+      row.resDate = fmt(f.created_at);
+    }
+    return row;
+  };
+
+  const reportData: Record<string, any> = {};
+  for (const f of folios) {
+    const key = f.created_by ? String(f.created_by) : '0';
+    reportData[key] = reportData[key] || { staffName: f.created_by ? staffById.get(f.created_by)?.name ?? 'Unknown' : 'Unknown', folios: [], cancelledFolios: [] };
+    reportData[key].folios.push(mapRow(f, false));
+  }
+  for (const f of cancelled) {
+    const key = f.created_by ? String(f.created_by) : '0';
+    reportData[key] = reportData[key] || { staffName: f.created_by ? staffById.get(f.created_by)?.name ?? 'Unknown' : 'Unknown', folios: [], cancelledFolios: [] };
+    reportData[key].cancelledFolios.push(mapRow(f, true));
+  }
+
+  return [{
+    startDate: `${String(start.getUTCDate()).padStart(2, '0')}/${String(start.getUTCMonth() + 1).padStart(2, '0')}/${start.getUTCFullYear()}`,
+    endDate: `${String(end.getUTCDate()).padStart(2, '0')}/${String(end.getUTCMonth() + 1).padStart(2, '0')}/${end.getUTCFullYear()}`,
+    reportData,
+  }];
+}
+
+async function getRoomTypeDetailedReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const method = 'room_type_detailed_report';
+  const requestId = `${startDate}-${endDate}-${String(pid)}-${method}`;
+  const existing = await prisma.requests.findFirst({ where: { request_id: requestId, property_id: pid, created_at: { gte: new Date(Date.now() - 10 * 60000) } }, orderBy: { id: 'desc' } });
+  if (!existing) {
+    await prisma.requests.create({ data: { request_id: requestId, property_id: pid, method, start_date: startDate, end_date: endDate, status: 0, created_at: new Date() } });
+  }
+  return [{ status: 'success', message: 'Report is being generated. Please check back later.', request_id: requestId }];
+}
+
+async function getInHouseGuestListing(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const start = params.startDate ? new Date(`${params.startDate.slice(0, 10)}T00:00:00Z`) : new Date(`${businessDate}T00:00:00Z`);
+  const end = params.endDate ? new Date(`${params.endDate.slice(0, 10)}T23:59:59Z`) : new Date(`${businessDate}T23:59:59Z`);
+
+  const statusFilter = [STATUS_RESERVATION_CHECK_IN, 1, 4];
+  const reservations = await prisma.reservations.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null, folios: { is: { status_reservation: { in: statusFilter }, first_name: { not: 'POS' } } } },
+    select: { id: true, room_name: true, adult: true, child: true, room_type_id: true, folio_id: true },
+    orderBy: { room_name: 'asc' },
+  });
+  const folioIds = [...new Set(reservations.map((r: any) => r.folio_id))];
+  const folios = folioIds.length ? await prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, complimentary: true, is_house_use: true } }) : [];
+  const folioById = new Map(folios.map((f: any) => [f.id, f]));
+  const typeIds = [...new Set(reservations.map((r: any) => r.room_type_id).filter((v: any) => v !== null))];
+  const types = typeIds.length ? await prisma.room_types.findMany({ where: { id: { in: typeIds } }, select: { id: true, name: true } }) : [];
+  const typeById = new Map(types.map((t: any) => [t.id, t]));
+
+  const roomTypeSummary: Record<string, number> = {};
+  for (const r of reservations) {
+    const name = r.room_type_id && typeById.get(r.room_type_id) ? typeById.get(r.room_type_id).name : 'Unknown';
+    roomTypeSummary[name] = (roomTypeSummary[name] || 0) + 1;
+  }
+  const summary: any = {
+    total_crt_room: 0, total_crd_room: 0, total_brd_room: 0,
+    total_comp_room: 0, total_hse_room: 0, total_investor_room: 0,
+    no_of_folios: reservations.length,
+    total_adults: 0, total_child: 0,
+  };
+  for (const r of reservations) {
+    const folio: any = folioById.get(r.folio_id);
+    summary.total_adults += r.adult ?? 0;
+    summary.total_child += r.child ?? 0;
+    if (folio?.complimentary) summary.total_comp_room++;
+    if (folio?.is_house_use) summary.total_hse_room++;
+    const name = (r.room_type_id && typeById.get(r.room_type_id)?.name || '').toUpperCase();
+    if (name === 'CRT') summary.total_crt_room++;
+    else if (name === 'CRD') summary.total_crd_room++;
+    else if (name === 'BRD') summary.total_brd_room++;
+  }
+  const staffId = params.staffId || 'all';
+  let staffName = 'ALL STAFF';
+  if (staffId !== 'all' && staffId !== 'system') {
+    const staff = await prisma.users.findUnique({ where: { id: BigInt(staffId) }, select: { name: true } });
+    staffName = staff?.name ?? 'Unknown';
+  } else if (staffId === 'system') {
+    staffName = 'SYSTEM';
+  }
+
+  return [{
+    startDate: `${String(start.getUTCDate()).padStart(2, '0')}/${String(start.getUTCMonth() + 1).padStart(2, '0')}/${start.getUTCFullYear()}`,
+    endDate: `${String(end.getUTCDate()).padStart(2, '0')}/${String(end.getUTCMonth() + 1).padStart(2, '0')}/${end.getUTCFullYear()}`,
+    folios: reservations,
+    summary,
+    staffName,
+    roomTypeSummary: Object.entries(roomTypeSummary).map(([room_type_name, total]) => ({ room_type_name, total })),
+  }];
+}
+
+async function getRoomTypeMonthlyReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = params.startDate ? params.startDate.slice(0, 10) : businessDate;
+  const endDate = params.endDate ? params.endDate.slice(0, 10) : businessDate;
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const virtualTypeIds = (await prisma.model_has_types.findMany({
+    where: { model_type: 'App\\Models\\RoomType', types: { is: { group: 'room-type-grouping', name: { contains: 'Virtual', mode: 'insensitive' } } } },
+    select: { model_id: true },
+  })).map((m: any) => m.model_id);
+  const roomTypes = (await prisma.room_types.findMany({
+    where: { property_id: pid, deleted_at: null },
+    select: { id: true, name: true },
+  })).filter((t: any) => !t.name.toUpperCase().includes('VIRTUAL') && !virtualTypeIds.includes(t.id));
+
+  const [rooms, reservations] = await Promise.all([
+    prisma.rooms.findMany({ where: { property_id: pid, deleted_at: null, is_physical: true, status: 1 }, select: { id: true, room_type_id: true, room_status: true } }),
+    prisma.reservations.findMany({
+      where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null, folios: { is: { status_reservation: { not: STATUS_RESERVATION_CANCEL }, property_id: pid } } },
+      select: { id: true, folio_id: true, room_type_id: true, adult: true, child: true, total: true, folios: { select: { id: true, type_reservation: true, check_in_date: true, check_out_date: true, status_reservation: true, is_house_use: true, complimentary: true } } },
+    }),
+  ]);
+
+  const roomCounts: Record<string, any> = {};
+  for (const r of rooms) {
+    const key = r.room_type_id ? String(r.room_type_id) : '0';
+    roomCounts[key] = roomCounts[key] || { totalRoom: 0, block: 0 };
+    roomCounts[key].totalRoom++;
+    if (r.room_status === 3 || r.room_status === 4) roomCounts[key].block++;
+  }
+
+  const reportData: Record<string, any> = {};
+  const grandTotal: any = { totalRoom: 0, block: 0, nonGrp: { arr: 0, dep: 0, sty: 0, revenue: 0 }, grp: { arr: 0, dep: 0, sty: 0, revenue: 0 }, total: { arr: 0, dep: 0, sty: 0, revenue: 0 }, occupiedRooms: 0, aveNettRevenue: 0, occupancy: 0 };
+
+  for (const rt of roomTypes) {
+    const rtResvs = reservations.filter((r: any) => r.room_type_id === rt.id);
+    const fitFolios = new Set<bigint>(), gitFolios = new Set<bigint>(), occFolios = new Set<bigint>();
+    let nonGrpSty = 0, grpSty = 0, nonGrpRev = 0, grpRev = 0;
+    const sameDay = (d: Date | null, target: string) => d ? formatDate(d) === target : false;
+    for (const r of rtResvs) {
+      const f = r.folios;
+      if (!f) continue;
+      const isFit = f.type_reservation === 'fit';
+      if (isFit) {
+        if (sameDay(f.check_in_date, startDate)) fitFolios.add(f.id);
+        nonGrpSty += (r.adult ?? 0) + (r.child ?? 0);
+        nonGrpRev += Number(r.total ?? 0);
+      } else if (f.type_reservation === 'git') {
+        if (sameDay(f.check_in_date, startDate)) gitFolios.add(f.id);
+        grpSty += (r.adult ?? 0) + (r.child ?? 0);
+        grpRev += Number(r.total ?? 0);
+      }
+      if (f.status_reservation === STATUS_RESERVATION_CHECK_IN || f.is_house_use || f.complimentary) occFolios.add(f.id);
+    }
+    const nonGrpArr = fitFolios.size, grpArr = gitFolios.size;
+    const rc = roomCounts[String(rt.id)] || { totalRoom: 0, block: 0 };
+    const totalRevenue = nonGrpRev + grpRev;
+    const occupiedRooms = occFolios.size;
+    const aveNettRevenue = occupiedRooms > 0 ? totalRevenue / occupiedRooms : 0;
+    const occupancy = rc.totalRoom > 0 ? (occupiedRooms / rc.totalRoom) * 100 : 0;
+    const roomTypeData = {
+      totalRoom: rc.totalRoom,
+      block: rc.block,
+      nonGrp: { arr: nonGrpArr, dep: 0, sty: nonGrpSty, revenue: Number(nonGrpRev.toFixed(2)) },
+      grp: { arr: grpArr, dep: 0, sty: grpSty, revenue: Number(grpRev.toFixed(2)) },
+      total: { arr: nonGrpArr + grpArr, dep: 0, sty: nonGrpSty + grpSty, revenue: Number(totalRevenue.toFixed(2)) },
+      occupiedRooms,
+      aveNettRevenue: Number(aveNettRevenue.toFixed(2)),
+      occupancy: Number(occupancy.toFixed(2)),
+    };
+    reportData[rt.name] = roomTypeData;
+    grandTotal.totalRoom += roomTypeData.totalRoom;
+    grandTotal.block += roomTypeData.block;
+    for (const k of ['arr', 'dep', 'sty', 'revenue']) {
+      (grandTotal.nonGrp as any)[k] += (roomTypeData.nonGrp as any)[k];
+      (grandTotal.grp as any)[k] += (roomTypeData.grp as any)[k];
+      (grandTotal.total as any)[k] += (roomTypeData.total as any)[k];
+    }
+    grandTotal.occupiedRooms += occupiedRooms;
+  }
+  grandTotal.aveNettRevenue = grandTotal.occupiedRooms > 0 ? grandTotal.total.revenue / grandTotal.occupiedRooms : 0;
+  grandTotal.occupancy = grandTotal.totalRoom > 0 ? (grandTotal.occupiedRooms / grandTotal.totalRoom) * 100 : 0;
+
+  return [{
+    startDate: `${String(start.getUTCDate()).padStart(2, '0')}/${String(start.getUTCMonth() + 1).padStart(2, '0')}/${start.getUTCFullYear()}`,
+    endDate: `${String(end.getUTCDate()).padStart(2, '0')}/${String(end.getUTCMonth() + 1).padStart(2, '0')}/${end.getUTCFullYear()}`,
+    reportData,
+    grandTotal,
+  }];
+}
+
+async function getSameDayCheckOutCheckInReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = params.startDate ? params.startDate.slice(0, 10) : businessDate;
+  const endDate = params.endDate ? new Date(`${params.endDate.slice(0, 10)}T00:00:00Z`).getTime() + 30 * 86400000 : new Date(`${businessDate}T00:00:00Z`).getTime() + 30 * 86400000;
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(endDate);
+
+  const folios = await prisma.folios.findMany({
+    where: { property_id: pid, deleted_at: null, check_in_date: { gte: start, lte: end }, guest_profile_id: { not: null } },
+    select: { id: true, folio_number: true, check_in_date: true, guest_profile_id: true, company_profile_id: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1, select: { id: true, rate_id: true, data: true } } },
+  });
+  const guestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null))];
+  const companyIds = [...new Set(folios.map((f: any) => f.company_profile_id).filter((v: any) => v !== null && v !== 0n))];
+  const rateIds = [...new Set(folios.flatMap((f: any) => f.reservations?.[0]?.rate_id).filter((v: any) => v !== null))];
+  const [guests, companies, rates] = await Promise.all([
+    guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : [],
+    companyIds.length ? prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } }) : [],
+    rateIds.length ? prisma.rates.findMany({ where: { id: { in: rateIds } }, select: { id: true, code: true } }) : [],
+  ]);
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const companyById = new Map(companies.map((c: any) => [c.id, c]));
+  const rateById = new Map(rates.map((r: any) => [r.id, r]));
+
+  const allGuestIds = guestIds;
+  const allFoliosByGuest = await prisma.folios.findMany({ where: { property_id: pid, deleted_at: null, guest_profile_id: { in: allGuestIds } }, select: { id: true, folio_number: true, guest_profile_id: true, check_in_date: true, check_out_date: true, company_profile_id: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1, select: { rate_id: true, data: true } } } });
+
+  const fmtDate = (d: Date | null) => d ? formatDate(d) : null;
+  const reportData = [];
+  for (const f of folios) {
+    const prev = allFoliosByGuest.find((p: any) => p.guest_profile_id === f.guest_profile_id && fmtDate(p.check_out_date) === fmtDate(f.check_in_date));
+    const rateOf = (res: any) => {
+      let code = 'N/A', roomRate = 0;
+      if (res?.rate_id) code = rateById.get(res.rate_id)?.code ?? 'N/A';
+      if (res?.data) { try { const d = JSON.parse(res.data); roomRate = Number(d.rate_price ?? 0) || 0; } catch { /* ignore */ } }
+      return { code, roomRate };
+    };
+    const prevRate = prev ? rateOf(prev.reservations?.[0]) : { code: 'N/A', roomRate: 0 };
+    const toRate = rateOf(f.reservations?.[0]);
+    const guest: any = guestById.get(f.guest_profile_id);
+    reportData.push({
+      guestName: guest ? `${guest.first_name ?? ''} ${guest.last_name ?? ''}`.trim() : 'N/A',
+      fromCompany: prev?.company_profile_id ? companyById.get(prev.company_profile_id)?.name ?? 'N/A' : 'N/A',
+      fromFolioNo: prev?.folio_number ?? 'N/A',
+      fromRateCode: prevRate.code,
+      fromRoomRate: prevRate.roomRate,
+      toCompany: f.company_profile_id ? companyById.get(f.company_profile_id)?.name ?? 'N/A' : 'N/A',
+      toFolioNo: f.folio_number ?? 'N/A',
+      toRateCode: toRate.code,
+      toRoomRate: toRate.roomRate,
+      checkOutDate: f.check_in_date,
+    });
+  }
+
+  return [{
+    startDate: `${String(start.getUTCDate()).padStart(2, '0')}/${String(start.getUTCMonth() + 1).padStart(2, '0')}/${start.getUTCFullYear()}`,
+    endDate: `${String(end.getUTCDate()).padStart(2, '0')}/${String(end.getUTCMonth() + 1).padStart(2, '0')}/${end.getUTCFullYear()}`,
+    reportData,
+  }];
+}
+
+async function getTransactionByStaffReportFO(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const date = params.date || businessDate;
+  const staffId = params.staffId || params.staff_id;
+  if (!staffId) return [{ date, staffName: 'Unknown', reportData: [] }];
+
+  const staff = await prisma.users.findUnique({ where: { id: BigInt(staffId) }, select: { name: true } });
+  const start = new Date(`${date}T00:00:00Z`);
+  const end = new Date(`${date}T23:59:59Z`);
+
+  const transactions = await prisma.transactions.findMany({
+    where: { property_id: pid, created_by: BigInt(staffId), created_at: { gte: start, lte: end }, deleted_at: null },
+    select: {
+      id: true, type: true, type_amount: true, total: true, remark: true, created_at: true,
+      folio_id: true, model_type: true, model_id: true, card_name: true, last_digit_card: true,
+      code_item_id: true, code_item_name: true,
+    },
+    orderBy: { created_at: 'asc' },
+  });
+  const folioIds = [...new Set(transactions.map((t: any) => t.folio_id).filter((v: any) => v !== null && v !== 0n))];
+  const modelGuestIds = [...new Set(transactions.filter((t: any) => t.model_type === 'App\\Models\\GuestProfile').map((t: any) => t.model_id).filter((v: any) => v !== null))];
+  const modelCompanyIds = [...new Set(transactions.filter((t: any) => t.model_type === 'App\\Models\\CompanyProfile').map((t: any) => t.model_id).filter((v: any) => v !== null))];
+  const [folios, guests, companies, codeItems] = await Promise.all([
+    folioIds.length ? prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, folio_number: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'desc' }, take: 1, select: { room_id: true } } } }) : [],
+    modelGuestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: modelGuestIds } }, select: { id: true, first_name: true, last_name: true } }) : [],
+    modelCompanyIds.length ? prisma.company_profiles.findMany({ where: { id: { in: modelCompanyIds } }, select: { id: true, name: true } }) : [],
+    transactions.length ? prisma.code_items.findMany({ where: { id: { in: [...new Set(transactions.map((t: any) => t.code_item_id).filter((v: any) => v !== null))] } }, select: { id: true, name: true } }) : [],
+  ]);
+  const folioById = new Map(folios.map((f: any) => [f.id, f]));
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const companyById = new Map(companies.map((c: any) => [c.id, c]));
+  const codeItemById = new Map(codeItems.map((c: any) => [c.id, c]));
+  const roomIds = [...new Set(folios.flatMap((f: any) => f.reservations?.[0]?.room_id).filter((v: any) => v !== null))];
+  const rooms = roomIds.length ? await prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : [];
+  const roomById = new Map(rooms.map((r: any) => [r.id, r]));
+
+  const grouped: Record<string, any> = {};
+  for (const t of transactions) {
+    const folio: any = t.folio_id ? folioById.get(t.folio_id) : null;
+    const lastReservation = folio?.reservations?.[0];
+    const room = lastReservation?.room_id ? roomById.get(lastReservation.room_id)?.name ?? 'N/A' : 'N/A';
+    const model = t.model_type === 'App\\Models\\GuestProfile'
+      ? (() => { const g: any = t.model_id ? guestById.get(t.model_id) : null; return g ? `${g.first_name ?? ''} ${g.last_name ?? ''}`.trim() : ''; })()
+      : (t.model_type === 'App\\Models\\CompanyProfile' ? (t.model_id ? companyById.get(t.model_id)?.name ?? '' : '') : '');
+    let description: string;
+    const upperType = (t.type || '').toUpperCase();
+    if (upperType === 'ROOM_REVENUE') {
+      description = `Room Charge - ${folio?.folio_number ?? ''}`;
+    } else if (t.type === 'extra_bed') {
+      description = `Extra Bed - ${folio?.folio_number ?? ''}`;
+    } else if (t.type && ['manual_posting', 'additional_item', 'room_inclusive', 'extra_bed_inclusive'].includes(t.type)) {
+      description = `${folio?.folio_number ?? ''} - ${t.code_item_name ?? (t.code_item_id ? codeItemById.get(t.code_item_id)?.name ?? '' : '')}${t.remark ? ` - (${t.remark})` : ''}`;
+    } else if (t.type === 'transfer' || t.type === 'transfer_out' || t.type === 'transfer_in') {
+      description = `${(t.type || '').replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())} ${t.remark ?? ''}`;
+    } else {
+      description = `${(t.type || '').replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())} - ${folio?.folio_number ?? ''}${t.remark ? ` (${t.remark})` : ''}`;
+    }
+    const signed = t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0);
+    const fmt = (d: Date | null) => d ? ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()] + ', ' + String(d.getUTCDate()).padStart(2, '0') + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()] + ' ' + d.getUTCFullYear() + ' ' + String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ':' + String(d.getUTCSeconds()).padStart(2, '0') : '';
+    const row = {
+      folio: folio?.folio_number ?? 'N/A',
+      room,
+      guest: model || 'N/A',
+      postDateTime: fmt(t.created_at),
+      description,
+      card_name: t.card_name ?? '',
+      last_digit_card: t.last_digit_card ? String(t.last_digit_card) : '',
+      total: Number(signed.toFixed(2)),
+    };
+    const type = t.type || 'unknown';
+    grouped[type] = grouped[type] || { type, transactions: [], total: 0 };
+    grouped[type].transactions.push(row);
+    grouped[type].total += signed;
+  }
+
+  return [{
+    date: `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][start.getUTCDay()]}, ${['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][start.getUTCMonth()]} ${String(start.getUTCDate()).padStart(2, '0')}, ${start.getUTCFullYear()}`,
+    staffName: staff?.name ?? 'Unknown',
+    reportData: Object.values(grouped),
+  }];
+}
+
+async function getAllCompaniesRoomRevenue(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = (params.startDate ? params.startDate.slice(0, 10) : businessDate);
+  const endDate = (params.endDate ? params.endDate.slice(0, 10) : businessDate);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const txns = await prisma.transaction_breakdowns.findMany({
+    where: {
+      property_id: pid, date: { gte: start, lte: end }, is_transfer: 0,
+      type: { notIn: ['payment', 'paidout', 'refund'] },
+      folios: { is: { OR: [{ type_reservation: 'fit' }, { type_reservation: 'git' }, { type_reservation: 'vr', folio_number: { startsWith: 'F' } }], property_id: pid } },
+    },
+    select: { id: true, transaction_id: true, date: true, type: true, type_amount: true, amount: true, total: true, code: true, folio_id: true },
+  });
+  if (!txns.length) {
+    return [{ startDate, endDate, companies: [], grandTotal: { roomNights: 0, nettRevenue: 0, grossRevenue: 0, anrSum: 0, agrSum: 0, folioCount: 0, anr: 0, agr: 0 } }];
+  }
+  const codeIds = [...new Set(txns.map((t: any) => t.code).filter(Boolean))];
+  const cps = codeIds.length ? await prisma.code_posts.findMany({ where: { id: { in: codeIds.map((c: string) => BigInt(c)) } }, include: { code_billings: true } }) : [];
+  const roomRevenueCodes = new Set(cps.filter((cp: any) => (cp.code_billings?.name || '').toLowerCase().includes('room revenue')).map((cp: any) => cp.id));
+  const folioIds = [...new Set(txns.map((t: any) => t.folio_id).filter((v: any) => v !== null && v !== 0n))];
+  const folios = folioIds.length ? await prisma.folios.findMany({
+    where: { id: { in: folioIds } },
+    select: { id: true, folio_number: true, company_profile_id: true, guest_profile_id: true, check_in_date: true, check_out_date: true, parent: true, type_reservation: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, select: { id: true, date: true, room_id: true, room_type_id: true, rate_id: true } } },
+  }) : [];
+  const folioById = new Map(folios.map((f: any) => [f.id, f]));
+  const childFolioByParent = new Map<bigint, any>();
+  for (const f of folios) {
+    if (f.parent && f.parent !== 0n) {
+      const arr = childFolioByParent.get(f.parent) || [];
+      arr.push(f);
+      childFolioByParent.set(f.parent, arr);
+    }
+  }
+  const companyIds = [...new Set(folios.map((f: any) => f.company_profile_id).filter((v: any) => v !== null && v !== 0n))];
+  const guestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null))];
+  const roomIds = [...new Set(folios.flatMap((f: any) => f.reservations?.map((r: any) => r.room_id) ?? []).filter((v: any) => v !== null))];
+  const [companies, guests, rooms] = await Promise.all([
+    companyIds.length ? prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } }) : [],
+    guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : [],
+    roomIds.length ? prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : [],
+  ]);
+  const companyById = new Map(companies.map((c: any) => [c.id, c]));
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const roomById = new Map(rooms.map((r: any) => [r.id, r]));
+
+  const byCompany = new Map<bigint, any[]>();
+  for (const t of txns) {
+    if (!roomRevenueCodes.has(t.code ? BigInt(t.code) : -1n)) continue;
+    const folio: any = t.folio_id ? folioById.get(t.folio_id) : null;
+    if (!folio) continue;
+    const key = folio.company_profile_id || 0n;
+    const arr = byCompany.get(key) || [];
+    arr.push({ t, folio });
+    byCompany.set(key, arr);
+  }
+
+  const reportData = [];
+  const grandTotal: any = { roomNights: 0, nettRevenue: 0, grossRevenue: 0, anrSum: 0, agrSum: 0, folioCount: 0, anr: 0, agr: 0 };
+  for (const [companyId, rows] of byCompany) {
+    const firstFolio: any = rows[0].folio;
+    const companyName = companyId !== 0n && companyById.get(companyId) ? companyById.get(companyId).name : 'Unknown Company';
+    const companyData: any = { name: companyName, folios: {}, total: { roomNights: 0, nettRevenue: 0, grossRevenue: 0, anrSum: 0, agrSum: 0, folioCount: 0 } };
+    const roomRevenueIndex: Record<string, number> = {};
+    for (const { t, folio } of rows) {
+      const isParent = folio.type_reservation === 'git' && folio.parent === 0n;
+      const sourceFolio = isParent ? (childFolioByParent.get(folio.id)?.[0] || folio) : folio;
+      const dateStr = formatDate(t.date);
+      const dateResvs = sourceFolio.reservations?.filter((r: any) => formatDate(r.date) === dateStr) ?? [];
+      const roomNights = dateResvs.length;
+      const grossRevenue = t.type_amount === 'PLUS' ? Number(t.total ?? 0) : -Number(t.total ?? 0);
+      const nettRevenue = t.type_amount === 'PLUS' ? Number(t.amount ?? 0) : -Number(t.amount ?? 0);
+      const anr = roomNights > 0 ? nettRevenue / roomNights : 0;
+      const agr = roomNights > 0 ? grossRevenue / roomNights : 0;
+      const guest: any = folio.guest_profile_id ? guestById.get(folio.guest_profile_id) : null;
+      const firstResv = dateResvs[0] || sourceFolio.reservations?.[0];
+      const room: any = firstResv?.room_id ? roomById.get(firstResv.room_id) : null;
+      companyData.folios[t.transaction_id ? String(t.transaction_id) : String(t.id)] = {
+        folioNo: folio.folio_number ?? 'N/A',
+        roomNo: room?.name ?? 'N/A',
+        guestName: guest ? `${guest.first_name ?? ''} ${guest.last_name ?? ''}`.trim() : 'N/A',
+        arrivalDate: folio.check_in_date,
+        depDate: folio.check_out_date,
+        roomNights: t.type === 'room_revenue' ? roomNights : `0 ( ${cps.find((cp: any) => cp.id === (t.code ? BigInt(t.code) : -1n))?.name ?? ''} ) `,
+        nettRevenue: Number(nettRevenue.toFixed(2)),
+        anr: Number(anr.toFixed(2)),
+        grossRevenue: Number(grossRevenue.toFixed(2)),
+        agr: Number(agr.toFixed(2)),
+      };
+      if (t.type === 'room_revenue') {
+        companyData.total.roomNights += roomNights;
+        roomRevenueIndex[folio.folio_number || ''] = 1 + (roomRevenueIndex[folio.folio_number || ''] ?? 0);
+      }
+      companyData.total.nettRevenue += nettRevenue;
+      companyData.total.grossRevenue += grossRevenue;
+      companyData.total.anrSum += anr;
+      companyData.total.agrSum += agr;
+      companyData.total.folioCount++;
+    }
+    companyData.total.anr = companyData.total.folioCount > 0 ? companyData.total.anrSum / companyData.total.folioCount : 0;
+    companyData.total.agr = companyData.total.folioCount > 0 ? companyData.total.agrSum / companyData.total.folioCount : 0;
+    reportData.push(companyData);
+    grandTotal.nettRevenue += companyData.total.nettRevenue;
+    grandTotal.grossRevenue += companyData.total.grossRevenue;
+    grandTotal.anrSum += companyData.total.anrSum;
+    grandTotal.agrSum += companyData.total.agrSum;
+    grandTotal.folioCount += companyData.total.folioCount;
+    grandTotal.roomNights += companyData.total.roomNights;
+  }
+  grandTotal.anr = grandTotal.roomNights > 0 ? grandTotal.nettRevenue / grandTotal.roomNights : 0;
+  grandTotal.agr = grandTotal.roomNights > 0 ? grandTotal.grossRevenue / grandTotal.roomNights : 0;
+
+  return [{ startDate, endDate, companies: reportData, grandTotal }];
+}
+
+async function getMarketSegmentationReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = (params.startDate ? params.startDate.slice(0, 10) : businessDate);
+  const endDate = (params.endDate ? params.endDate.slice(0, 10) : businessDate);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const reportData: Record<string, Record<string, any>> = {};
+  for (let seg = 1; seg <= 4; seg++) {
+    const group = `market-segment-${seg}`;
+    const segments = await prisma.types.findMany({ where: { group, deleted_at: null }, select: { id: true, name: true } });
+    for (const segment of segments) {
+      const matchedFolioIds = (await prisma.model_has_types.findMany({ where: { model_type: 'App\\Models\\Folio', type_id: segment.id }, select: { model_id: true } })).map((m: any) => m.model_id);
+      if (!matchedFolioIds.length) continue;
+      const folios = await prisma.folios.findMany({
+        where: { property_id: pid, check_in_date: { gte: start, lte: end }, deleted_at: null, id: { in: matchedFolioIds } },
+        select: { id: true, check_in_date: true, check_out_date: true, company_profile_id: true },
+      });
+      if (!folios.length) continue;
+      const companyIds = [...new Set(folios.map((f: any) => f.company_profile_id).filter((v: any) => v !== null && v !== 0n))];
+      const companies = companyIds.length ? await prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true, billing_country: true } }) : [];
+      const companyById = new Map(companies.map((c: any) => [c.id, c]));
+      const folioIds = folios.map((f: any) => f.id);
+      const txns = await prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, amount: true, total: true } });
+      const txnByFolio = new Map<bigint, { net: number; gross: number }>();
+      for (const t of txns) {
+        const cur = txnByFolio.get(t.folio_id) || { net: 0, gross: 0 };
+        cur.net += Number(t.amount ?? 0);
+        cur.gross += Number(t.total ?? 0);
+        txnByFolio.set(t.folio_id, cur);
+      }
+      for (const f of folios) {
+        const company: any = f.company_profile_id && companyById.get(f.company_profile_id) ? companyById.get(f.company_profile_id) : null;
+        const companyName = company?.name ?? 'N/A';
+        const nationality = company?.billing_country ?? 'N/A';
+        const nights = f.check_in_date && f.check_out_date ? Math.max(0, Math.round((f.check_out_date.getTime() - f.check_in_date.getTime()) / 86400000)) : 0;
+        const { net, gross } = txnByFolio.get(f.id) || { net: 0, gross: 0 };
+        reportData[segment.name] = reportData[segment.name] || {};
+        reportData[segment.name][companyName] = reportData[segment.name][companyName] || { nationality, nights: 0, nettRevenue: 0, grossRevenue: 0 };
+        reportData[segment.name][companyName].nights += nights;
+        reportData[segment.name][companyName].nettRevenue += net;
+        reportData[segment.name][companyName].grossRevenue += gross;
+      }
+    }
+  }
+  for (const segmentName of Object.keys(reportData)) {
+    for (const companyName of Object.keys(reportData[segmentName])) {
+      const c = reportData[segmentName][companyName];
+      c.ANR = c.nights > 0 ? c.nettRevenue / c.nights : 0;
+      c.AGR = c.nights > 0 ? c.grossRevenue / c.nights : 0;
+    }
+  }
+  return [{ startDate, endDate, data: reportData }];
+}
+
+async function getNationalityStatisticsDetailed(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = (params.startDate ? params.startDate.slice(0, 10) : businessDate);
+  const endDate = (params.endDate ? params.endDate.slice(0, 10) : businessDate);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const reservations = await prisma.reservations.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null, folios: { is: { complimentary: false, is_house_use: false, status_reservation: { in: [STATUS_RESERVATION_CHECK_IN, 1] }, OR: [{ type_reservation: 'fit' }, { type_reservation: 'git' }, { type_reservation: 'vr', folio_number: { startsWith: 'F' } }] } } },
+    select: { id: true, folio_id: true, date: true, adult: true, child: true, amount: true, rate_id: true, room_id: true, folios: { select: { id: true, folio_number: true, check_in_date: true, check_out_date: true, nationality_id: true, guest_profile_id: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, select: { id: true, date: true, adult: true, child: true, room_id: true } } } } },
+  });
+  const rateIds = [...new Set(reservations.map((r: any) => r.rate_id).filter((v: any) => v !== null))];
+  const rates = rateIds.length ? await prisma.rates.findMany({ where: { id: { in: rateIds } }, select: { id: true, rate_inclusives: { where: { status: 1 }, select: { id: true, cost: true, stock: true } } } }) : [];
+  const stockIds = [...new Set(rates.flatMap((r: any) => r.rate_inclusives.map((ri: any) => ri.stock)).filter((v: any) => v !== null))];
+  const codeItems = stockIds.length ? await prisma.code_items.findMany({ where: { id: { in: stockIds.map((s: string) => BigInt(s)) } }, select: { id: true, calculator: true } }) : [];
+  const calculatorById = new Map(codeItems.map((c: any) => [c.id, c.calculator]));
+  const inclusiveCostByRate = new Map<bigint, (adult: number, child: number) => number>();
+  for (const rate of rates) {
+    const rows = rate.rate_inclusives.map((ri: any) => ({
+      cost: Number(ri.cost ?? 0),
+      calculator: ri.stock ? calculatorById.get(BigInt(ri.stock)) : undefined,
+    }));
+    inclusiveCostByRate.set(rate.id, (adult: number, child: number) => rows.reduce((s: number, ri: any) => {
+      if (ri.calculator === 'Adult') return s + ri.cost * adult;
+      if (ri.calculator === 'Child') return s + ri.cost * child;
+      return s + ri.cost;
+    }, 0));
+  }
+  const guestIds = [...new Set(reservations.map((r: any) => r.folios?.guest_profile_id).filter((v: any) => v !== null))];
+  const guests = guestIds.length ? await prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true, nationality_id: true } }) : [];
+  const guestById = new Map(guests.map((g: any) => [g.id, g]));
+  const allNatIds = [...new Set([...reservations.map((r: any) => r.folios?.nationality_id), ...guests.map((g: any) => g.nationality_id)].filter((v: any) => v !== null))];
+  const countries = allNatIds.length ? await prisma.countries.findMany({ where: { id: { in: allNatIds } }, select: { id: true, name: true } }) : [];
+  const countryById = new Map(countries.map((c: any) => [c.id, c.name]));
+  const roomIds = [...new Set(reservations.flatMap((r: any) => r.folios?.reservations?.map((res: any) => res.room_id) ?? []).filter((v: any) => v !== null))];
+  const rooms = roomIds.length ? await prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : [];
+  const roomById = new Map(rooms.map((r: any) => [r.id, r.name]));
+
+  const byFolio = new Map<bigint, any[]>();
+  for (const r of reservations) {
+    const arr = byFolio.get(r.folio_id) || [];
+    arr.push(r);
+    byFolio.set(r.folio_id, arr);
+  }
+
+  const groups = new Map<string, any>();
+  for (const [folioId, revs] of byFolio) {
+    const first = revs[0];
+    const folio = first.folios;
+    if (!folio) continue;
+    const nationalityId = folio.nationality_id ?? (folio.guest_profile_id ? guestById.get(folio.guest_profile_id)?.nationality_id ?? null : null);
+    const nationalityName = nationalityId !== null && countryById.get(nationalityId) ? countryById.get(nationalityId) : 'UNASSIGN NATIONALITY';
+    const nights = folio.reservations?.filter((res: any) => formatDate(res.date) >= startDate && formatDate(res.date) <= endDate).length ?? 0;
+    let amount = 0;
+    for (const res of revs) {
+      const costFn = res.rate_id ? inclusiveCostByRate.get(res.rate_id) : undefined;
+      const inclusiveCost = costFn ? costFn(res.adult ?? 0, res.child ?? 0) : 0;
+      amount += Number(res.amount ?? 0) - inclusiveCost;
+    }
+    const ad = folio.reservations?.reduce((s: number, res: any) => s + (res.adult ?? 0), 0) / (folio.reservations?.length || 1);
+    const ch = folio.reservations?.reduce((s: number, res: any) => s + (res.child ?? 0), 0) / (folio.reservations?.length || 1);
+    const pax = ad + ch;
+    const guest: any = folio.guest_profile_id ? guestById.get(folio.guest_profile_id) : null;
+    const roomNames = [...new Set(folio.reservations?.map((res: any) => res.room_id ? roomById.get(res.room_id) : null).filter((v: any) => v !== null))];
+    const key = nationalityId !== null ? String(nationalityId) : 'UNASSIGN';
+    groups.set(key, groups.get(key) || { nationality: nationalityName, nights: 0, totalPax: 0, nettRoomRevenue: 0, guests: [] });
+    const g = groups.get(key);
+    g.nights += nights;
+    g.nettRoomRevenue += amount;
+    g.totalPax += pax;
+    g.guests.push({
+      docno: folio.folio_number,
+      guestName: guest ? `${guest.first_name ?? ''} ${guest.last_name ?? ''}`.trim() : 'Unknown Guest',
+      description: `Room charge #${roomNames.join('#')}`,
+      noOfNights: nights,
+      checkInDate: folio.check_in_date,
+      checkOutDate: folio.check_out_date,
+      pax: Math.round(pax),
+      adult: Math.round(ad),
+      child: Math.round(ch),
+      revenue: amount,
+    });
+  }
+  const reportData = [];
+  for (const g of groups.values()) {
+    g.arr = g.nights > 0 ? g.nettRoomRevenue / g.nights : 0;
+    reportData.push(g);
+  }
+  return [{ startDate, endDate, reportData }];
+}
+
+async function getStaffSalesSummary(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = (params.startDate ? params.startDate.slice(0, 10) : businessDate);
+  const endDate = (params.endDate ? params.endDate.slice(0, 10) : businessDate);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+  const inRange = (d: Date | null) => d && d >= start && d <= end;
+
+  const reservations = await prisma.reservations.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null, folios: { is: { status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] }, OR: [{ type_reservation: 'fit' }, { type_reservation: 'git' }, { type_reservation: 'vr', folio_number: { startsWith: 'F' } }] } } },
+    select: { id: true, folio_id: true, date: true, amount: true, total: true, folios: { select: { id: true, folio_number: true, company_profile_id: true, reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, select: { id: true, date: true, amount: true, total: true } } } } },
+  });
+  const companyIds = [...new Set(reservations.map((r: any) => r.folios?.company_profile_id).filter((v: any) => v !== null && v !== 0n))];
+  const companies = companyIds.length ? await prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true, staff_in_charge: true } }) : [];
+  const companyById = new Map(companies.map((c: any) => [c.id, c]));
+  const staffIds = [...new Set(companies.map((c: any) => c.staff_in_charge).filter((v: any) => v !== null && v !== '' && /^\d+$/.test(v)) )];
+  const staff = staffIds.length ? await prisma.users.findMany({ where: { id: { in: staffIds.map((s: string) => BigInt(s)) } }, select: { id: true, name: true } }) : [];
+  const staffById = new Map(staff.map((s: any) => [s.id, s.name]));
+
+  const byStaff = new Map<string, any[]>();
+  for (const r of reservations) {
+    const company: any = r.folios?.company_profile_id ? companyById.get(r.folios.company_profile_id) : null;
+    const staffId = company?.staff_in_charge && /^\d+$/.test(company.staff_in_charge) ? company.staff_in_charge : 'none';
+    const arr = byStaff.get(staffId) || [];
+    arr.push(r);
+    byStaff.set(staffId, arr);
+  }
+
+  const reportData = [];
+  const grandTotal: any = { nights: 0, nettRevenue: 0, grossRevenue: 0, anr: 0, agr: 0 };
+  for (const [staffId, staffResvs] of byStaff) {
+    const staffName = staffId !== 'none' && staffById.get(BigInt(staffId)) ? staffById.get(BigInt(staffId)) : 'Unknown Staff';
+    const staffData: any = { name: staffName, companies: [], total: { nights: 0, nettRevenue: 0, grossRevenue: 0, anr: 0, agr: 0 } };
+    const byCompany = new Map<bigint, any[]>();
+    for (const r of staffResvs) {
+      const key = r.folios?.company_profile_id || 0n;
+      const arr = byCompany.get(key) || [];
+      arr.push(r);
+      byCompany.set(key, arr);
+    }
+    for (const [companyId, compResvs] of byCompany) {
+      const company: any = companyId !== 0n && companyById.get(companyId) ? companyById.get(companyId) : null;
+      const companyName = company?.name ?? 'Unknown Company';
+      const folio = compResvs[0].folios;
+      const folioResvs = folio?.reservations ?? [];
+      const actualResvs = folioResvs.filter((res: any) => inRange(res.date));
+      const nightsActual = actualResvs.length;
+      const nightsProjection = folioResvs.length;
+      const nettRevenue = compResvs.reduce((s: number, r: any) => s + Number(r.amount ?? 0), 0);
+      const grossRevenue = compResvs.reduce((s: number, r: any) => s + Number(r.total ?? 0), 0);
+      const sumAmountAll = folioResvs.reduce((s: number, res: any) => s + Number(res.amount ?? 0), 0);
+      const sumTotalAll = folioResvs.reduce((s: number, res: any) => s + Number(res.total ?? 0), 0);
+      const listFolio: any[] = [];
+      const byFolio = new Map<bigint, any[]>();
+      for (const r of compResvs) {
+        const arr = byFolio.get(r.folio_id) || [];
+        arr.push(r);
+        byFolio.set(r.folio_id, arr);
+      }
+      for (const [folioId, items] of byFolio) {
+        listFolio.push({
+          folio_number: folio?.folio_number,
+          amount: Number(items.reduce((s: number, r: any) => s + Number(r.amount ?? 0), 0).toFixed(2)),
+          total: Number(items.reduce((s: number, r: any) => s + Number(r.total ?? 0), 0).toFixed(2)),
+          nights: items.length,
+        });
+      }
+      const companyData = {
+        name: companyName,
+        total_projection: nightsProjection,
+        total_actual: nightsActual,
+        total_projection_rev: Number(sumTotalAll.toFixed(2)),
+        total_actual_nett: Number(sumAmountAll.toFixed(2)),
+        total_projection_nett: Number(sumAmountAll.toFixed(2)),
+        total_actual_anr: nightsActual > 0 ? Number((sumAmountAll / nightsActual).toFixed(2)) : 0,
+        total_projection_anr: nightsProjection > 0 ? Number((sumAmountAll / nightsProjection).toFixed(2)) : 0,
+        total_actual_gross: nightsActual > 0 ? Number((sumTotalAll / nightsActual).toFixed(2)) : 0,
+        total_projection_gross: nightsProjection > 0 ? Number((sumTotalAll / nightsProjection).toFixed(2)) : 0,
+        total_actual_agr: nightsActual > 0 ? Number((sumTotalAll / nightsActual).toFixed(2)) : 0,
+        nettRevenue: Number(nettRevenue.toFixed(2)),
+        grossRevenue: Number(grossRevenue.toFixed(2)),
+        anr: nightsActual > 0 ? Number((nettRevenue / nightsActual).toFixed(2)) : 0,
+        agr: nightsActual > 0 ? Number((grossRevenue / nightsActual).toFixed(2)) : 0,
+        projectRevenue: Number(sumAmountAll.toFixed(2)),
+        listFolio,
+      };
+      staffData.companies.push(companyData);
+      staffData.total.nights += nightsActual;
+      staffData.total.nettRevenue += nettRevenue;
+      staffData.total.grossRevenue += grossRevenue;
+    }
+    staffData.total.anr = staffData.total.nights > 0 ? staffData.total.nettRevenue / staffData.total.nights : 0;
+    staffData.total.agr = staffData.total.nights > 0 ? staffData.total.grossRevenue / staffData.total.nights : 0;
+    reportData.push(staffData);
+    grandTotal.nights += staffData.total.nights;
+    grandTotal.nettRevenue += staffData.total.nettRevenue;
+    grandTotal.grossRevenue += staffData.total.grossRevenue;
+  }
+  grandTotal.anr = grandTotal.nights > 0 ? grandTotal.nettRevenue / grandTotal.nights : 0;
+  grandTotal.agr = grandTotal.nights > 0 ? grandTotal.grossRevenue / grandTotal.nights : 0;
+
+  return [{ startDate, endDate, reportData: { staffData: reportData, grandTotal } }];
+}
+
+async function getRoomOccupancyChart(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const businessDate = formatDate(new Date());
+  const startDate = (params.startDate ? params.startDate.slice(0, 10) : businessDate);
+  const endDate = (params.endDate ? params.endDate.slice(0, 10) : businessDate);
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const [totalRooms, outOfOrder, reservations] = await Promise.all([
+    prisma.rooms.count({ where: { property_id: pid, deleted_at: null, status: 1 } }),
+    prisma.rooms.count({ where: { property_id: pid, deleted_at: null, status: 1, room_status: 4 } }),
+    prisma.reservations.findMany({
+      where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null, folios: { is: { status_reservation: { not: STATUS_RESERVATION_CANCEL }, type_reservation: { in: ['fit', 'git'] }, property_id: pid } } },
+      select: { id: true, folio_id: true, date: true, total: true, adult: true, child: true, folios: { select: { id: true, type_reservation: true, check_in_date: true, check_out_date: true } } },
+    }),
+  ]);
+
+  const daily: Record<string, any> = {};
+  const cursor = new Date(start);
+  while (cursor <= end) {
+    daily[formatDate(cursor)] = { non_grp_arr: 0, non_grp_dep: 0, non_grp_sty: 0, non_grp_revenue: 0, grp_arr: 0, grp_dep: 0, grp_sty: 0, grp_revenue: 0, total_guests: 0, occupied_rooms: 0 };
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  const fitFolioArr = new Set<bigint>(), fitFolioDep = new Set<bigint>(), grpFolioArr = new Set<bigint>(), grpFolioDep = new Set<bigint>();
+  for (const r of reservations) {
+    const f = r.folios;
+    if (!f) continue;
+    const key = formatDate(r.date);
+    if (!daily[key]) continue;
+    const isFit = f.type_reservation === 'fit';
+    const arrSet = isFit ? fitFolioArr : grpFolioArr;
+    const depSet = isFit ? fitFolioDep : grpFolioDep;
+    const d = daily[key];
+    if (f.check_in_date && formatDate(f.check_in_date) === key && !arrSet.has(f.id)) { arrSet.add(f.id); isFit ? d.non_grp_arr++ : d.grp_arr++; }
+    if (f.check_out_date && formatDate(f.check_out_date) === key && !depSet.has(f.id)) { depSet.add(f.id); isFit ? d.non_grp_dep++ : d.grp_dep++; }
+    if (isFit) { d.non_grp_sty++; d.non_grp_revenue += Number(r.total ?? 0); }
+    else { d.grp_sty++; d.grp_revenue += Number(r.total ?? 0); }
+    d.total_guests += (r.adult ?? 0) + (r.child ?? 0);
+    d.occupied_rooms++;
+  }
+
+  const data: Record<string, any> = {};
+  for (const [date, d] of Object.entries(daily)) {
+    const totalRevenue = d.non_grp_revenue + d.grp_revenue;
+    const occupiedRooms = d.occupied_rooms;
+    data[date] = {
+      block_room: outOfOrder,
+      total_guests: d.total_guests,
+      non_grp: { arr: d.non_grp_arr, dep: d.non_grp_dep, sty: d.non_grp_sty, revenue: Number(d.non_grp_revenue.toFixed(2)) },
+      grp: { arr: d.grp_arr, dep: d.grp_dep, sty: d.grp_sty, revenue: Number(d.grp_revenue.toFixed(2)) },
+      total: { arr: d.non_grp_arr + d.grp_arr, dep: d.non_grp_dep + d.grp_dep, sty: d.non_grp_sty + d.grp_sty, revenue: Number(totalRevenue.toFixed(2)) },
+      occupied_rooms: occupiedRooms,
+      ave_nett_revenue: occupiedRooms > 0 ? Number((totalRevenue / occupiedRooms).toFixed(2)) : 0,
+      occupancy: totalRooms > 0 ? Number(((occupiedRooms / totalRooms) * 100).toFixed(2)) : 0,
+      daily_sell_code: '',
+    };
+  }
+
+  const grandTotal: any = { block_room: outOfOrder, total_guests: 0, non_grp: { arr: 0, dep: 0, sty: 0, revenue: 0 }, grp: { arr: 0, dep: 0, sty: 0, revenue: 0 }, total: { arr: 0, dep: 0, sty: 0, revenue: 0 }, occupied_rooms: 0 };
+  for (const day of Object.values<any>(data)) {
+    grandTotal.total_guests += day.total_guests;
+    for (const g of ['non_grp', 'grp', 'total']) {
+      for (const k of ['arr', 'dep', 'sty', 'revenue']) {
+        (grandTotal[g] as any)[k] += day[g][k];
+      }
+    }
+    grandTotal.occupied_rooms += day.occupied_rooms;
+  }
+  grandTotal.block_room = Object.keys(data).length ? Object.values<any>(data)[0].block_room : 0;
+  const days = Math.max(Object.keys(data).length, 1);
+  grandTotal.ave_nett_revenue = grandTotal.occupied_rooms > 0 ? grandTotal.total.revenue / grandTotal.occupied_rooms : 0;
+  grandTotal.occupancy = (totalRooms * days) > 0 ? (grandTotal.occupied_rooms / (totalRooms * days)) * 100 : 0;
+
+  const dailyOccupancy: any[] = [];
+  const dailyARR: any[] = [];
+  for (const [date, day] of Object.entries<any>(data)) {
+    dailyOccupancy.push({ date, occupancy: day.occupancy });
+    dailyARR.push({ date, arr: day.ave_nett_revenue });
+  }
+  const keys = Object.keys(data);
+  const weekly: any[] = [];
+  let weekStart: Date | null = null;
+  let weekData: number[] = [];
+  for (const date of keys) {
+    const cur = new Date(`${date}T00:00:00Z`);
+    if (!weekStart) {
+      weekStart = new Date(cur); weekStart.setUTCDate(weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7));
+      weekData = [];
+    }
+    const wsEnd = new Date(weekStart); wsEnd.setUTCDate(wsEnd.getUTCDate() + 6);
+    if (cur >= weekStart && cur <= wsEnd) {
+      weekData.push(data[date].occupancy);
+    } else {
+      if (weekData.length) weekly.push({ week: `${String(weekStart.getUTCDate()).padStart(2, '0')}/${String(weekStart.getUTCMonth() + 1).padStart(2, '0')}/${weekStart.getUTCFullYear()}`, occupancy: weekData.reduce((s: number, v: number) => s + v, 0) / weekData.length });
+      weekStart = new Date(cur); weekStart.setUTCDate(weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7));
+      weekData = [data[date].occupancy];
+    }
+  }
+  if (weekData.length) weekly.push({ week: `${String(weekStart!.getUTCDate()).padStart(2, '0')}/${String(weekStart!.getUTCMonth() + 1).padStart(2, '0')}/${weekStart!.getUTCFullYear()}`, occupancy: weekData.reduce((s: number, v: number) => s + v, 0) / weekData.length });
+  const monthlyMap: Record<string, number[]> = {};
+  for (const date of keys) {
+    const month = `${date.slice(5, 7)}/${date.slice(0, 4)}`;
+    monthlyMap[month] = monthlyMap[month] || [];
+    monthlyMap[month].push(data[date].occupancy);
+  }
+  const monthly = Object.entries(monthlyMap).map(([month, values]) => ({ month, occupancy: values.reduce((s: number, v: number) => s + v, 0) / values.length }));
+
+  return [{
+    startDate: `${String(start.getUTCDate()).padStart(2, '0')}/${String(start.getUTCMonth() + 1).padStart(2, '0')}/${start.getUTCFullYear()}`,
+    endDate: `${String(end.getUTCDate()).padStart(2, '0')}/${String(end.getUTCMonth() + 1).padStart(2, '0')}/${end.getUTCFullYear()}`,
+    data,
+    chartData: { dailyOccupancy, dailyARR, weeklyOccupancy: weekly, monthlyOccupancy: monthly },
+    grandTotal,
+  }];
+}
+
 function getGenericReport(name: string, params: any): any[] {
   return [{
     report: name,
@@ -1840,6 +3659,27 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/after-night-audit/daily-room-forecast': getDailyRoomForecast,
   'batch/before-night-audit/breakfast-report': getBreakfastReport,
   'batch/before-night-audit/room-revenue-breakdown': getRoomRevenueBreakdown,
+  'account/comission-for-booking': (p: any) => getCommissionForBooking(p, false),
+  'account/comission-for-booking-company': (p: any) => getCommissionForBooking(p, true),
+  'account/tax-breakdown-summary': getTaxBreakdownSummary,
+  'account/in-house-folio-bal-history': getInHouseFolioBalHistory,
+  'account/transaction-report-by-staff': getTransactionReportByStaff,
+  'account/daily-revenue-report': (p: any) => getAsyncJobReport('daily_revenue_report', p),
+  'account/tax-breakdown-detail': (p: any) => getAsyncJobReport('tax_breakdown_detail', p),
+  'account/daily-sales-report': getAccountDailySalesReport,
+  'account/daily-statistic-report': getDailyStatisticReport,
+  'batch/frontoffice/free-of-charge-detail-report': getFreeOfChargeDetailReport,
+  'batch/frontoffice/reservations-by-staff': getReservationsByStaffReport,
+  'batch/frontoffice/room-type-detailed-report': getRoomTypeDetailedReport,
+  'batch/frontoffice/in-house-guest-listing': getInHouseGuestListing,
+  'batch/frontoffice/room-type-monthly-report': getRoomTypeMonthlyReport,
+  'batch/frontoffice/same-day-check-out-check-in-report': getSameDayCheckOutCheckInReport,
+  'batch/frontoffice/transaction-by-staff-report': getTransactionByStaffReportFO,
+  'batch/sales-marketing/all-companies-room-revenue': getAllCompaniesRoomRevenue,
+  'batch/sales-marketing/market-segmentation-report': getMarketSegmentationReport,
+  'batch/sales-marketing/nationality-statistics-detailed': getNationalityStatisticsDetailed,
+  'batch/sales-marketing/staff-sales-summary': getStaffSalesSummary,
+  'batch/sales-marketing/room-occupancy-chart': getRoomOccupancyChart,
   'batch/after-night-audit/daily-statistic/view': getDailyStatistic,
   'batch/after-night-audit/in-house-folio-balance/view': getInHouseFolioBalance,
   'batch/after-night-audit/vacant-rooms/view': getVacantRooms,
@@ -1870,6 +3710,27 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/after-night-audit/daily-room-forecast/view': getDailyRoomForecast,
   'batch/before-night-audit/breakfast-report/view': getBreakfastReport,
   'batch/before-night-audit/room-revenue-breakdown/view': getRoomRevenueBreakdown,
+  'account/comission-for-booking/view': (p: any) => getCommissionForBooking(p, false),
+  'account/comission-for-booking-company/view': (p: any) => getCommissionForBooking(p, true),
+  'account/tax-breakdown-summary/view': getTaxBreakdownSummary,
+  'account/in-house-folio-bal-history/view': getInHouseFolioBalHistory,
+  'account/transaction-report-by-staff/view': getTransactionReportByStaff,
+  'account/daily-revenue-report/view': (p: any) => getAsyncJobReport('daily_revenue_report', p),
+  'account/tax-breakdown-detail/view': (p: any) => getAsyncJobReport('tax_breakdown_detail', p),
+  'account/daily-sales-report/view': getAccountDailySalesReport,
+  'account/daily-statistic-report/view': getDailyStatisticReport,
+  'batch/frontoffice/free-of-charge-detail-report/view': getFreeOfChargeDetailReport,
+  'batch/frontoffice/reservations-by-staff/view': getReservationsByStaffReport,
+  'batch/frontoffice/room-type-detailed-report/view': getRoomTypeDetailedReport,
+  'batch/frontoffice/in-house-guest-listing/view': getInHouseGuestListing,
+  'batch/frontoffice/room-type-monthly-report/view': getRoomTypeMonthlyReport,
+  'batch/frontoffice/same-day-check-out-check-in-report/view': getSameDayCheckOutCheckInReport,
+  'batch/frontoffice/transaction-by-staff-report/view': getTransactionByStaffReportFO,
+  'batch/sales-marketing/all-companies-room-revenue/view': getAllCompaniesRoomRevenue,
+  'batch/sales-marketing/market-segmentation-report/view': getMarketSegmentationReport,
+  'batch/sales-marketing/nationality-statistics-detailed/view': getNationalityStatisticsDetailed,
+  'batch/sales-marketing/staff-sales-summary/view': getStaffSalesSummary,
+  'batch/sales-marketing/room-occupancy-chart/view': getRoomOccupancyChart,
 };
 
 // ── Controller ──────────────────────────────────────────────────────
