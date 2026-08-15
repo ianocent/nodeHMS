@@ -76,13 +76,12 @@ export class StaahService {
     return this.getBasicAuthHeaders();
   }
 
-  private getBasicAuthHeaders(): Record<string, string> {
-    const basic = Buffer.from(`${this.config.clientSecret}:`).toString('base64');
-    return {
-      Authorization: `Basic ${basic}`,
-      'app-id': this.config.clientId,
-    };
-  }
+private getBasicAuthHeaders(): Record<string, string> {
+  return {
+    Authorization: `Basic ${this.config.clientSecret}`,
+    'app-id': this.config.clientId,
+  };
+}
 
   async testConnection(): Promise<any> {
     const response = await this.client.get('/SUAPI/jservice/pmsproperty');

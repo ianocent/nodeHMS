@@ -85,6 +85,7 @@ router.post('/staah/interfaces/:id/pull', authMiddleware, requirePermission(69, 
 router.post('/staah/interfaces/:id/push-room', authMiddleware, requirePermission(69, 'edit'), StaahController.pushRoom);
 router.post('/staah/interfaces/:id/push-rate', authMiddleware, requirePermission(69, 'edit'), StaahController.pushRate);
 router.post('/staah/interfaces/:id/ari-push', authMiddleware, requirePermission(69, 'edit'), StaahController.ariPush);
+router.post('/staah/sync-price', authMiddleware, requirePermission(69, 'edit'), StaahController.syncPriceStaah);
 
 // Singular aliases for frontend compatibility
 router.get('/staah/interface', authMiddleware, requirePermission(69, 'view'), StaahController.interfaceList);

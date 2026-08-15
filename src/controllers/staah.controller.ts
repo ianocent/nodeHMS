@@ -29,6 +29,105 @@ function idParam(val: any): bigint {
   return BigInt(val);
 }
 
+function formatDate(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+async function buildAriPayload(interface_: any, dateFrom: string, dateTo: string): Promise<any[]> {
+  const roomMappings = await prisma.staah_room_mappings.findMany({
+    where: { staah_interface_id: interface_.id, deleted_at: null, status: 'active' },
+  });
+  const rateMappings = await prisma.staah_rate_mappings.findMany({
+    where: { staah_interface_id: interface_.id, deleted_at: null, status: 'active' },
+  });
+  if (!roomMappings.length || !rateMappings.length) return [];
+
+  const roomByType = new Map(roomMappings.map((rm: any) => [rm.room_type_id, rm]));
+  const rateByRateId = new Map(rateMappings.map((rtm: any) => [rtm.rate_id, rtm]));
+  const rateRates = await prisma.rate_rates.findMany({
+    where: {
+      rate_id: { in: [...rateByRateId.keys()] },
+      room_type_id: { in: [...roomByType.keys()] },
+      date: { gte: new Date(`${dateFrom}T00:00:00Z`), lte: new Date(`${dateTo}T23:59:59Z`) },
+      deleted_at: null,
+    },
+    orderBy: { date: 'asc' },
+  });
+
+  const rooms: any[] = [];
+  for (const [roomTypeId, roomMapping] of roomByType) {
+    const ratesForRoom = rateRates
+      .filter((rr: any) => rr.room_type_id === roomTypeId)
+      .sort((a: any, b: any) => a.date.getTime() - b.date.getTime());
+    if (!ratesForRoom.length) continue;
+
+    const dates: any[] = [];
+    let currentRange: any = null;
+    for (const rr of ratesForRoom) {
+      const dateStr = formatDate(rr.date);
+      const rateMapping: any = rateByRateId.get(rr.rate_id);
+      if (!rateMapping) continue;
+      const prices: any[] = [];
+      if (Number(rr.one_adult) > 0) prices.push({ NumberOfGuests: '1', value: String(Number(rr.one_adult)) });
+      if (Number(rr.two_adult) > 0) prices.push({ NumberOfGuests: '2', value: String(Number(rr.two_adult)) });
+      const ratePlanId = rateMapping.staah_rate_plan_id;
+      const closed = rr.stop_sell ? '1' : '0';
+      const minStay = String(rr.min_night);
+      const maxStay = String(rr.max_night);
+      const closedArrival = rr.stop_arrival ? '1' : '0';
+      const closedDeparture = rr.stop_departure ? '1' : '0';
+      const extraAdult = Number(rr.extra_adult).toFixed(2);
+      const extraChild = Number(rr.extra_child).toFixed(2);
+      const matchKey = JSON.stringify([prices, ratePlanId, closed, minStay, maxStay, closedArrival, closedDeparture, extraAdult, extraChild]);
+
+      if (currentRange === null) {
+        currentRange = {
+          from: dateStr, to: dateStr,
+          rate: [{ rateplanid: ratePlanId }],
+          price: prices, closed, minimumstay: minStay, maximumstay: maxStay,
+          closedonarrival: closedArrival, closedondeparture: closedDeparture,
+          extraadultrate: extraAdult, extrachildrate: extraChild,
+          matchKey,
+        };
+      } else if (currentRange.matchKey === matchKey && formatDate(new Date(new Date(currentRange.to + 'T00:00:00Z').getTime() + 86400000)) === dateStr) {
+        currentRange.to = dateStr;
+      } else {
+        delete currentRange.matchKey;
+        if (currentRange.from === currentRange.to) {
+          currentRange = { value: currentRange.from, ...currentRange };
+          delete currentRange.from;
+          delete currentRange.to;
+        }
+        dates.push(currentRange);
+        currentRange = {
+          from: dateStr, to: dateStr,
+          rate: [{ rateplanid: ratePlanId }],
+          price: prices, closed, minimumstay: minStay, maximumstay: maxStay,
+          closedonarrival: closedArrival, closedondeparture: closedDeparture,
+          extraadultrate: extraAdult, extrachildrate: extraChild,
+          matchKey,
+        };
+      }
+    }
+    if (currentRange !== null) {
+      delete currentRange.matchKey;
+      if (currentRange.from === currentRange.to) {
+        currentRange = { value: currentRange.from, ...currentRange };
+        delete currentRange.from;
+        delete currentRange.to;
+      }
+      dates.push(currentRange);
+    }
+    if (dates.length) {
+      rooms.push({ roomid: roomMapping.staah_room_id, date: dates });
+    }
+  }
+  return rooms;
+}
+
 // ═══════════════════════════════════════════════
 // STAah Interfaces CRUD
 // ═══════════════════════════════════════════════
@@ -710,45 +809,117 @@ export class StaahController {
   // ARI Push (Availability, Rate, Inventory)
   // ═══════════════════════════════════════════════
 
-  static async ariPush(req: Request, res: Response): Promise<void> {
-    try {
-      const id = idParam(req.params.id);
-      const { date_from, date_to } = req.body;
-
-      const interface_ = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!interface_) { notFound(res, 'Interface not found'); return; }
-
-      const roomMappings = await prisma.staah_room_mappings.findMany({
-        where: { staah_interface_id: interface_.id, deleted_at: null, status: 'active' },
-      });
-
-      const rateMappings = await prisma.staah_rate_mappings.findMany({
-        where: { staah_interface_id: interface_.id, deleted_at: null, status: 'active' },
-      });
-
-      const payload: any[] = [];
-      for (const rm of roomMappings) {
-        for (const rtm of rateMappings) {
-          payload.push({
-            hotelid: interface_.hotel_id,
-            roomid: rm.staah_room_id,
-            rateplanid: rtm.staah_rate_plan_id,
-            date_from: date_from,
-            date_to: date_to,
-            roomstosell: rm.quantity,
-        });
-        }
-      }
-
-      if (payload.length === 0) {
-        success(res, [], 'No data to push');
-        return;
-      }
-
-      const result = await staahService.storeRates({ availability: payload });
-      success(res, result, 'ARI pushed successfully');
-    } catch (err: any) {
-      error(res, 'ARI push failed: ' + err.message, 500);
+static async ariPush(req: Request, res: Response): Promise<void> {
+  try {
+    const id = idParam(req.params.id);
+    const { date_from, date_to } = req.body;
+    if (!date_from || !date_to) {
+      error(res, 'date_from and date_to are required', 400);
+      return;
     }
+
+    const interface_ = await prisma.staah_interfaces.findUnique({ where: { id } });
+    if (!interface_) { notFound(res, 'Interface not found'); return; }
+
+    const rooms = await buildAriPayload(interface_, date_from, date_to);
+    if (!rooms.length) {
+      success(res, [], 'No data to push');
+      return;
+    }
+
+    const payload = { hotelid: interface_.hotel_id, room: rooms };
+    const result = await staahService.storeRates(payload);
+    await prisma.staah_sync_logs.create({
+      data: {
+        staah_interface_id: interface_.id,
+        type: 'ari',
+        direction: 'push',
+        status: String(result?.Status ?? result?.status ?? 'unknown').toLowerCase() === 'success' ? 'success' : 'failed',
+        hotel_id: interface_.hotel_id,
+        room_id: rooms.map((r: any) => r.roomid).join(','),
+        date_from: new Date(`${date_from}T00:00:00Z`),
+        date_to: new Date(`${date_to}T23:59:59Z`),
+        payload: JSON.stringify(payload),
+        response: JSON.stringify(result),
+        synced_at: new Date(),
+        created_at: new Date(),
+        updated_at: new Date(),
+      },
+    });
+    success(res, result, 'ARI pushed successfully');
+  } catch (err: any) {
+    error(res, 'ARI push failed: ' + err.message, 500);
   }
+}
+
+static async syncPriceStaah(req: Request, res: Response): Promise<void> {
+  try {
+    const rate = await prisma.rates.findFirst({
+      where: { staah: true, sync_staah: false, deleted_at: null },
+      orderBy: { id: 'asc' },
+    });
+    if (!rate) { success(res, null, 'No rate found'); return; }
+
+    const interface_ = await prisma.staah_interfaces.findFirst({
+      where: { property_id: rate.property_id, deleted_at: null },
+    });
+    if (!interface_) { error(res, 'Staah interface not found for property ' + rate.property_id, 404); return; }
+
+    const dateFrom = formatDate(rate.start_date);
+    const dateTo = formatDate(rate.end_date);
+
+    await prisma.rates.update({
+      where: { id: rate.id },
+      data: { sync_staah: true },
+    });
+
+    const rooms = await buildAriPayload(interface_, dateFrom, dateTo);
+    if (!rooms.length) {
+      await prisma.staah_sync_logs.create({
+        data: {
+          staah_interface_id: interface_.id,
+          type: 'price',
+          direction: 'push',
+          status: 'skipped',
+          hotel_id: interface_.hotel_id,
+          room_id: rooms.map((r: any) => r.roomid).join(','),
+          date_from: rate.start_date,
+          date_to: rate.end_date,
+          payload: {},
+          response: {},
+          message: 'No valid rates',
+          synced_at: new Date(),
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+      });
+      success(res, null, 'No valid rates');
+      return;
+    }
+
+    const payload = { hotelid: interface_.hotel_id, room: rooms };
+    const result = await staahService.storeRates(payload);
+    const ok = String(result?.Status ?? result?.status ?? 'unknown').toLowerCase() === 'success';
+    await prisma.staah_sync_logs.create({
+      data: {
+        staah_interface_id: interface_.id,
+        type: 'price',
+        direction: 'push',
+        status: ok ? 'success' : 'failed',
+        hotel_id: interface_.hotel_id,
+        room_id: rooms.map((r: any) => r.roomid).join(','),
+        date_from: rate.start_date,
+        date_to: rate.end_date,
+        payload: JSON.stringify(payload),
+        response: JSON.stringify(result),
+        synced_at: new Date(),
+        created_at: new Date(),
+        updated_at: new Date(),
+      },
+    });
+    success(res, result, ok ? 'Price synced successfully' : 'Price sync failed');
+  } catch (err: any) {
+    error(res, 'Price sync failed: ' + err.message, 500);
+  }
+}
 }
