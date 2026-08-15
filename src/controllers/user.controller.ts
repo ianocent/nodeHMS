@@ -160,8 +160,6 @@ export class UserController {
       const { company_id, property_ids, role_id, name, username, email, phone, password, status } = req.body;
 
       const errors: Record<string, string[]> = {};
-      if (!company_id) errors.company_id = ['The company id field is required.'];
-      if (!role_id) errors.role_id = ['The role id field is required.'];
       if (!name) errors.name = ['The name field is required.'];
       if (!username) errors.username = ['The username field is required.'];
       if (!email) errors.email = ['The email field is required.'];

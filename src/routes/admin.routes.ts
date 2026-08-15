@@ -105,14 +105,14 @@ router.post('/generic/:model/:id/restore', authMiddleware, genericController.res
 // Sidebar routes (singular names for frontend compatibility)
 router.get('/menu', authMiddleware, AdminController.menuListAll);
 router.get('/role', authMiddleware, AdminController.roleList);
-router.get('/role/create', authMiddleware, AdminController.roleCreate);
+router.get('/role/create', authMiddleware, requirePermission(1117, 'add'), AdminController.roleCreate);
 router.get('/role/template', authMiddleware, requirePermission(1117, 'view'), AdminController.roleGetTemplates);
-router.post('/role', authMiddleware, AdminController.roleStore);
-router.get('/role/:id', authMiddleware, AdminController.roleShow);
-router.get('/role/:id/update', authMiddleware, AdminController.roleEdit);
-router.put('/role/:id', authMiddleware, AdminController.roleUpdate);
-router.delete('/role/:id', authMiddleware, AdminController.roleDestroy);
-router.post('/role/:id/restore', authMiddleware, AdminController.roleRestore);
+router.post('/role', authMiddleware, requirePermission(1117, 'add'), AdminController.roleStore);
+router.get('/role/:id', authMiddleware, requirePermission(1117, 'view'), AdminController.roleShow);
+router.get('/role/:id/update', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleEdit);
+router.put('/role/:id', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleUpdate);
+router.delete('/role/:id', authMiddleware, requirePermission(1117, 'delete'), AdminController.roleDestroy);
+router.post('/role/:id/restore', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleRestore);
 
 // All users / roles dropdowns
 router.get('/uall', authMiddleware, AdminController.userListAll);

@@ -437,7 +437,11 @@ export class SystemController {
   static async setupStore(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
-      const { group, name, description, status, sort, text, image } = req.body;
+      // Support group from both body and query (frontend sends as query param)
+      const body = req.body || {};
+      const query = req.query || {};
+      const group = body.group || query.group || '';
+      const { name, description, status, sort, text, image } = body;
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const dup = await getPrisma().types.findFirst({ where: { name, group: group || '', property_id: propertyId } });
@@ -474,7 +478,10 @@ export class SystemController {
       const existing = await getPrisma().types.findUnique({ where: { id } });
       if (!existing) { notFound(res); return; }
 
-      const { group, name, description, status, sort, text, image } = req.body;
+      const body = req.body || {};
+      const query = req.query || {};
+      const group = body.group || query.group;
+      const { name, description, status, sort, text, image } = body;
       const data: any = { updated_at: new Date(), updated_by: req.user?.id || null };
       if (name !== undefined) data.name = name;
       if (group !== undefined) data.group = group;

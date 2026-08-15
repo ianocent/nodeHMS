@@ -96,11 +96,103 @@ export class AdminController {
     try {
       const pid = req.user?.lastProperty ?? 0n;
       const [menus, templates] = await Promise.all([
-        getPrisma().menus.findMany({ where: { status: 1, deleted_at: null }, orderBy: [{ left: 'asc' }] }),
+        getPrisma().menus.findMany({ where: { deleted_at: null, status: 1, id: { notIn: [15, 5, 6, 14, 1123, 1126] } }, orderBy: [{ left: 'asc' }] }),
         getPrisma().role_templates.findMany({ where: { property_id: pid, is_active: true }, orderBy: { sort: 'asc' } }),
       ]);
-      success(res, { menus: bigintToNumber(menus), templates: bigintToNumber(templates) }, 'Success');
-    } catch (err: any) { error(res, 'Failed to load form data', 500); }
+
+      const buildTree = (parentId: bigint | null): any[] =>
+        menus.filter(m => m.parent_id === parentId).map(m => {
+          let label = String(m.name ?? '');
+          try {
+            const parsed = JSON.parse(label);
+            label = parsed.en ?? parsed.id ?? parsed.name ?? label;
+          } catch (e) { /* keep as string */ }
+
+          const labelParts = label.replace(/[-_]/g, ' ').split('.').map(s => {
+            return s.charAt(0).toUpperCase() + s.slice(1);
+          });
+
+          const children = buildTree(m.id);
+
+          return {
+            key: labelParts,
+            value: Number(m.id),
+            label: labelParts,
+            isaccess: false,
+            crud: { view: false, add: false, edit: false, delete: false },
+            transaction_actions: {},
+            children,
+          };
+        });
+
+      const rawTree = buildTree(null);
+      const permissions = rawTree.map(root => {
+        const accessList: any[] = [];
+        const walkChildren = (nodes: any[]) => {
+          for (const n of nodes) {
+            accessList.push({
+              label: n.label[n.label.length - 1],
+              value: n.value,
+              isaccess: n.isaccess,
+              crud: n.crud,
+              transaction_actions: n.transaction_actions,
+            });
+            if (n.children && n.children.length > 0) {
+              walkChildren(n.children);
+            }
+          }
+        };
+        if (root.children) walkChildren(root.children);
+
+        return {
+          key: root.key,
+          value: root.value,
+          label: root.label,
+          isaccess: root.isaccess,
+          access: accessList,
+        };
+      }).filter(p => p.value !== 52);
+
+      const formattedRole = {
+        id: 0,
+        name: '',
+        code: 'web',
+        list_dashboard: [],
+        permissions,
+        created_at: new Date(),
+        created_by: Number(req.user?.id ?? 0),
+        status: { value: true, label: 'Active' },
+        relation: { permissions: [] },
+      };
+
+      const templateData = templates.map(t => ({
+        id: Number(t.id),
+        key: t.key,
+        name: t.name,
+        label: t.label,
+        code: t.code,
+        desc: t.description,
+        dashboard: t.dashboard ? (typeof t.dashboard === 'string' ? JSON.parse(t.dashboard) : t.dashboard) : [],
+        grants: t.grants ? (typeof t.grants === 'string' ? JSON.parse(t.grants) : t.grants) : [],
+        transactionGrants: t.transaction_grants ? (typeof t.transaction_grants === 'string' ? JSON.parse(t.transaction_grants) : t.transaction_grants) : null,
+        colors: {
+          ringColor: t.color_ring,
+          bgColor: t.color_bg,
+          badgeBg: t.color_badge_bg,
+          badgeText: t.color_badge_text,
+        },
+      }));
+
+      import('../utils/cmsConfig').then(({ DASHBOARDS }) => {
+        success(res, formattedRole, 'Success', 200, {
+          master: {
+            statuses: STATUSES,
+            dashboards: DASHBOARDS,
+            templates: templateData,
+          }
+        });
+      });
+    } catch (err: any) { console.error(err); error(res, 'Failed to load form data', 500); }
   }
 
   static async roleStore(req: Request, res: Response): Promise<void> {
@@ -925,6 +1017,7 @@ export class AdminController {
     try {
       const b = req.body || {};
       if (!b.name) { validationError(res, { name: ['The name field is required.'] }); return; }
+      const now = new Date();
       const data: any = {
         name: b.name,
         alias: b.alias || null,
@@ -941,9 +1034,11 @@ export class AdminController {
         city_id: b.city_id ? BigInt(String(b.city_id)) : null,
         country_id: b.country_id ? BigInt(String(b.country_id)) : null,
         status: b.status !== undefined && b.status !== null ? Number(b.status) : 1,
+        contract_expired: b.contract_expired ? new Date(b.contract_expired) : new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()),
+        join_date: b.join_date ? new Date(b.join_date) : now,
         created_by: req.user?.id ? BigInt(String(req.user.id)) : null,
-        created_at: new Date(),
-        updated_at: new Date(),
+        created_at: now,
+        updated_at: now,
       };
       const record = await getPrisma().properties.create({ data });
       success(res, { ...bigintToNumber(record), id: Number(record.id) }, 'Created', 201, {
