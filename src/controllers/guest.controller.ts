@@ -914,7 +914,7 @@ export class GuestController {
       card_expiry: guest.card_expiry,
       email: guest.email,
       gender: guest.gender,
-      birth_of_date: guest.birth_of_date,
+      birth_of_date: guest.birth_of_date ? new Date(guest.birth_of_date).toISOString().slice(0, 10) : null,
       fax: guest.fax,
       address: guest.address,
       postal_code: guest.postal_code,

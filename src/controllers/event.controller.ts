@@ -4,7 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { moneyFormat } from '../utils/cmsConfig';
+import { moneyFormat, STATUSES } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -27,6 +27,11 @@ function idParam(val: any): bigint {
 }
 
 function toId(v: any): number { return Number(Array.isArray(v) ? v[0] : v); }
+function num(v: any, fallback: any = null): any {
+  if (v === undefined || v === null || v === '') return fallback;
+  const n = Number(v);
+  return isNaN(n) ? fallback : n;
+}
 function parsePagination(query: any) {
   const page = parseInt(query.page as string) || 1;
   const limit = parseInt(query.limit as string) || 10;
@@ -51,6 +56,16 @@ export class EventController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: [
+          { label: 'Venue Name', key: 'name', type: 'text', is_search: true },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true, options: STATUSES },
+        ],
+        search_data: [
+          { label: 'Venue Name', key: 'name', type: 'text', is_search: true },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'select', valueOptions: STATUSES },
+        ],
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -102,7 +117,7 @@ export class EventController {
       const where: any = {};
       if (search) where.description = { contains: search, mode: 'insensitive' };
 
-      const [data, total] = await Promise.all([
+      const [data, total, venues, layouts] = await Promise.all([
         prisma.event_capacities.findMany({
           where,
           include: { event_venues: { select: { id: true, name: true } }, event_layouts: { select: { id: true, name: true } } },
@@ -111,13 +126,64 @@ export class EventController {
           take: limit,
         }),
         prisma.event_capacities.count({ where }),
+        prisma.event_venues.findMany({ where: { status: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.event_layouts.findMany({ where: { status: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: [
+          { label: 'No', key: 'sort', type: 'number', is_search: false },
+          { label: 'Venue', key: 'venue_id', type: 'select', is_search: true, options: venues.map((v: any) => ({ value: Number(v.id), label: v.name })) },
+          { label: 'Layout', key: 'layout_id', type: 'select', is_search: true, options: layouts.map((l: any) => ({ value: Number(l.id), label: l.name })) },
+          { label: 'Pax', key: 'pax', type: 'number', is_search: true },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true },
+        ],
+        search_data: [
+          { label: 'Venue', key: 'venue_id', type: 'select', valueOptions: venues.map((v: any) => ({ value: Number(v.id), label: v.name })) },
+          { label: 'Layout', key: 'layout_id', type: 'select', valueOptions: layouts.map((l: any) => ({ value: Number(l.id), label: l.name })) },
+          { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }] },
+        ],
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Capacity list error:', err); error(res, 'Failed to list capacities', 500); }
+  }
+
+  static async capacityStore(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const { pax, venue_id, layout_id, description, status } = req.body;
+      if (pax === undefined || pax === null || pax === '') { badRequest(res, 'pax is required'); return; }
+      const data = await prisma.event_capacities.create({
+        data: { property_id: pid, pax: num(pax, 0), venue_id: num(venue_id, 0), layout_id: num(layout_id, 0), description, status: num(status, 1), created_at: new Date() },
+      });
+      success(res, bigintToNumber(data), 'Capacity created', 201);
+    } catch (err: any) { console.error('Capacity store error:', err); error(res, 'Failed to create capacity', 500); }
+  }
+
+  static async capacityUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = toId(req.params.id);
+      const { pax, venue_id, layout_id, description, status } = req.body;
+      const data: any = {};
+      if (pax !== undefined) data.pax = num(pax, 0);
+      if (venue_id !== undefined) data.venue_id = num(venue_id, 0);
+      if (layout_id !== undefined) data.layout_id = num(layout_id, 0);
+      if (description !== undefined) data.description = description;
+      if (status !== undefined) data.status = num(status, 1);
+      data.updated_at = new Date();
+      await prisma.event_capacities.update({ where: { id }, data });
+      success(res, null, 'Capacity updated');
+    } catch (err: any) { error(res, 'Failed to update capacity', 500); }
+  }
+
+  static async capacityDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = toId(req.params.id);
+      await prisma.event_capacities.delete({ where: { id } });
+      success(res, null, 'Capacity deleted');
+    } catch (err: any) { error(res, 'Failed to delete capacity', 500); }
   }
 
   // ==================== LAYOUT ====================
@@ -133,6 +199,17 @@ export class EventController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: [
+          { label: 'Layout Name', key: 'name', type: 'text', is_search: true },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+          { label: 'Image', key: 'image', type: 'fileimage', is_search: false, is_html: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true, options: STATUSES },
+        ],
+        search_data: [
+          { label: 'Layout Name', key: 'name', type: 'text', is_search: true },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'select', valueOptions: STATUSES },
+        ],
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -264,7 +341,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const data = await prisma.event_events.create({
-        data: { property_id: pid, event_no: event_no || `EVT${Date.now()}`, name, event_start_time: new Date(event_start_time), event_end_time: new Date(event_end_time), guest_name, guest_phone, guest_email, company_profile_id: company_profile_id ? BigInt(company_profile_id) : null, sales_in_charge: sales_in_charge ? BigInt(sales_in_charge) : null, package_id: package_id || null, venue_id: venue_id || null, layout_id: layout_id || null, pax: pax || null, folio_id: folio_id ? BigInt(folio_id) : null, status: status || 'Tentative', description, total_amount: total_amount || 0, created_at: new Date() },
+        data: { property_id: pid, event_no: event_no || `EVT${Date.now()}`, name, event_start_time: new Date(event_start_time), event_end_time: new Date(event_end_time), guest_name, guest_phone, guest_email, company_profile_id: company_profile_id ? BigInt(company_profile_id) : null, sales_in_charge: sales_in_charge ? BigInt(sales_in_charge) : null, package_id: num(package_id), venue_id: num(venue_id), layout_id: num(layout_id), pax: num(pax), folio_id: folio_id ? BigInt(folio_id) : null, status: status || 'Tentative', description, total_amount: num(total_amount, 0), created_at: new Date() },
       });
       success(res, bigintToNumber(data), 'Event created', 201);
     } catch (err: any) { console.error('Event store error:', err); error(res, 'Failed to create event', 500); }
@@ -285,7 +362,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const { event_no, name, event_start_time, event_end_time, guest_name, guest_phone, guest_email, company_profile_id, sales_in_charge, package_id, venue_id, layout_id, pax, status, description, total_amount } = req.body;
       await prisma.event_events.update({
         where: { id },
-        data: { event_no, name, event_start_time: event_start_time ? new Date(event_start_time) : undefined, event_end_time: event_end_time ? new Date(event_end_time) : undefined, guest_name, guest_phone, guest_email, company_profile_id: company_profile_id ? BigInt(company_profile_id) : null, sales_in_charge: sales_in_charge ? BigInt(sales_in_charge) : null, package_id, venue_id, layout_id, pax, status, description, total_amount, updated_at: new Date() },
+        data: { event_no, name, event_start_time: event_start_time ? new Date(event_start_time) : undefined, event_end_time: event_end_time ? new Date(event_end_time) : undefined, guest_name, guest_phone, guest_email, company_profile_id: company_profile_id ? BigInt(company_profile_id) : null, sales_in_charge: sales_in_charge ? BigInt(sales_in_charge) : null, package_id: package_id !== undefined ? num(package_id) : undefined, venue_id: venue_id !== undefined ? num(venue_id) : undefined, layout_id: layout_id !== undefined ? num(layout_id) : undefined, pax: pax !== undefined ? num(pax) : undefined, status, description, total_amount: total_amount !== undefined ? num(total_amount, 0) : undefined, updated_at: new Date() },
       });
       success(res, null, 'Event updated');
     } catch (err: any) { error(res, 'Failed to update event', 500); }
@@ -297,6 +374,18 @@ static async eventList(req: Request, res: Response): Promise<void> {
       await prisma.event_events.delete({ where: { id } });
       success(res, null, 'Event deleted');
     } catch (err: any) { error(res, 'Failed to delete event', 500); }
+  }
+
+  static async eventSort(req: Request, res: Response): Promise<void> {
+    try {
+      const { items } = req.body;
+      if (items && Array.isArray(items)) {
+        for (const item of items) {
+          await prisma.$executeRawUnsafe(`UPDATE event_events SET updated_at = NOW() WHERE id = ${Number(item.id)}`);
+        }
+      }
+      success(res, null, 'Event sorted');
+    } catch (err: any) { error(res, 'Failed to sort events', 500); }
   }
 
   // ==================== PACKAGE ====================
@@ -336,7 +425,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const data = await prisma.event_packages.create({
-        data: { property_id: pid ? Number(pid) : null, name, capacity_id: capacity_id || null, max_capacity: max_capacity || null, venue_id: venue_id || null, layout_id: layout_id || null, description, price: price || 0, status: status ?? true, created_at: new Date() },
+        data: { property_id: pid ? Number(pid) : null, name, capacity_id: num(capacity_id), max_capacity: num(max_capacity), venue_id: num(venue_id), layout_id: num(layout_id), description, price: num(price, 0), status: status ?? true, created_at: new Date() },
       });
       success(res, bigintToNumber(data), 'Package created', 201);
     } catch (err: any) { console.error('Package store error:', err); error(res, 'Failed to create package', 500); }
@@ -346,7 +435,17 @@ static async eventList(req: Request, res: Response): Promise<void> {
     try {
       const id = toId(req.params.id);
       const { name, capacity_id, max_capacity, venue_id, layout_id, description, price, status } = req.body;
-      await prisma.event_packages.update({ where: { id }, data: { name, capacity_id: capacity_id || null, max_capacity: max_capacity || null, venue_id, layout_id, description, price, status, updated_at: new Date() } });
+      const data: any = {};
+      if (name !== undefined) data.name = name;
+      if (capacity_id !== undefined) data.capacity_id = num(capacity_id);
+      if (max_capacity !== undefined) data.max_capacity = num(max_capacity);
+      if (venue_id !== undefined) data.venue_id = num(venue_id);
+      if (layout_id !== undefined) data.layout_id = num(layout_id);
+      if (description !== undefined) data.description = description;
+      if (price !== undefined) data.price = num(price, 0);
+      if (status !== undefined) data.status = status;
+      data.updated_at = new Date();
+      await prisma.event_packages.update({ where: { id }, data });
       success(res, null, 'Package updated');
     } catch (err: any) { error(res, 'Failed to update package', 500); }
   }
@@ -366,12 +465,28 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const where: any = {};
       if (search) where.description = { contains: search, mode: 'insensitive' };
 
-      const [data, total] = await Promise.all([
+      const [data, total, codePosts] = await Promise.all([
         prisma.event_inventories.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
         prisma.event_inventories.count({ where }),
+        prisma.code_posts.findMany({ where: { deleted_at: null, status: 1, type: 'DEFAULT' }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      const rows = bigintToNumber(data).map((r: any) => ({
+        ...r,
+        code_post_id: r.code_post_id != null ? { value: Number(r.code_post_id), label: (codePosts as any).find((c: any) => Number(c.id) === Number(r.code_post_id))?.name ?? null } : null,
+      }));
+
+      success(res, rows, 'Success', 200, {
+        table: [
+          { label: 'Item', key: 'code_post_id', type: 'select', is_search: true, options: codePosts.map((c: any) => ({ value: Number(c.id), label: c.name })) },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+          { label: 'Sales', key: 'sales', type: 'number', is_search: false },
+          { label: 'Qty', key: 'quantity', type: 'number', is_search: false },
+        ],
+        search_data: [
+          { label: 'Item', key: 'code_post_id', type: 'select', valueOptions: codePosts.map((c: any) => ({ value: Number(c.id), label: c.name })) },
+          { label: 'Description', key: 'description', type: 'text', is_search: true },
+        ],
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -394,7 +509,13 @@ static async eventList(req: Request, res: Response): Promise<void> {
     try {
       const id = toId(req.params.id);
       const { code_post_id, description, sales, quantity } = req.body;
-      await prisma.event_inventories.update({ where: { id }, data: { code_post_id: parseInt(code_post_id), description, sales, quantity, updated_at: new Date() } });
+      const data: any = {};
+      if (code_post_id !== undefined) data.code_post_id = parseInt(code_post_id, 10) || 0;
+      if (description !== undefined) data.description = description;
+      if (sales !== undefined) data.sales = num(sales, 0);
+      if (quantity !== undefined) data.quantity = num(quantity, 0);
+      data.updated_at = new Date();
+      await prisma.event_inventories.update({ where: { id }, data });
       success(res, null, 'Inventory updated');
     } catch (err: any) { error(res, 'Failed to update inventory', 500); }
   }

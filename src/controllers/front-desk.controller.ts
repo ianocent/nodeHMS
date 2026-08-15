@@ -12,11 +12,12 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 const STATUS_RESERVATION = {
-  reservation: { id: 1, code: 'reservation', name: 'Reservation' },
-  check_in: { id: 2, code: 'check_in', name: 'Check In' },
-  check_out: { id: 3, code: 'check_out', name: 'Check Out' },
-  cancel_reservation: { id: 4, code: 'cancel_reservation', name: 'Cancel Reservation' },
-  pending: { id: 0, code: 'pending', name: 'Pending' },
+  check_in: { id: 0, code: 'check_in', name: 'Check In' },
+  check_out: { id: 1, code: 'check_out', name: 'Check Out' },
+  cancel_reservation: { id: 2, code: 'cancel_reservation', name: 'Cancelled' },
+  reservation: { id: 3, code: 'reservation', name: 'Reservation' },
+  in_house: { id: 4, code: 'in_house', name: 'In House' },
+  pending: { id: 5, code: 'pending', name: 'Pending' },
 };
 
 const TYPE_RESERVATION = {
@@ -24,6 +25,32 @@ const TYPE_RESERVATION = {
   git: { code: 'git', name: 'GIT' },
   vr: { code: 'vr', name: 'VR' },
 };
+
+// Matches Laravel getColorReservation() + Folio formatData status_reservation_color
+const COLOR_RESERVATION: Record<number, string> = {
+  0: 'bg-green',
+  1: 'bg-purple',
+  2: 'bg-red',
+  3: 'bg-cyan',
+  4: 'bg-blue',
+  5: 'bg-yellow',
+};
+
+function statusReservationLabel(status: number): string {
+  const found = Object.values(STATUS_RESERVATION).find((s: any) => s.id === status);
+  return (found ? found.name : String(status)).replace(/ /g, '-');
+}
+
+function statusReservationColor(folio: any): { label: string; color: string; is_color: boolean }[] {
+  if (folio.status_reservation === STATUS_RESERVATION.reservation.id && folio.is_request_cancel) {
+    return [{ label: 'Request-Cancel', color: 'bg-yellow', is_color: true }];
+  }
+  return [{
+    label: statusReservationLabel(folio.status_reservation),
+    color: COLOR_RESERVATION[folio.status_reservation] || 'bg-success',
+    is_color: true,
+  }];
+}
 
 const MENU_ID = 63;
 
@@ -90,6 +117,10 @@ export class FrontDeskController {
       const search_value = req.query.search_value as string;
       const type = (req.query.type as string) || 'check_in';
       const group = req.query.group as string;
+      const displayStatus = req.query.display_status as string;
+      const stayDates = req.query.stay_dates as string;
+      const startDate = req.query.start_date as string;
+      const endDate = req.query.end_date as string;
       const propertyId = req.user?.lastProperty;
 
       const where: any = {
@@ -99,14 +130,53 @@ export class FrontDeskController {
 
       if (propertyId) where.property_id = propertyId;
 
-      // Type-based filtering
+      // display_status filter (parity Laravel FrontDeskController@index L37-73):
+      // comma-separated status_reservation codes; absent => exclude cancelled only
+      const hasDisplayStatus = !!(displayStatus && displayStatus.trim() !== '');
+      if (hasDisplayStatus) {
+        const codes = displayStatus.split(',').map((c: string) => c.trim()).filter(Boolean);
+        const ids = codes
+          .map((code: string) => {
+            const found = Object.values(STATUS_RESERVATION).find((s: any) => s.code === code);
+            return found ? found.id : null;
+          })
+          .filter((v: any) => v !== null);
+        if (ids.length > 0) {
+          where.status_reservation = { in: ids };
+        }
+      }
+
+      // stay date range (parity L55-60): only when start_date && end_date && stay_dates
+      if (stayDates && startDate && endDate) {
+        const sd = new Date(startDate);
+        const ed = new Date(endDate);
+        ed.setHours(23, 59, 59, 999);
+        if (stayDates === 'check_in') {
+          where.check_in_date = { gte: sd, lte: ed };
+        } else if (stayDates === 'check_out') {
+          where.check_out_date = { gte: sd, lte: ed };
+        } else if (stayDates === 'between') {
+          where.OR = [
+            { check_in_date: { gte: sd, lte: ed } },
+            { check_out_date: { gte: sd, lte: ed } },
+            { check_in_date: { lte: sd }, check_out_date: { gte: ed } },
+          ];
+        } else {
+          where.check_out_date = { gte: sd, lte: ed };
+        }
+      }
+
+      // Type-based filtering (skip default check_in status+date filter when user
+      // explicitly picked display_status so the filter actually filters)
       if (type === 'check_in') {
-        where.status_reservation = {
+        where.status_reservation = where.status_reservation ?? {
           in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id],
         };
-        where.check_in_date = { gte: new Date() };
+        if (!hasDisplayStatus) {
+          where.check_in_date = { gte: new Date() };
+        }
       } else if (type === 'check_out' && group === 'check-out') {
-        where.status_reservation = {
+        where.status_reservation = where.status_reservation ?? {
           in: [STATUS_RESERVATION.check_out.id, STATUS_RESERVATION.check_in.id],
         };
         where.check_out_date = { gte: new Date() };
@@ -177,11 +247,7 @@ export class FrontDeskController {
           ign: false,
           remark_bool: !!(f.remark || f.posting_instruction || f.check_out_instruction || f.check_in_instruction),
           is_do_not_disturb: !!f.is_do_not_disturb,
-          status_reservation_color: [{
-            label: 'Reservation',
-            color: 'bg-primary',
-            is_color: true,
-          }],
+          status_reservation_color: statusReservationColor(f),
           room_clean_status_color: [],
           room_status_color: [],
           folio_number: f.folio_number,
@@ -336,25 +402,178 @@ export class FrontDeskController {
   }
 
   // ==================== TRANSACTION ====================
+  // Parity Laravel TransactionController@getData — GET /transaction?folio_id=&filter=
   static async transactionList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 50;
+      const limit = 99999;
       const folioId = req.query.folio_id as string;
-      const type = req.query.type as string;
+      const filter = req.query.filter as string;
+      const ledger = req.query.ledger_id as string;
       const pid = req.user?.lastProperty ?? 0n;
 
-      const where: any = { property_id: pid, deleted_at: null };
-      if (folioId) where.folio_id = BigInt(folioId);
-      if (type) where.type = type;
+      const table = [
+        { label: 'Date', key: 'date', type: 'date', is_search: false },
+        { label: 'Code', key: 'code', type: 'text', is_search: false },
+        { label: 'Card Name', key: 'card_name', type: 'text', is_search: false },
+        { label: 'Card Number', key: 'last_digit_card', type: 'text', is_search: false },
+        { label: 'Voucher', key: 'voucher', type: 'text', is_search: false },
+        { label: 'Description', key: 'description', type: 'text', is_search: false },
+        { label: 'Total', key: 'total', type: 'number', is_search: false },
+        { label: 'Rate', key: 'rate', type: 'number', is_search: false },
+        { label: 'PB1', key: 'pb1', type: 'number', is_search: false },
+        { label: 'Svr Chrg', key: 'svr_chrg', type: 'number', is_search: false },
+        { label: 'Surcharge', key: 'surcharge', type: 'number', is_search: false },
+        { label: 'Overwrite Reason', key: 'remark', type: 'text', is_search: false },
+        { label: 'Staff', key: 'staff', type: 'text', is_search: false },
+        { label: 'Overwrite Time', key: 'time', type: 'date', is_search: false },
+        { label: 'Bill To', key: 'bill_to', type: 'text', is_search: false },
+        { label: 'Reference', key: 'reference', type: 'text', is_search: false },
+        { label: 'Receipt', key: 'receipt', type: 'text', is_search: false },
+        { label: 'Balance', key: 'balance', type: 'text', is_search: false },
+        { label: 'Status', key: 'status', type: 'text', is_search: false },
+      ];
+      const pagging = { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 };
+      const permission = {
+        view: true,
+        add: req.user?.superUser || true,
+        edit: req.user?.superUser || true,
+      };
 
-      const [data, total] = await Promise.all([
-        prisma.transactions.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit, include: { type_payments: { select: { name: true } }, folios: { select: { folio_number: true } } } }),
-        prisma.transactions.count({ where }),
+      if (!folioId || !/^\d+$/.test(folioId)) {
+        success(res, [], 'Folio Not Found', 200, {
+          table, pagging, permission,
+          search_data: [],
+          total_transaction: moneyFormat(0),
+          folio: null,
+          ledger_id: ledger ?? null,
+        });
+        return;
+      }
+
+      const id = BigInt(folioId);
+      const [folio, txns] = await Promise.all([
+        prisma.folios.findUnique({ where: { id }, include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' } } } }),
+        prisma.transactions.findMany({ where: { folio_id: id, deleted_at: null }, orderBy: { created_at: 'desc' }, include: { type_payments: { select: { name: true } } } }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      if (!folio) {
+        success(res, [], 'Folio Not Found', 200, {
+          table, pagging, permission,
+          search_data: [],
+          total_transaction: moneyFormat(0),
+          folio: null,
+          ledger_id: ledger ?? null,
+        });
+        return;
+      }
+
+      let filtered = txns;
+      if (filter === 'void') filtered = filtered.filter((t: any) => t.is_void);
+      if (filter === 'refund') filtered = filtered.filter((t: any) => t.type === 'refund' || t.type === 'additional_refund');
+      if (filter === 'split') filtered = filtered.filter((t: any) => t.is_split);
+      if (filter === 'consolidate') filtered = filtered.filter((t: any) => t.is_consolidate);
+      if (filter === 'transfer') filtered = filtered.filter((t: any) => t.is_transfer);
+
+      const userIds = new Set<bigint>();
+      filtered.forEach((t: any) => { if (t.created_by) userIds.add(BigInt(t.created_by)); if (t.updated_by) userIds.add(BigInt(t.updated_by)); });
+      const users = userIds.size ? await prisma.users.findMany({ where: { id: { in: [...userIds] } }, select: { id: true, name: true } }) : [];
+      const userMap = new Map(users.map((u: any) => [String(u.id), u.name]));
+
+      const modelIds = filtered.filter((t: any) => t.model_id).map((t: any) => t.model_id);
+      const [companies, guests] = await Promise.all([
+        prisma.company_profiles.findMany({ where: { id: { in: modelIds } }, select: { id: true, name: true } }).catch(() => []),
+        prisma.guest_profiles.findMany({ where: { id: { in: modelIds } }, select: { id: true, first_name: true, last_name: true } }).catch(() => []),
+      ]);
+      const modelMap = new Map<string, string>();
+      companies.forEach((c: any) => modelMap.set(String(c.id), c.name));
+      guests.forEach((g: any) => modelMap.set(String(g.id), `${g.first_name || ''} ${g.last_name || ''}`.trim()));
+
+      const formatRow = (t: any): any => {
+        const isMinus = t.type_amount === 'MINUS';
+        const minus = (v: any) => (isMinus ? -Number(v || 0) : Number(v || 0));
+        const systemTypes = ['room_revenue', 'extra_bed', 'room_inclusive', 'extra_bed_inclusive'];
+        let staff = 'POS';
+        if (t.is_void || t.is_transfer || t.is_split || t.is_consolidate) {
+          staff = (t.updated_by && userMap.get(String(t.updated_by))) || (t.created_by && userMap.get(String(t.created_by))) || 'SYSTEM';
+        } else if (systemTypes.includes(t.type)) {
+          staff = 'SYSTEM';
+        } else {
+          staff = (t.created_by && userMap.get(String(t.created_by))) || 'POS';
+        }
+        const code = t.code_name ?? t.type_payment_name ?? null;
+        return {
+          id: Number(t.id),
+          date: t.date ? new Date(t.date).toLocaleDateString('en-GB').replace(/\//g, '/') : '',
+          folio_id: Number(t.folio_id),
+          folio_number: folio.folio_number,
+          type: t.type,
+          code,
+          description: t.description,
+          card_name: t.card_name,
+          last_digit_card: t.last_digit_card,
+          voucher: t.voucher,
+          total: minus(t.total),
+          rate: minus(t.amount),
+          pb1: minus(t.pb1),
+          svr_chrg: minus(t.svr_chrg),
+          surcharge: minus(t.surcharge),
+          tax3: minus(t.tax3),
+          remark: t.is_void || t.is_split || t.is_transfer ? (t.remark || '') : '',
+          staff,
+          time: t.created_at ? new Date(t.created_at).toISOString().slice(0, 19).replace('T', ' ') : '',
+          bill_to: (t.model_id && modelMap.get(String(t.model_id))) || '',
+          reference: t.reference,
+          pos: t.pos,
+          receipt: t.receipt,
+          balance: '*****',
+          closingFormat: '',
+          created_at: t.created_at,
+          created_by: Number(t.created_by ?? 0),
+          is_void: !!t.is_void,
+          is_transfer: !!t.is_transfer,
+          is_consolidate: !!t.is_consolidate,
+          is_split: !!t.is_split,
+          status: t.status,
+          is_view: true,
+          is_edit: true,
+          is_need_approval: false,
+        };
+      };
+
+      const rows = filtered.map(formatRow);
+      const totalTransaction = filtered.reduce((sum: number, t: any) => sum + (t.type_amount === 'MINUS' ? -Number(t.total || 0) : Number(t.total || 0)), 0);
+
+      const lastReservation = folio.reservations?.[folio.reservations.length - 1] || null;
+      success(res, rows, 'Success', 200, {
+        folio: {
+          id: Number(folio.id),
+          folio_number: folio.folio_number,
+          guest_name: `${folio.first_name || ''} ${folio.last_name || ''}`.trim() || null,
+          is_cancel: folio.status_reservation === 2,
+          is_parent_git: folio.type_reservation === 'git' && Number(folio.parent) === 0,
+          is_sub_git: folio.type_reservation === 'git' && Number(folio.parent) !== 0,
+          is_vr: folio.type_reservation === 'vr',
+          status_reservation: folio.status_reservation,
+          special_instruction: {
+            remark: folio.remark || '',
+            is_gh: !!folio.is_gh,
+            check_in_instruction: folio.check_in_instruction || '',
+            check_out_instruction: folio.check_out_instruction || '',
+            posting_instruction: folio.posting_instruction || '',
+            remark_ins: folio.remark || '',
+          },
+          check_in_date: folio.check_in_date,
+          check_out_date: folio.check_out_date,
+          room: lastReservation?.room_name || '',
+          room_type: lastReservation?.room_type_name || '',
+        },
+        ledger_id: ledger ?? null,
+        table,
+        pagging: { current_page: page, last_page: 1, per_page: limit, total: rows.length, from: rows.length ? 1 : 0, to: rows.length },
+        permission,
+        search_data: [],
+        total_transaction: moneyFormat(totalTransaction),
       });
     } catch (err: any) { console.error('Transaction list error:', err); error(res, 'Failed to list transactions', 500); }
   }

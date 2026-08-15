@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { moneyFormat } from '../utils/cmsConfig';
+import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -11,11 +13,12 @@ const prisma = new PrismaClient({ adapter });
 
 // Status reservation constants (matching Laravel config/cms.php)
 const STATUS_RESERVATION = {
-  reservation: { id: 1, code: 'reservation', name: 'Reservation' },
-  check_in: { id: 2, code: 'check_in', name: 'Check In' },
-  check_out: { id: 3, code: 'check_out', name: 'Check Out' },
-  cancel_reservation: { id: 4, code: 'cancel_reservation', name: 'Cancel Reservation' },
-  pending: { id: 0, code: 'pending', name: 'Pending' },
+  check_in: { id: 0, code: 'check_in', name: 'Check In' },
+  check_out: { id: 1, code: 'check_out', name: 'Check Out' },
+  cancel_reservation: { id: 2, code: 'cancel_reservation', name: 'Cancelled' },
+  reservation: { id: 3, code: 'reservation', name: 'Reservation' },
+  in_house: { id: 4, code: 'in_house', name: 'In House' },
+  pending: { id: 5, code: 'pending', name: 'Pending' },
 };
 
 const STATUS_ACTIVE = 1;
@@ -815,80 +818,433 @@ export class ReservationController {
   // ─────────────────────────────────────────────
   // GET /api/reservations/:id/edit
   // ─────────────────────────────────────────────
+  // Replicates Laravel Folio::formatData (+ ReservationController@edit master) — GET /reservation/:id/update
   static async edit(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
+      const pid = req.user?.lastProperty ?? 0n;
+      const businessDate = new Date();
 
-      const [folio, companies, roomTypes, types] = await Promise.all([
-        prisma.folios.findUnique({
-          where: { id },
-          include: {
-            reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' } },
-          },
-        }),
-        prisma.company_profiles.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
-          select: { id: true, name: true },
-          orderBy: { name: 'asc' },
-        }),
-        prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
-          select: { id: true, name: true },
-          orderBy: { name: 'asc' },
-        }),
-        prisma.types.findMany({
-          where: {
-            deleted_at: null,
-            status: STATUS_ACTIVE,
-            group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status'] },
-          },
-          select: { id: true, name: true, group: true },
-        }),
+      const folio = await prisma.folios.findUnique({
+        where: { id },
+        include: {
+          company_profiles_folios_company_profile_idTocompany_profiles: true,
+          company_profiles_folios_booking_agent_idTocompany_profiles: true,
+          reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, include: { room_types: true, rates: true } },
+        },
+      });
+
+      if (!folio || folio.deleted_at) { notFound(res, 'Not Found'); return; }
+
+      const [guestProfile, countryOf, countryNationality, cityOf, contactPerson] = await Promise.all([
+        folio.guest_profile_id ? prisma.guest_profiles.findUnique({ where: { id: folio.guest_profile_id } }) : null,
+        folio.country_id ? prisma.countries.findUnique({ where: { id: BigInt(folio.country_id) } }).catch(() => null) : null,
+        folio.nationality_id ? prisma.countries.findUnique({ where: { id: BigInt(folio.nationality_id) } }).catch(() => null) : null,
+        folio.city_id ? prisma.cities.findUnique({ where: { id: BigInt(folio.city_id) } }).catch(() => null) : null,
+        folio.contact_person_id ? prisma.company_profile_contact_persons.findUnique({ where: { id: folio.contact_person_id } }).catch(() => null) : null,
       ]);
 
-      if (!folio || folio.deleted_at) {
-        notFound(res, 'Not Found');
-        return;
+      const isParentGit = folio.type_reservation?.toLowerCase() === 'git' && Number(folio.parent) === 0;
+      const isSubGit = folio.type_reservation?.toLowerCase() === 'git' && Number(folio.parent) !== 0;
+      const isVr = folio.type_reservation === 'vr';
+      const isCancel = folio.status_reservation === 2;
+      const isCheckout = folio.status_reservation === 1;
+      const isCheckin = folio.status_reservation === 0;
+
+      // GIT parent: reservations come from first child folio (Laravel childFolio()->first())
+      let reservations = folio.reservations;
+      let childFolio: any = null;
+      if (isParentGit) {
+        childFolio = await prisma.folios.findFirst({
+          where: { parent: id, deleted_at: null },
+          orderBy: { id: 'asc' },
+          include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, include: { room_types: true, rates: true } } },
+        });
+        if (childFolio) reservations = childFolio.reservations;
       }
+      const reservationsMeta = isParentGit && childFolio ? childFolio : folio;
+
+      const [typeLinks, roomRows] = await Promise.all([
+        prisma.model_has_types.findMany({ where: { model_type: { contains: 'Folio' }, model_id: id }, include: { types: true } }),
+        prisma.rooms.findMany({
+          where: {
+            OR: [
+              { id: { in: reservations.filter((r: any) => r.room_id).map((r: any) => r.room_id) } },
+              { id: { in: reservations.filter((r: any) => r.room_id_next).map((r: any) => r.room_id_next) } },
+            ],
+          },
+        }),
+      ]);
+      const roomMap = new Map(roomRows.map((r: any) => [Number(r.id), r]));
+
+      const folioTypes = (group: string): any => {
+        const t = typeLinks.find((l: any) => l.types?.group === group);
+        return t?.types ? { value: Number(t.types.id), label: t.types.name } : [];
+      };
+
+      const [companies, roomTypes, types, property, contacts] = await Promise.all([
+        prisma.company_profiles.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.room_types.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status'] } },
+          select: { id: true, name: true, group: true },
+        }),
+        prisma.properties.findUnique({ where: { id: pid }, include: { cities: true } }),
+        prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+      ]);
+
+      const uidCols = [
+        'pb1_account_uid',
+        'service_charge_account_uid',
+        'tax_account_uid',
+        'surcharge_account_uid',
+        'advance_deposit_current_day_account_uid',
+        'advance_deposit_previous_day_account_uid',
+        'guest_ledger_current_day_account_uid',
+        'guest_ledger_previous_day_account_uid',
+        'day_use_item_code',
+      ];
+      const uidIds = uidCols.map((c: string) => (property as any)?.[c]).filter((v: any) => v != null).map((v: any) => BigInt(v));
+      const codePosts = uidIds.length ? await prisma.code_posts.findMany({ where: { id: { in: uidIds } }, select: { id: true, name: true } }) : [];
+      const cpMap = new Map(codePosts.map((c: any) => [Number(c.id), c]));
+      const cpLabel = (v: any): { value: number | null; label: string } => {
+        if (v == null) return { value: null, label: '' };
+        const cp = cpMap.get(Number(v));
+        return { value: Number(v), label: cp ? `${cp.description} (${cp.name})` : '' };
+      };
+
+      const contactMap = new Map(contacts.map((c: any) => [Number(c.id), c.name]));
+      const roomCount = await prisma.rooms.count({ where: { property_id: pid, deleted_at: null } });
 
       const groupBy = (arr: any[], key: string) =>
-        arr.reduce((acc, item) => {
-          (acc[item[key]] = acc[item[key]] || []).push(item);
-          return acc;
-        }, {} as any);
-
+        arr.reduce((acc, item) => { (acc[item[key]] = acc[item[key]] || []).push(item); return acc; }, {} as any);
       const grouped = groupBy(types, 'group');
+      const toOpt = (arr: any[]) => arr.map((t: any) => ({ value: Number(t.id), label: t.name }));
+      const statusGuestArr = toOpt(grouped['guest-status'] || []);
+      const statusGuestSorted = [
+        ...statusGuestArr.filter((i: any) => i.label.toLowerCase().includes('normal')),
+        ...statusGuestArr.filter((i: any) => !i.label.toLowerCase().includes('normal')),
+      ];
+      const normalFallback = statusGuestArr.find((i: any) => i.label.toLowerCase().includes('normal')) || { value: 1, label: 'Normal' };
 
+      // ---- master ----
       const master = {
-        companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
-        room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
-        market_segment_1: (grouped['market-segment-1'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
-        market_segment_2: (grouped['market-segment-2'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
-        market_segment_3: (grouped['market-segment-3'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
-        market_segment_4: (grouped['market-segment-4'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
-        source: (grouped['source'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
-        status_guests: (grouped['guest-status'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
         statuses: [
-          { value: STATUS_ACTIVE, label: 'Active' },
+          { value: 1, label: 'Active' },
           { value: 0, label: 'Inactive' },
         ],
-        status_reservations: [
-          { value: STATUS_RESERVATION.reservation.code, label: STATUS_RESERVATION.reservation.name },
-          { value: STATUS_RESERVATION.pending.code, label: STATUS_RESERVATION.pending.name },
-          { value: STATUS_RESERVATION.check_in.code, label: STATUS_RESERVATION.check_in.name },
-          { value: STATUS_RESERVATION.check_out.code, label: STATUS_RESERVATION.check_out.name },
-          { value: STATUS_RESERVATION.cancel_reservation.code, label: STATUS_RESERVATION.cancel_reservation.name },
+        nrics: [
+          { value: 0, label: 'KTP' }, { value: 1, label: 'Paspor' }, { value: 2, label: 'SIM' }, { value: 3, label: 'KITAS' },
         ],
+        genders: [{ value: 'Male', label: 'Male' }, { value: 'Female', label: 'Female' }],
+        regions: ['Asia', 'Europe', 'Africa', 'America', 'Oceania', 'Polar'].map((r) => ({ value: r, label: r })),
+        market_segment_1: toOpt(grouped['market-segment-1'] || []),
+        market_segment_2: toOpt(grouped['market-segment-2'] || []),
+        market_segment_3: toOpt(grouped['market-segment-3'] || []),
+        market_segment_4: toOpt(grouped['market-segment-4'] || []),
+        source: toOpt(grouped['source'] || []),
+        status_reservations: Object.entries(STATUS_RESERVATION).map(([k, v]: any) => ({ value: v.id, label: v.name })),
+        status_guests: statusGuestSorted,
         typemulti: [
-          { label: 'FIT', value: 'fit' },
-          { label: 'GIT', value: 'git' },
-          { label: 'VR', value: 'vr' },
-          { label: 'Day Use', value: 'day-use' },
+          { label: 'Normal', value: 'normal' },
+          { label: 'Walk In', value: 'is_walk_in' },
+          { label: 'House Use', value: 'is_house_use' },
+          { label: 'Complimentary', value: 'complimentary' },
+        ],
+        cardtypes: ['KTP', 'Paspor', 'SIM', 'KITAS'].map((c) => ({ value: c, label: c })),
+        companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
+        legend: [
+          { label: 'BAR', color: 'bg-secondary text-white rounded-md font-semibold' },
+          { label: 'COMPANY APPLICABLE', color: 'bg-success text-white rounded-md font-semibold' },
+          { label: 'APPLICABLE FOR ALL', color: 'bg-primary text-white rounded-md font-semibold' },
+        ],
+        markets: {
+          id: Number(property?.id ?? 0),
+          city: property?.cities?.name ?? null,
+          name: property?.name ?? '',
+          email: property?.email ?? null,
+          telp: property?.telp ? String(property.telp) : null,
+          is_tax: { value: !!property?.is_tax, label: property?.is_tax ? 'Yes' : 'No' },
+          is_tax_exclude_restaurant: { value: !!property?.is_tax_exclude_restaurant, label: property?.is_tax_exclude_restaurant ? 'Yes' : 'No' },
+          is_tax_exclude_room: { value: !!property?.is_tax_exclude_room, label: property?.is_tax_exclude_room ? 'Yes' : 'No' },
+          pb1_account_uid: cpLabel(property?.pb1_account_uid),
+          service_charge_account_uid: cpLabel(property?.service_charge_account_uid),
+          tax_account_uid: cpLabel(property?.tax_account_uid),
+          surcharge_account_uid: cpLabel(property?.surcharge_account_uid),
+          advance_deposit_current_day_account_uid: cpLabel(property?.advance_deposit_current_day_account_uid),
+          advance_deposit_previous_day_account_uid: cpLabel(property?.advance_deposit_previous_day_account_uid),
+          guest_ledger_current_day_account_uid: cpLabel(property?.guest_ledger_current_day_account_uid),
+          guest_ledger_previous_day_account_uid: cpLabel(property?.guest_ledger_previous_day_account_uid),
+          day_use_item_code: cpLabel(property?.day_use_item_code),
+          room_count: roomCount,
+          is_market_segment_1: !!property?.market_segment_1,
+          is_market_segment_2: !!property?.market_segment_2,
+          is_market_segment_3: !!property?.market_segment_3,
+          is_market_segment_4: !!property?.market_segment_4,
+          is_source: !!property?.source,
+          mandatory_check_in: [],
+        },
+      };
+
+      // ---- reservation items (Laravel reservationListFormat grouped by rate-adult-child-add_bed-room_type-room) ----
+      const roomStatusLabel = (code: any, name: string | null): string => {
+        if (name) return name;
+        const m = Object.values(ROOM_STATUSES).find((s: any) => s.id === Number(code));
+        return m?.name ?? String(code ?? '');
+      };
+
+      const isDayUse = !!folio.is_day_use;
+      const lastReservation = reservations[reservations.length - 1] || null;
+      const lastRoom = lastReservation?.room_id ? roomMap.get(Number(lastReservation.room_id)) : null;
+
+      const base64Key = (r: any) => `${r.rate_id}-${r.adult}-${r.child}-${r.add_bed}-${r.room_type_id}-${r.room_id}`;
+      const groupsMap = new Map<string, any[]>();
+      reservations.forEach((r: any) => {
+        const k = base64Key(r);
+        if (!groupsMap.has(k)) groupsMap.set(k, []);
+        groupsMap.get(k)!.push(r);
+      });
+
+      const reservationItems: any[] = [];
+      groupsMap.forEach((rows: any[]) => {
+        const first = rows[0];
+        const checkInDate = reservationsMeta.check_in_date ? new Date(reservationsMeta.check_in_date).toISOString().slice(0, 10) : (first.date ? new Date(first.date).toISOString().slice(0, 10) : '');
+        let checkOutDate: string;
+        if (isParentGit || reservationsMeta.check_out_date) {
+          checkOutDate = new Date(reservationsMeta.check_out_date).toISOString().slice(0, 10);
+        } else if (groupsMap.size > 1) {
+          const lastRow = rows[rows.length - 1];
+          const d = lastRow.date ? new Date(lastRow.date) : new Date();
+          d.setDate(d.getDate() + 1);
+          checkOutDate = d.toISOString().slice(0, 10);
+        } else {
+          checkOutDate = folio.check_out_date ? new Date(folio.check_out_date).toISOString().slice(0, 10) : (first.date ? new Date(first.date).toISOString().slice(0, 10) : '');
+        }
+
+        let isPosting = first.is_posting;
+        if (isCheckin && businessDate.toISOString().slice(0, 10) <= checkOutDate && businessDate.toISOString().slice(0, 10) > checkInDate) isPosting = -1;
+        if (isVr) isPosting = -1;
+        if (folio.is_day_use && isCheckin) isPosting = 0;
+
+        const night = isDayUse ? 0 : Math.max(0, Math.round((new Date(checkOutDate).getTime() - new Date(checkInDate).getTime()) / 86400000));
+
+        const rateLabel = first.rate_name ?? first.rates?.code ?? '';
+        reservationItems.push({
+          id: Number(first.id),
+          eta: first.eta ? new Date(first.eta).toISOString().slice(0, 16) : null,
+          etd: first.etd ? new Date(first.etd).toISOString().slice(0, 16) : null,
+          ata: first.ata ? new Date(first.ata).toISOString().slice(0, 16) : null,
+          atd: first.atd ? new Date(first.atd).toISOString().slice(0, 16) : null,
+          adult: first.adult,
+          child: first.child,
+          add_bed: first.add_bed,
+          reason: first.remark,
+          check_in_date: checkInDate,
+          check_out_date: checkOutDate,
+          room_type_id: first.room_type_id ? { value: Number(first.room_type_id), label: first.room_type_name ?? first.room_types?.name ?? '' } : [],
+          room_id: first.room_id ? { value: Number(first.room_id), label: first.room_name ?? roomMap.get(Number(first.room_id))?.name ?? '' } : [],
+          room_type_id_origin: first.room_type_id ? { value: Number(first.room_type_id), label: first.room_types?.name ?? '' } : [],
+          room_id_origin: { value: first.room_id ? Number(first.room_id) : 0, label: first.room_id ? (roomMap.get(Number(first.room_id))?.name ?? '') : '' },
+          room_type_id_next: first.room_type_id_next ? { value: Number(first.room_type_id_next), label: '' } : [],
+          room_id_next: first.room_id_next ? { value: Number(first.room_id_next), label: roomMap.get(Number(first.room_id_next))?.name ?? '' } : [],
+          change_room: first.room_id_next != null,
+          night,
+          is_room_change: !!first.room_type_id_next,
+          rate_id: first.rate_id ? { value: Number(first.rate_id), label: rateLabel } : [],
+          is_posting: isPosting,
+          date: first.date ? new Date(first.date).toISOString().slice(0, 10) : null,
+          package_id: first.package_id ? { value: Number(first.package_id), time: null, label: '' } : [],
+          quantity: first.quantity,
+          quantity_extra_day_use: first.quantity_extra_day_use,
+          is_extra_day_use: !!first.is_extra_day_use,
+          is_24_hour: !!first.is_24_hour,
+        });
+      });
+
+      // ---- revenue (Laravel getRevenue) ----
+      let revenueReservations = reservations;
+      if (isParentGit && childFolio) revenueReservations = childFolio.reservations;
+      const revenueDate: any[] = [];
+      let roomCharge = 0, pb1 = 0, service = 0, tax3 = 0;
+      revenueReservations.forEach((r: any) => {
+        const charge = Number(r.amount ?? 0);
+        revenueDate.push({ date: r.date ? new Date(r.date).toLocaleDateString('en-GB') : '', charge: moneyFormat(charge) });
+        roomCharge += charge;
+        pb1 += Number(r.pb1 ?? 0);
+        service += Number(r.service_charge ?? 0);
+        tax3 += Number(r.tax3 ?? 0);
+      });
+      const revenue = {
+        date: revenueDate,
+        charge: [
+          { label: 'Room Charge', value: moneyFormat(roomCharge) },
+          { label: 'PB1', value: moneyFormat(pb1) },
+          { label: 'Service Charge', value: moneyFormat(service) },
+          { label: 'Total Room Charge', value: moneyFormat(roomCharge + pb1 + tax3 + service) },
         ],
       };
 
-      success(res, bigintToNumber({ ...folio, master }), 'Success');
+      // ---- balance (Laravel getBalance) ----
+      const balanceWhere = { where: { deleted_at: null } as any };
+      const balanceTargets = isParentGit
+        ? [{ id, parent: true }, ...(await prisma.folios.findMany({ where: { parent: id, deleted_at: null }, select: { id: true } })).map((f: any) => ({ id: f.id, parent: false }))]
+        : [{ id, parent: isSubGit }];
+      const txns = await prisma.transactions.findMany({ where: { folio_id: { in: balanceTargets.map((t: any) => t.id) }, deleted_at: null }, select: { folio_id: true, model_type: true, type_amount: true, total: true } });
+      let balance = 0;
+      txns.forEach((t: any) => {
+        const target = balanceTargets.find((x: any) => x.id === t.folio_id);
+        if (!target) return;
+        if (target.parent) {
+          if (t.model_type?.includes('CompanyProfile')) {
+            balance += t.type_amount === 'MINUS' ? -Number(t.total || 0) : Number(t.total || 0);
+          }
+        } else if (isSubGit) {
+          if (t.model_type?.includes('GuestProfile')) {
+            balance += t.type_amount === 'MINUS' ? -Number(t.total || 0) : Number(t.total || 0);
+          }
+        } else {
+          balance += t.type_amount === 'MINUS' ? -Number(t.total || 0) : Number(t.total || 0);
+        }
+      });
+
+      const guestName = (f: string | null, l: string | null, account?: string | null): string =>
+        (f ?? '') !== '' || (l ?? '') !== '' ? `${f ?? ''} ${l ?? ''}`.trim() : (account ?? '');
+
+      const statusReservationValue = folio.status_reservation === 3 && folio.is_request_cancel
+        ? { value: folio.status_reservation, label: 'Request Cancel' }
+        : { value: folio.status_reservation ?? 3, label: STATUS_RESERVATION_MAP[folio.status_reservation ?? 3] ?? 'Reservation' };
+
+      const data = {
+        id: Number(folio.id),
+        is_parent: Number(folio.parent) > 0 ? false : true,
+        is_parent_git: isParentGit,
+        is_sub_git: isSubGit,
+        is_vr: isVr,
+        is_cancel: isCancel || isCheckout || folio.is_pending,
+        is_checkin: isCheckin,
+        is_early_checkout: folio.check_out_date ? businessDate.toISOString().slice(0, 10) < new Date(folio.check_out_date).toISOString().slice(0, 10) : false,
+        is_has_auto_transfer: false,
+        is_has_folio_auto_transfer: false,
+        company_profile_id: folio.company_profile_id ? Number(folio.company_profile_id) : null,
+        date_arrival: folio.date_arrival ? new Date(folio.date_arrival).toLocaleDateString('en-GB').replace(/\//g, '-') : null,
+        reservation: {
+          folio: folio.folio_number,
+          status_reservation: statusReservationValue,
+          company_id: { value: folio.company_profile_id ? Number(folio.company_profile_id) : null, label: folio.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? null },
+          room_status: lastRoom ? { value: Number(lastRoom.room_status), label: roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name) } : [],
+          cash_on_arrival: !!folio.cash_on_arrival,
+          guaranted: !!folio.guaranted,
+          print_status: !!folio.print_status,
+          use_allotment: !!folio.use_allotment,
+          is_do_not_disturb: !!folio.is_do_not_disturb,
+          is_incognito: !!folio.is_incognito,
+          is_long_stay: !!folio.is_long_stay,
+          is_compliment_tour_leader: !!folio.is_compliment_tour_leader,
+          is_pending: !!folio.is_pending,
+          res_date: folio.res_date ? new Date(folio.res_date).toLocaleDateString('en-GB').replace(/\//g, '-') : '',
+          res_time: folio.res_time ? new Date(folio.res_time).toISOString().slice(11, 16) : '00:00',
+          cut_off_date: folio.check_in_date ? new Date(new Date(folio.check_in_date).getTime() - 86400000).toLocaleDateString('en-GB').replace(/\//g, '-') : '',
+          booking_agent_id: folio.booking_agent_id ? { value: Number(folio.booking_agent_id), label: folio.booking_agent_id ? '' : null } : [],
+          contact_person_id: folio.contact_person_id ? { value: Number(folio.contact_person_id), label: contactMap.get(Number(folio.contact_person_id)) ?? '' } : [],
+          limit_1: folio.limit_1,
+          limit_2: folio.limit_2,
+          flight_or_car: folio.flight_or_car,
+          loyalty_card: folio.loyalty_card,
+          loyalty_card_number: folio.loyalty_card_number,
+          booking_no: folio.booking_no,
+          market_segment_1: folioTypes('market-segment-1'),
+          market_segment_2: folioTypes('market-segment-2'),
+          market_segment_3: folioTypes('market-segment-3'),
+          market_segment_4: folioTypes('market-segment-4'),
+          source: folioTypes('source'),
+          remark: folio.remark,
+          promo_code: folio.promo_code,
+        },
+        guest: {
+          guest_name: guestName(guestProfile?.first_name ?? null, guestProfile?.last_name ?? null, guestProfile?.account),
+          guest_profile_id: folio.guest_profile_id ? Number(folio.guest_profile_id) : null,
+          card_type: { value: folio.card_type, label: folio.card_type },
+          card_number: guestProfile?.card_number ?? null,
+          card_expiry: folio.card_expiry,
+          email: guestProfile?.email ?? null,
+          status_profile: folioTypes('guest-status') || normalFallback,
+          gender: folio.gender ? { value: folio.gender, label: folio.gender } : [],
+          birth_of_date: guestProfile?.birth_of_date ? new Date(guestProfile.birth_of_date).toISOString().slice(0, 10) : null,
+          telp: guestProfile?.telp,
+          mobile_phone: guestProfile?.mobile_phone,
+          nationality_id: { value: folio.nationality_id ?? null, label: countryNationality?.name ?? null },
+          is_subscribe: !!folio.is_subscribe,
+          is_do_not_contact: !!folio.is_subscribe,
+          guest_stay: null,
+          address: folio.address,
+          city_id: { value: folio.city_id ?? null, label: cityOf?.name ?? null },
+          country_id: { value: folio.country_id ?? null, label: countryOf?.name ?? null },
+          postal_code: folio.postal_code,
+          guest_status: folioTypes('guest-status') || normalFallback,
+          image: folio.image,
+        },
+        special_instruction: {
+          remark: String(folio.remark ?? ''),
+          is_gh: !!folio.is_gh,
+          check_in_instruction: String(folio.check_in_instruction ?? ''),
+          check_out_instruction: String(folio.check_out_instruction ?? ''),
+          posting_instruction: String(folio.posting_instruction ?? ''),
+          remark_ins: folio.remark ?? null,
+        },
+        reservation_items: reservationItems,
+        reservation_confirm: reservationItems.filter((r: any) => r.change_room),
+        is_change_room: reservations.some((r: any) => r.room_id_next != null),
+        balance: moneyFormat(balance),
+        revenue,
+        room_status: lastRoom ? roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name) : '',
+        total_night: folio.check_in_date && folio.check_out_date ? Math.round((new Date(folio.check_out_date).getTime() - new Date(folio.check_in_date).getTime()) / 86400000) : 0,
+        is_do_not_move: true,
+        type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
+        guest_profile_id: folio.guest_profile_id ? Number(folio.guest_profile_id) : null,
+        check_in_date: folio.check_in_date,
+        check_out_date: folio.check_out_date,
+        guest_name: guestName(folio.first_name, folio.last_name, guestProfile?.account),
+        company: (folio.company_name ?? '') !== '' ? folio.company_name : folio.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? null,
+        actions: [],
+        guest_status: folioTypes('guest-status') || normalFallback,
+        guest_status_color: [
+          {
+            label: String((folioTypes('guest-status') || normalFallback).label ?? 'Normal').replace(/\s+/g, '-'),
+            color: ['VIP', 'VVIP', 'VVVIP'].includes(String((folioTypes('guest-status') || normalFallback).label ?? '').toUpperCase()) ? 'bg-yellow' : 'bg-green',
+            is_color: true,
+          },
+        ],
+        stay: null,
+        room: lastRoom?.name ?? null,
+        room_type: lastReservation?.room_type_name ?? lastReservation?.room_types?.name ?? null,
+        status_reservation: statusReservationValue.label,
+        status_reservation_color: [{ label: String(statusReservationValue.label).replace(/\s+/g, '-'), color: '', is_color: true }],
+        room_clean_status_color: lastRoom ? [{ label: String(lastReservation?.maid_status_name ?? '').replace(/\s+/g, '-'), color: '', is_color: true }] : [],
+        room_status_color: lastRoom ? [{ label: String(roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name)).replace(/\s+/g, '-'), color: '', is_color: true }] : [],
+        room_clean_status: lastReservation?.maid_status_name ?? '',
+        remark_folio: folio.remark,
+        remark: folio.remark,
+        remark_bool: !!(folio.remark !== '' || folio.posting_instruction !== '' || folio.check_out_instruction !== '' || folio.check_in_instruction !== ''),
+        ign: !!folio.is_incognito,
+        message_bool: false,
+        folio_number: folio.folio_number,
+        formated_guest_profile: guestProfile ? `${guestProfile.account}, ${folio.first_name ?? ''} ${folio.last_name ?? ''}` : null,
+        created_at: folio.created_at,
+        updated_at: folio.updated_at,
+        deleted_at: folio.deleted_at,
+        created_by: folio.created_by ? Number(folio.created_by) : null,
+        updated_by: folio.updated_by ? Number(folio.updated_by) : null,
+        comm_code: folioTypes('comm-code'),
+        status: { value: 1, label: 'Active' },
+        sharer: '',
+        aa: reservations[0]?.adult,
+        cc: reservations[0]?.child,
+        mandatory_check_in: { fields: [], missing_fields: [], is_complete: true },
+      };
+
+      success(res, data, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Reservation edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -965,14 +1321,26 @@ export class ReservationController {
       if (actualCheckIn) updateData.check_in_date = new Date(actualCheckIn);
       if (actualCheckOut) updateData.check_out_date = new Date(actualCheckOut);
       if (is_pending !== undefined) {
-        updateData.is_pending = is_pending;
+        updateData.is_pending = !!is_pending;
         if (is_pending) {
           updateData.status_reservation = STATUS_RESERVATION.pending.id;
         } else if (updateData.status_reservation === undefined) {
           updateData.status_reservation = STATUS_RESERVATION.reservation.id;
         }
       }
-      if (status_reservation !== undefined) updateData.status_reservation = status_reservation;
+      if (status_reservation !== undefined) {
+        // Frontend mengirim label ("Check In"), code ("check_in"), atau id (0). Normalisasi ke id.
+        let sr: any = status_reservation;
+        if (typeof sr === 'object' && sr !== null) sr = sr.value ?? sr.id;
+        if (typeof sr === 'string' && !/^\d+$/.test(sr)) {
+          const lower = sr.toLowerCase();
+          const found = Object.values(STATUS_RESERVATION).find((s: any) =>
+            s.code.toLowerCase() === lower || s.name.toLowerCase() === lower || lower.includes(s.name.toLowerCase())
+          );
+          sr = found ? found.id : (lower === 'request cancel' ? STATUS_RESERVATION.reservation.id : undefined);
+        }
+        if (sr !== undefined) updateData.status_reservation = Number(sr);
+      }
       if (dept_branch !== undefined) updateData.dept_branch = dept_branch;
 
       await prisma.folios.update({ where: { id }, data: updateData });

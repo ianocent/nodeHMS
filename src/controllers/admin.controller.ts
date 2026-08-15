@@ -6,6 +6,8 @@ import { success, error, badRequest, notFound, validationError } from '../utils/
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { TABLES, laravelPaging } from '../utils/tableMeta';
 import { STATUSES, REGIONS, SUBSCRIBE_TYPES, IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS } from '../utils/cmsConfig';
+import { AuthController } from './auth.controller';
+import { TokenService } from '../services/token.service';
 
 const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adminAdapter = new PrismaPg(adminPool);
@@ -475,8 +477,8 @@ export class AdminController {
       if (left !== undefined) upd.left = left;
       if (right !== undefined) upd.right = right;
       if (child_type !== undefined) upd.child_type = child_type;
-      if (sort !== undefined) upd.sort = sort;
-      if (status !== undefined) upd.status = status;
+      if (sort !== undefined) upd.sort = Number(sort);
+      if (status !== undefined) upd.status = Number(status);
       await getPrisma().menus.update({ where: { id }, data: upd });
       success(res, null, 'Menu updated');
     } catch (err: any) { error(res, 'Failed to update menu', 500); }
@@ -503,7 +505,7 @@ export class AdminController {
       const { items } = req.body;
       if (items && Array.isArray(items)) {
         for (const item of items) {
-          await getPrisma().menus.update({ where: { id: BigInt(item.id) }, data: { sort: item.sort ?? 0, parent_id: item.parent_id ? BigInt(item.parent_id) : null, updated_at: new Date() } });
+          await getPrisma().menus.update({ where: { id: BigInt(item.id) }, data: { sort: Number(item.sort ?? 0), parent_id: item.parent_id ? BigInt(item.parent_id) : null, updated_at: new Date() } });
         }
       }
       success(res, null, 'Menu sorted');
@@ -844,28 +846,35 @@ export class AdminController {
         data: { last_property: id },
       });
 
-      // Get current token from auth middleware
-      let tokenHeader = req.headers['x-token'] as string;
-      if (!tokenHeader) {
-        const authHeader = req.headers['authorization'] as string;
-        if (authHeader?.startsWith('Bearer ')) tokenHeader = authHeader.slice(7);
-      }
+      // Get user roles
+      const modelRoles = await getPrisma().model_has_roles.findMany({
+        where: {
+          model_type: 'App\\Models\\User',
+          model_id: user.id,
+        },
+        include: { roles: true },
+      });
+      const roleNames = modelRoles.map(mr => mr.roles.name);
+      const roleIds = modelRoles.map(mr => mr.roles.id);
+      if (roleNames.length === 0) { badRequest(res, 'Role not found'); return; }
 
-      success(res, {
-        id: Number(property.id),
+      // Fresh token scoped to the property (Laravel: createToken($email, ['can-'.$id]))
+      const { plainTextToken, createdAt } = await TokenService.createToken(user.id, user.email, [`can-${id}`]);
+
+      // Full login payload scoped to the new property
+      const data = await AuthController.buildLoginData(user, roleIds, roleNames, plainTextToken, createdAt, id);
+
+      // Raw response — Laravel PropertyController@auth puts name/image/mandatory_check_in
+      // at the TOP LEVEL and the user payload inside `data` (Profile.tsx reads
+      // datajsonp?.name + datajsonp?.data.* after choosing a property).
+      res.status(200).json({
+        code: 200,
+        message: 'Success',
         name: property.name,
-        alias: property.alias,
         image: property.logo || property.image,
-        address: property.address,
-        email: property.email,
-        phone: property.telp ? Number(property.telp) : null,
-        name_user: user.name,
-        username: user.username,
-        email_user: user.email,
-        role: req.user!.roles,
-        access_token: tokenHeader,
-        last_property: Number(user.last_property),
-      }, 'Success');
+        mandatory_check_in: [],
+        data,
+      });
     } catch (err: any) {
       console.error('Property auth error:', err);
       error(res, 'Failed to authenticate property', 500);

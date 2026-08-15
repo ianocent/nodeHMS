@@ -242,3 +242,82 @@ Catatan lain:
 - package-lock.json frontend-node SUDAH dihapus (yarn.lock sumber kebenaran).
 - Issues nodeHMS #6 #7 #8 CLOSED. Sisa open: nodeHMS #3 (STAAH jobs/ARI), #4 (diff endpoint inventory), #5 (cutover) + hms-frontend #2 (permissionHelper) #3 (API base hardcoded).
 - Langkah berikut: STAAH ARI push + background jobs queue (#3), audit diff route 1:1 (#4), cleanup `.next` basi frontend-node.
+
+## 2026-08-15 sesi parity front-desk/folio/transaction/housekeeping/event (BELUM KECOMMIT)
+
+Keluhan user: "Not Data" (room-status, work-orders, master-capacity, event-list), "Application error: client-side exception" (/event/event-package), folio detail loading forever + tab Transactions kosong, filter frontdesk ga ngefek, 500 Prisma sort string->Int (PUT /cms/setup/3145?group=room-type-grouping, PUT /cms/room-type/11).
+
+### CRITICAL: konstanta STATUS_RESERVATION salah di 3 controller
+- front-desk.controller.ts:14, folio.controller.ts:11, reservation.controller.ts:13 — tadinya 1/2/3/4/0 (CheckIn=1 dll), Laravel config/cms.php: check_in=0, check_out=1, cancel_reservation=2, reservation=3, in_house=4, pending=5. Dibetulin semua. (utils/cmsStatus.ts STATUS_RESERVATION_MAP 0-5 udah benar.)
+
+### Coercion sort/status string->Int (fix 500 Prisma)
+- admin.controller.ts: menuUpdate sort/status -> Number(); menuSort -> Number(item.sort ?? 0), parent_id BigInt guard.
+- system.controller.ts setupUpdate: status `=== true || === 'true' || === 1 ? 1 : num(status,0)`.
+- housekeeping.controller.ts: setupStore + setupUpdate sort -> num().
+- event.controller.ts: capacityStore/Update pax/venue_id/layout_id/status, packageStore/Update, eventStore/Update, inventoryUpdate — semua num(); eventSort no-op via $executeRawUnsafe (model event_events TIDAK punya kolom sort, schema.prisma:1260).
+
+### Event (routes + controller)
+- event.routes.ts: resource /event-list (list/create/store/:id/edit/update/destroy/delete/sort) + GET /event-list/get-sales-in-charge + /event-list/folio + POST/PUT/DELETE /master-capacity.
+- event.controller.ts capacityList: parity — `table` + `search_data` (options venue/layout) + `permission` + `pagging` (fix master-capacity "Not Data").
+
+### Front-desk list filters (parity Laravel FrontDeskController@index)
+- front-desk.controller.ts list(): + display_status (CSV status_reservation codes -> ids via STATUS_RESERVATION), stay_dates/start_date/end_date (range check_in/check_out, between), where.status_reservation dipertahankan supaya filter type ga ketimpa.
+
+### Transaction list (parity TransactionController@getData + Transaction::formatData/formatTable)
+- front-desk.controller.ts transactionList: validasi folio_id -> data [] "Folio Not Found" + table/pagging/permission/search_data; rows formatData penuh (id/date d/m/Y/code/description/card_name/last_digit_card/voucher/total MINUS*-1/rate/pb1/svr_chrg/surcharge/tax3/remark/staff SYSTEM-POS/bill_to model/balance '*****'/is_void/is_transfer/is_consolidate/is_split/status); filter void/refund/split/consolidate/transfer; total_transaction moneyFormat; folio light {folio_number, guest_name, is_cancel (status==2), is_parent_git (type git+parent 0), is_sub_git, is_vr, status_reservation, special_instruction {remark,is_gh,check_in_instruction,check_out_instruction,posting_instruction,remark_ins}, check_in/out, room, room_type (dari reservation terakhir)}. ApiMeta + total_transaction + ledger_id (response.ts).
+
+### Reservation edit (parity ReservationController@edit + Folio::formatData + reservationListFormat + getRevenue + getBalance + Property::formatData)
+- reservation.controller.ts edit() di-rewrite total: master {statuses, nrics KTP/Paspor/SIM/KITAS, genders, regions, market_segment_1-4, source, status_reservations 0-5, status_guests (normal-first), typemulti (Normal/Walk In/House Use/Complimentary — SEBELUMNYA SALAH fit/git/vr/day-use), cardtypes, companies, room_types, legend BAR/COMPANY/APPLICABLE, markets = formatData property (account UID labels dari code_posts, room_count, is_market_segment_1-4, is_source)}.
+- data: guest (guest_name/guest_profile_id/card_type/card_number/card_expiry/email/status_profile/status_profile via guest-status type/nationality_id {value,label countries}/city_id/country_id/address/postal_code/gender/birth_of_date/telp/mobile_phone/image/guest_status/is_subscribe/is_do_not_contact), reservation (folio/status_reservation {value,label Request Cancel kalau is_request_cancel}/company_id/room_status {value,label via rooms.room_status + ROOM_STATUSES}/cash_on_arrival/guaranted/print_status/use_allotment/is_do_not_disturb/is_incognito/is_long_stay/is_compliment_tour_leader/is_pending/res_date d-m-Y/res_time H:i/cut_off_date check_in-1d/booking_agent_id/contact_person_id/limit_1/limit_2/flight_or_car/loyalty_card/loyalty_card_number/booking_no/market_segment_1-4/source (morph types)/remark/promo_code), special_instruction (6 keys), reservation_items = reservationListFormat grouping base64(rate-adult-child-add_bed-room_type-room) (room_type_id_origin/room_id_origin/room_type_id_next/room_id_next/rate_id {value,label}/change_room bool/night/is_posting rules GIT-parent/VR/day-use/eta/etd/ata/atd/adult/child/add_bed/is_24_hour/quantity/is_extra_day_use), reservation_confirm (change_room), is_change_room, balance (getBalance: parent GIT sum child+self company model_type, sub GIT guest model_type, FIT semua), revenue (date [] + charge Room Charge/PB1/Service/Total moneyFormat), room_status/room_type/guest_name/company/status_reservation/status_reservation_color/room_status_color/room_clean_status_color/is_cancel/is_checkin/is_early_checkout/is_parent_git/is_sub_git/is_vr/is_do_not_move/mandatory_check_in {fields:[], missing_fields:[], is_complete:true} (properties node ga punya kolom mandatory_check_in — Laravel migration belum ke-sync; master.markets.mandatory_check_in []).
+- Gotcha node: folios TIDAK punya relasi Prisma ke guest_profiles/countries/cities/company_profile_contact_persons (fetch manual; countries ga punya deleted_at — pake .catch), folios TIDAK punya kolom deleted_by, code_posts TIDAK punya kolom description.
+
+### Housekeeping room-status (parity HouseKeepingRoomStatusController@index)
+- housekeeping.controller.ts roomStatus(): filter room_status/maid_status (CSV in), room_type (CSV BigInt), floor/building (CSV via model_has_types grup floor/building), search name, is_physical:true; rows formatData (floor/building {value,label} morph, room_status/maid_status {value,label} ROOM_STATUSES/MAID_STATUSES, guest = folio first+last (join reservations room_id in + check_in<=date<=check_out), is_do_not_disturb folio, housekeeper [{value,label}] dari housekeeper_history date+done_inspection:null user_id, room_type_id/property/room_id/sort/cleaning_time/linen_days); table 16 kolom parity formatTable (Unit/Housekeeper select_multiple/Clean Status/Room Status/Room type/Guest Name/DND/Cleaning time/Linen days/Bed/Phone Ext/Max Pax/With TV/With Shower/Floor/Tower); master {roomStatuses, business_date, currentHousekeepers}.
+
+### Work order (parity WorkOrderController@index + WorkOrder::formatData)
+- workOrderList(): rows formatData (reported_by/assign_to {value,label} users, room_id {value,label}, area/work_type {value,label,+value_name} via morph types grup area/work-type, status_work_order Open/On Process/Finish dari start_time/end_time, images JSON-parse, status); table 12 kolom parity formatTable; search_data; workOrderForm master + areas/workTypes.
+- workOrderUpdate: coercion status_work_order/status -> num(), tanggal -> Date(), BigInt guard reported_by/room_id/assign_to.
+
+### Frontend (frontend-node)
+- components/helper/index.tsx: FetchData catch return `false` (tadinya `true` -> datatable=true -> `datatable.table.map` crash di table-edit).
+- components/common/table-edit/index.tsx: 5 call site `datatable.table.map` -> `(datatable?.table ?? []).map` (baris 969/1502/1954/2446 + 1 select).
+- tsc frontend-node bersih.
+
+### Verify
+- backend-node tsc --noEmit bersih (cuma error lama bullmq/ioredis di src/config/queue.ts, deps belum di-install), jest 69/69 PASS.
+- BELUM di-rebuild (dist basi 15/08 01:12) + BELUM direstart + BELUM probe live (Postgres/Laragon down, backend-node ga jalan). Langkah: user restart backend (`npm run build` lalu `npm start`/nodemon), probe via `C:\Users\uzuma\AppData\Local\Temp\opencode\probe-*.js`.
+
+## 2026-08-15 sesi 2: fix 500 update/create + filter + master-event Not Data + floor-plan crash (BELUM KECOMMIT)
+
+Keluhan baru: PUT /reservation/39651 500 (status_reservation String→Int), POST /housekeeping/work-order 500 (area/work_type Int→String), master event (capacity/inventory/venue/layout) Not Data, floor-plan Application error, filter Status Folio frontdesk ga ngefek, input date "[object Object]".
+
+- **reservation update()**: status_reservation normalisasi label/code/object → id (frontend kirim "Check In" — edit.tsx line 1179 set value=label). is_pending coercion !!boolean.
+- **workOrderStore/Update** (housekeeping.controller.ts): area/work_type diubah ke String (kolom DB string, Laravel simpan id sebagai string) + sync morph types `model_has_types` (model_type 'App\\Models\\WorkOrder') via helper syncWorkOrderTypes — parity Laravel `syncTypes` (HasTypes trait). Store tambah unique_code default base64(YmdHis) + status 1.
+- **Master event Not Data** = venue/layout/inventory list TIDAK kirim `table` → TableView `(datatable?.table ?? [])` kosong. Ditambah table + search_data parity formatTable (EventVenue/EventLayout/EventInventory model Laravel); inventory rows formatData code_post_id {value,label} + options code_posts type DEFAULT; STATUSES diimport dari cmsConfig.
+- **frontdesk filter**: display_status kini jadi satu-satunya filter status (skip default type=check_in status+check_in_date) — Laravel bug upstream tetap nampilin reservation; user mau filter beneran.
+- **room-statistic**: POST /room-statistic (extra.routes) tadinya bulk room status update (ga dipakai frontend) → sekarang RoomController.statistics (grid parity) — frontend room-statistic + statistic POST filter. Frontend guard: building?.[0] (index.tsx), `(rw?.map_id ?? '')` (indexSVG.tsx 2 lokasi).
+- **Date "[object Object]"**: birth_of_date dikirim Date object → input date crash. Fix: format Y-m-d di reservation edit() guest + guest.controller formatGuest.
+- Verify: backend tsc bersih, jest 69/69, frontend tsc bersih.
+- BELUM rebuild+restart+probe (user harus restart backend + frontend).
+
+## 2026-08-15 sesi 3: profile menu hilang + warna status + status Active/Inactive + audit dropdown (BELUM KECOMMIT)
+
+Keluhan baru: setelah pilih property, dropdown profil cuma email/change password/download/logout (Switch Property, Business Date, Task Message Details, START SHIFT hilang); nama profile jadi nama property; warna Reservation di list frontdesk ungu harus cyan; status 1/0 harus Active/Inactive; dropdown edit no options; filter frontdesk.
+
+### ROOT CAUSE profil menu hilang: response propertyAuth beda bentuk dari Laravel
+- Laravel `PropertyController@auth` (backend/app/.../Master/PropertyController.php:594-652): `name`/`image`/`mandatory_check_in` di TOP-LEVEL response + payload user di dalam `data` (name=user.name, role, username, email, access_token BARU, expires_token, force_change_password, is_shift, is_need_shift, bussinesDate, permissions).
+- Node `admin.controller.ts propertyAuth` TADINYA kirim `success(res, {...})` → semua di dalam `data` wrapper, tanpa name top-level → frontend Profile.tsx:598 `showPropertyMenus = !!datajsonp?.name` false → menu property hilang; `datajsonp?.data?.name` undefined → header tampil nama property (NameProperty).
+- FIX: propertyAuth di-rewrite parity penuh — raw `res.status(200).json({code:200, message:'Success', name, image, mandatory_check_in:[], data})`; data via helper baru `AuthController.buildLoginData(user, roleIds, roleNames, token, createdAt, propertyId)` (name/role/username/email/access_token/expires_token/force_change_password/is_shift/is_need_shift/bussinesDate/permissions — buildPermissionTree + getBusinessDate + getShiftStatus + getNeedShift). Login() juga refactor pakai helper ini. Token baru scoped `can-${propertyId}` via TokenService.createToken (parity Laravel createToken($email, ['can-'.$id])). Jangan revoke token lama (Laravel tidak revoke di auth property).
+- Frontend choose-property (components/pages/property/index.tsx:31-35) set `imgProperty`/`NameProperty` di root response — sekarang match karena name top-level ada.
+- Backend import admin.controller.ts: + AuthController + TokenService.
+
+### Warna status reservation frontdesk (parity Folio::formatData status_reservation_color + getColorReservation)
+- front-desk.controller.ts TADINYA hardcode `{label:'Reservation', color:'bg-primary'}` untuk semua baris → semua hijau/ungu salah.
+- FIX: helper `statusReservationColor(folio)` + `COLOR_RESERVATION` (getColorReservation: 0 bg-green, 1 bg-purple, 2 bg-red, 3 bg-cyan — Reservation CYAN, 4 bg-blue, 5 bg-yellow) + label `statusReservationLabel` (getStatus name → dash: Check-In/Check-Out/Cancelled/Reservation/In-House/Pending) + case `is_request_cancel` → Request-Cancel bg-yellow.
+
+### Status 1/0 → Active/Inactive (parity User::formatData `{value: bool, label: getStatus}`)
+- Banyak list node kirim `status` INT mentah (spread prisma rows: user, room, rate, content, promotion, dsb) → TableView render "1"/"0" mentah (table-edit/index.tsx:2092-2127 cuma raw untuk number; object → `.label`).
+- FIX GLOBAL di `utils/response.ts success()`: kalau `data` array + meta.table punya entry key 'status' + row.status === 0|1 → map jadi `{value: !!status, label: 'Active'|'Inactive'}`. Satu tempat, kena semua list (user/room/rate/content/promotion/rate-addon/company-contract-rate/dynamic-rate/event/bar/reservation code-item/guest autocomplete). Aman: key 'status_reservation'/'status_profile' tidak disentuh; non-0/1 numeric/string tidak disentuh.
+- Audit dropdown edit (reservation-fit form/edit + form-git/vr/dayuse + front-desk form/edit semua pakai GET /cms/reservation/{id}/update): master node SUDAH match Laravel (statuses/nrics/genders/regions/market_segment_1-4/source/status_reservations/status_guests/typemulti/cardtypes/companies/room_types/legend/markets); countries/cities dropdown diisi via fallback /cms/countryByRegion?region=all + /cms/cityByCountry?country= (route ada) — TIDAK dari master (Laravel juga begitu). Guest edit master juga lengkap. TIDAK ADA perubahan.
+- Verify: backend tsc bersih, jest 69/69.
+- BELUM rebuild+restart+probe. Setelah user rebuild: login → choose property → cek menu profil (Switch Property/Business Date/Task/START SHIFT), header nama user, warna status frontdesk (Reservation cyan), kolom Status list master (Active/Inactive).

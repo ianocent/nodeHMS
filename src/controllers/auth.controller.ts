@@ -82,31 +82,54 @@ export class AuthController {
         user.email
       );
 
-      // Build permission tree (simplified — full tree in formatData)
-      const permissions = await AuthController.buildPermissionTree(user.id, roleIds, roleNames);
+      const data = await AuthController.buildLoginData(
+        user,
+        roleIds,
+        roleNames,
+        plainTextToken,
+        createdAt,
+        user.last_property
+      );
 
-      // Shift + business date (matches Laravel is_shift / is_need_shift / bussinesDate)
-      const businessDate = await AuthController.getBusinessDate(user.last_property);
-      const isShift = await AuthController.getShiftStatus(user.id, user.last_property, businessDate);
-      const isNeedShift = await AuthController.getNeedShift(roleIds);
-
-      success(res, {
-        name: user.name,
-        role: roleNames,
-        username: user.username,
-        email: user.email,
-        access_token: plainTextToken,
-        expires_token: createdAt.toISOString().replace('T', ' ').substring(0, 19),
-        force_change_password: user.force_change_password,
-        is_shift: isShift,
-        is_need_shift: isNeedShift,
-        bussinesDate: businessDate,
-        permissions,
-      }, 'Success');
+      success(res, data, 'Success');
     } catch (err: any) {
       console.error('Login error:', err);
       badRequest(res, 'Login failed');
     }
+  }
+
+  /**
+   * Build the login payload (name, role, username, email, access_token,
+   * expires_token, force_change_password, is_shift, is_need_shift,
+   * bussinesDate, permissions). Matches Laravel AuthController@login payload.
+   * Shared by login, changePassword and PropertyController@auth (node).
+   */
+  static async buildLoginData(
+    user: any,
+    roleIds: bigint[],
+    roleNames: string[],
+    plainTextToken: string,
+    createdAt: Date,
+    propertyId: bigint | null
+  ): Promise<Record<string, any>> {
+    const permissions = await AuthController.buildPermissionTree(user.id, roleIds, roleNames);
+    const businessDate = await AuthController.getBusinessDate(propertyId);
+    const isShift = await AuthController.getShiftStatus(user.id, propertyId, businessDate);
+    const isNeedShift = await AuthController.getNeedShift(roleIds);
+
+    return {
+      name: user.name,
+      role: roleNames,
+      username: user.username,
+      email: user.email,
+      access_token: plainTextToken,
+      expires_token: createdAt.toISOString().replace('T', ' ').substring(0, 19),
+      force_change_password: !!user.force_change_password,
+      is_shift: isShift,
+      is_need_shift: isNeedShift,
+      bussinesDate: businessDate,
+      permissions,
+    };
   }
 
   /**

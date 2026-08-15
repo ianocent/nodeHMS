@@ -122,7 +122,22 @@ router.get('/master-venue', authMiddleware, requirePermission(211, 'view'), Even
 router.get('/master-layout', authMiddleware, requirePermission(211, 'view'), EventController.layoutList);
 router.get('/master-inventory', authMiddleware, requirePermission(211, 'view'), EventController.inventoryList);
 router.get('/master-capacity', authMiddleware, requirePermission(211, 'view'), EventController.capacityList);
+router.post('/master-capacity', authMiddleware, requirePermission(211, 'add'), EventController.capacityStore);
+router.put('/master-capacity/:id', authMiddleware, requirePermission(211, 'edit'), EventController.capacityUpdate);
+router.delete('/master-capacity/:id', authMiddleware, requirePermission(211, 'delete'), EventController.capacityDestroy);
 // Frontend event-list with parent & module query params
 router.get('/list/event-list', authMiddleware, requirePermission(211, 'view'), EventController.eventList);
+
+// Event-list resource (parity Laravel routes/cms.php L579-585) — uri_table /cms/event-list
+router.get('/event-list', authMiddleware, requirePermission(211, 'view'), EventController.eventList);
+router.get('/event-list/get-sales-in-charge', authMiddleware, requirePermission(211, 'view'), EventController.eventList);
+router.get('/event-list/folio', authMiddleware, requirePermission(211, 'view'), EventController.eventList);
+router.get('/event-list/create', authMiddleware, requirePermission(211, 'add'), EventController.eventCreate);
+router.post('/event-list', authMiddleware, requirePermission(211, 'add'), EventController.eventStore);
+router.get('/event-list/:id/edit', authMiddleware, requirePermission(211, 'view'), EventController.eventShow);
+router.put('/event-list/:id', authMiddleware, requirePermission(211, 'edit'), EventController.eventUpdate);
+router.delete('/event-list/:id', authMiddleware, requirePermission(211, 'delete'), EventController.eventDestroy);
+router.delete('/event-list/:id/delete', authMiddleware, requirePermission(211, 'delete'), EventController.eventDestroy);
+router.post('/event-list/sort', authMiddleware, requirePermission(211, 'edit'), EventController.eventSort);
 
 export default router;

@@ -9,11 +9,12 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 const STATUS_RESERVATION: Record<string, { id: number; code: string; name: string }> = {
-  reservation: { id: 1, code: 'reservation', name: 'Reservation' },
-  check_in: { id: 2, code: 'check_in', name: 'Check In' },
-  check_out: { id: 3, code: 'check_out', name: 'Check Out' },
-  cancel_reservation: { id: 4, code: 'cancel_reservation', name: 'Cancel Reservation' },
-  pending: { id: 0, code: 'pending', name: 'Pending' },
+  check_in: { id: 0, code: 'check_in', name: 'Check In' },
+  check_out: { id: 1, code: 'check_out', name: 'Check Out' },
+  cancel_reservation: { id: 2, code: 'cancel_reservation', name: 'Cancelled' },
+  reservation: { id: 3, code: 'reservation', name: 'Reservation' },
+  in_house: { id: 4, code: 'in_house', name: 'In House' },
+  pending: { id: 5, code: 'pending', name: 'Pending' },
 };
 
 function bigintToNumber(val: any): any {

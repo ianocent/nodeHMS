@@ -7,6 +7,7 @@ import { requirePermission } from '../middleware/permission.middleware';
 import { success, error, notFound } from '../utils/response';
 import { encrypt } from '../utils/encryption';
 import { GenericController } from '../controllers/generic.controller';
+import { RoomController } from '../controllers/room.controller';
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -283,25 +284,8 @@ router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async 
   }
 });
 
-// ── POST Room Statistic (update room status in bulk) ──
-router.post('/room-statistic', authMiddleware, requirePermission(1120, 'edit'), async (req: Request, res: Response) => {
-  try {
-    const { room_ids, room_status, maid_status } = req.body;
-    const ids = (room_ids || []).map((id: any) => BigInt(id));
-    const updateData: any = { updated_at: new Date(), updated_by: req.user?.id };
-    if (room_status !== undefined) updateData.room_status = parseInt(room_status);
-    if (maid_status !== undefined) updateData.maid_status = parseInt(maid_status);
-
-    await prisma.rooms.updateMany({
-      where: { id: { in: ids }, deleted_at: null },
-      data: updateData,
-    });
-
-    success(res, { updated: ids.length }, 'Room status updated');
-  } catch (err: any) {
-    error(res, err.message || 'Failed to update room status', 500);
-  }
-});
+// ── POST Room Statistic (filtered grid — frontend posts filter body, parity Laravel RoomStatisticController@index) ──
+router.post('/room-statistic', authMiddleware, requirePermission(1120, 'view'), RoomController.statistics);
 // ── Profile Guest (alias for GuestController) ──
 // Lazy-import GuestController to avoid circular deps
 async function guestList(req: Request, res: Response): Promise<void> {

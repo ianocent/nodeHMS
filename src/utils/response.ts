@@ -20,6 +20,8 @@ export interface ApiMeta {
   building?: any;
   ledger?: any;
   meta?: any;
+  total_transaction?: any;
+  ledger_id?: any;
 }
 
 function sendEncrypted(res: Response, statusCode: number, payload: Record<string, any>): Response {
@@ -35,6 +37,22 @@ export function success(
   code = 200,
   meta?: ApiMeta
 ): Response {
+  // Laravel parity: list rows must send `status` as { value: bool, label: 'Active'|'Inactive' }
+  // (see User::formatData). Rows sent as raw int 0/1 render as "1"/"0" in TableView.
+  if (Array.isArray(data) && meta?.table?.some((c: any) => c.key === 'status')) {
+    data = data.map((row: any) => {
+      if (row && typeof row === 'object' && row.status !== undefined && (row.status === 0 || row.status === 1)) {
+        return {
+          ...row,
+          status: {
+            value: !!row.status,
+            label: row.status ? 'Active' : 'Inactive',
+          },
+        };
+      }
+      return row;
+    });
+  }
   return sendEncrypted(res, code, {
     code,
     message,
@@ -57,6 +75,8 @@ export function success(
     ...(meta?.building !== undefined ? { building: meta.building } : {}),
     ...(meta?.ledger !== undefined ? { ledger: meta.ledger } : {}),
     ...(meta?.meta !== undefined ? { meta: meta.meta } : {}),
+    ...(meta?.total_transaction !== undefined ? { total_transaction: meta.total_transaction } : {}),
+    ...(meta?.ledger_id !== undefined ? { ledger_id: meta.ledger_id } : {}),
   });
 }
 

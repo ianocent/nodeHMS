@@ -463,7 +463,7 @@ export class SystemController {
       if (text !== undefined) data.text = text;
       if (image !== undefined) data.image = image;
       if (sort !== undefined) data.sort = num(sort);
-      if (status !== undefined) data.status = status === true || status === 'true' ? 1 : status;
+      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 ? 1 : num(status, 0);
 
       await getPrisma().types.update({ where: { id }, data });
       success(res, null, 'Updated');
