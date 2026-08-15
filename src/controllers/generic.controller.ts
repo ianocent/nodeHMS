@@ -42,6 +42,8 @@ function idParam(val: any): bigint | null {
 
 const AUDIT_KEYS = ['id', 'created_at', 'updated_at', 'deleted_at', 'created_by', 'updated_by', 'deleted_by', 'undefined'];
 
+const TIME_ONLY_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
+
 function sanitizeBody(body: any): any {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return {};
   const out: any = {};
@@ -59,10 +61,46 @@ function sanitizeBody(body: any): any {
       if (!isNaN(d.getTime())) out[k] = d;
       continue;
     }
+    // Time-only strings ("HH:MM") must become ISO-8601 DateTime for Prisma columns
+    // like shift_roster.time_start/time_end/overtime_start/overtime_end.
+    if (typeof v === 'string' && /time/i.test(k)) {
+      if (TIME_ONLY_RE.test(v)) {
+        const [h, m, s] = v.split(':');
+        out[k] = new Date(Date.UTC(1970, 0, 1, Number(h), Number(m), s ? Number(s) : 0));
+      } else if (v === '') {
+        continue;
+      } else {
+        out[k] = v;
+      }
+      continue;
+    }
     if (v !== null && typeof v === 'object' && Object.keys(v).length === 0) continue;
     out[k] = v;
   }
   return out;
+}
+
+// Models whose rows must stay scoped to the authenticated user's property.
+const PROPERTY_SCOPED_MODELS = new Set(['shift_roster', 'roster_list', 'rosters']);
+
+const TIME_FIELDS = ['time_start', 'time_end', 'overtime_start', 'overtime_end'];
+
+// DateTime -> "HH:MM" (stored as 1970-01-01T{HH:MM}Z for time-only values).
+function formatTimeFields(row: any): any {
+  if (!row || typeof row !== 'object') return row;
+  const out: any = { ...row };
+  for (const key of TIME_FIELDS) {
+    const v = row[key];
+    if (v instanceof Date && !isNaN(v.getTime())) {
+      out[key] = v.toISOString().slice(11, 16);
+    }
+  }
+  return out;
+}
+
+function formatTimeRows(data: any): any {
+  if (Array.isArray(data)) return data.map(formatTimeFields);
+  return formatTimeFields(data);
 }
 
 function parsePagination(query: any) {
@@ -182,6 +220,9 @@ export class GenericController {
         if (['page', 'limit', 'search', 'sort', 'order', 'trash', 'group'].includes(k)) continue;
         if (k.endsWith('_id') && String(v)) where[k] = BigInt(String(v));
       };
+      if (PROPERTY_SCOPED_MODELS.has(model) && !where.property_id && req.user?.lastProperty) {
+        where.property_id = BigInt(req.user.lastProperty);
+      }
       if (search && searchFields.length > 0) {
         where.OR = searchFields.map((f: string) => ({ [f]: { contains: search, mode: 'insensitive' } }));
       }
@@ -211,7 +252,7 @@ export class GenericController {
 
       const permission = { view: true, add: true, edit: true, delete: true };
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      success(res, formatTimeRows(bigintToNumber(data)), 'Success', 200, {
         table,
         permission,
         search_data: [],
@@ -239,7 +280,7 @@ export class GenericController {
       const record = await modelDelegate.findUnique({ where: { id } });
       if (!record) { notFound(res, 'Record not found'); return; }
       const permission = { view: true, add: true, edit: true, delete: true };
-      success(res, bigintToNumber(record), 'Success', 200, { table: [], search_data: [], permission });
+      success(res, formatTimeRows(bigintToNumber(record)), 'Success', 200, { table: [], search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic show error:', err); error(res, 'Failed to load', 500); }
@@ -297,7 +338,7 @@ export class GenericController {
       if (!record) { notFound(res, 'Record not found'); return; }
       const permission = { view: true, add: true, edit: true, delete: true };
       const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
-      success(res, bigintToNumber(record), 'Success', 200, { table: [], master, search_data: [], permission });
+      success(res, formatTimeRows(bigintToNumber(record)), 'Success', 200, { table: [], master, search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic edit form error:', err); error(res, 'Failed to load', 500); }

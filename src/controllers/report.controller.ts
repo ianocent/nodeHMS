@@ -4,6 +4,16 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import ExcelJS from 'exceljs';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { STATUSES } from '../utils/cmsConfig';
+
+// Laravel ReportPermission::formatTable parity
+const REPORT_PERMISSION_TABLE = [
+  { label: 'No', key: 'no', type: 'none', is_search: false },
+  { label: 'Status', key: 'status', type: 'checkbox', options: STATUSES, is_search: false },
+  { label: 'Name', key: 'master_report', type: 'select_multiple', is_search: false },
+  { label: 'Role', key: 'role_id', type: 'select', is_search: false },
+  { label: 'Action', key: 'action', type: 'action', is_search: false },
+];
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -790,6 +800,8 @@ export class ReportController {
       const formatted = data.map((r: any) => bigintToNumber(r));
 
       success(res, formatted, 'Success', 200, {
+        table: REPORT_PERMISSION_TABLE,
+        permission: { view: true, add: true, edit: true, delete: true },
         pagging: {
           current_page: page,
           last_page: Math.ceil(total / limit),

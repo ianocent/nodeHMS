@@ -394,26 +394,165 @@ export class StatisticController {
   static async byRoomType(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
-      const date = req.query.date as string || new Date().toISOString().split('T')[0];
-      const d = new Date(date); d.setHours(0, 0, 0, 0);
+      const businessDate = (req.user as any)?.bussinesDate || new Date().toISOString().split('T')[0];
+      const startParam = (req.query.start as string) || (req.query.date as string) || businessDate;
+      const endParam = (req.query.end as string) || null;
 
-      const roomTypes = await prisma.room_types.findMany({ where: { property_id: pid, deleted_at: null } });
-      const stats = await Promise.all(roomTypes.map(async (rt: any) => {
-        const totalRooms = await prisma.rooms.count({ where: { room_type_id: rt.id, deleted_at: null } });
-        const occupied = await prisma.folios.count({
-          where: {
-            property_id: pid,
-            status_reservation: { in: [1, 2] },
-            check_in_date: { lte: d },
-            check_out_date: { gte: d },
-            deleted_at: null,
-            reservations: { some: { room_type_id: rt.id, deleted_at: null } },
-          },
+      const start = new Date(startParam); start.setHours(0, 0, 0, 0);
+      const endBase = endParam ? new Date(endParam) : new Date(startParam);
+      endBase.setDate(endBase.getDate() + 7);
+      const end = new Date(endBase); end.setHours(0, 0, 0, 0);
+
+      const NIGHT = Math.round((end.getTime() - start.getTime()) / 86400000);
+      const days: string[] = [];
+      for (let i = 0; i < NIGHT; i++) {
+        const d = new Date(start); d.setDate(d.getDate() + i);
+        days.push(d.toISOString().split('T')[0]);
+      }
+
+      // ── Table (Laravel statisticsRoomType parity) ──
+      const doubleClick = [
+        {
+          id: 0, type: 'form', key: 'daily_rate_code', label: 'Daily Rate Code',
+          endpoint: '/cms/statistic/statistic-room-type/add-rate-code',
+          form: [{ label: 'Message', key: 'text', type: 'base', type_input: 'text' }],
+        },
+        {
+          id: 0, type: 'form', key: 'add_message', label: 'Add Message',
+          endpoint: '/cms/statistic/statistic-room-type/add-message',
+          form: [{ label: 'Message', key: 'text', type: 'textarea', type_input: 'text' }],
+        },
+      ];
+      const table: any[] = [
+        { label: 'Room Type', key: 'name', type: 'none', is_search: false },
+        { label: 'Total Room', key: 'total', type: 'none', is_html: true, is_search: false },
+      ];
+      for (const day of days) {
+        table.push({
+          label: new Date(day + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/,/g, ''),
+          key: day,
+          is_body_double_click: true,
+          is_header_double_click: true,
+          double_click_action: doubleClick.map((dc: any) => ({ ...dc, date: day })),
+          type: 'none',
+          is_html: true,
+          is_search: false,
         });
-        return { room_type_id: Number(rt.id), room_type: rt.name, total: totalRooms, occupied, available: totalRooms - occupied };
-      }));
+      }
 
-      success(res, stats, 'Success');
+      // ── Data sources ──
+      const [roomTypes, messages, rateCodes, overbookingRows, availRows, workOrderRows, reservationRows] = await Promise.all([
+        prisma.room_types.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { sort: 'asc' } }),
+        prisma.statistic_messages.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
+        prisma.statistic_rate_codes.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
+        prisma.overbookings.findMany({ where: { property_id: pid, deleted_at: null, date: { gte: start, lte: end } } }),
+        prisma.room_availabilities.findMany({ where: { property_id: Number(pid), deleted_at: null, date: { gte: start, lte: end } } }),
+        prisma.work_orders.findMany({ where: { property_id: pid, deleted_at: null } }),
+        prisma.reservations.findMany({
+          where: { property_id: pid, deleted_at: null, date: { gte: start, lte: end }, room_id: { not: null } },
+          select: { id: true, date: true, room_id: true, room_type_id: true, status_reservation: true },
+        }),
+      ]);
+
+      const rooms = await prisma.rooms.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, room_type_id: true } });
+
+      const fmt = (d: Date) => d.toISOString().split('T')[0];
+      const msgByDate = new Map(messages.map((m: any) => [fmt(m.date), m.text]));
+      const rcByDate = new Map(rateCodes.map((r: any) => [fmt(r.date), r.text]));
+      const obByKey = new Map<string, number>();
+      for (const ob of overbookingRows) {
+        const k = fmt(ob.date) + ':' + String(ob.room_type_id);
+        obByKey.set(k, (obByKey.get(k) || 0) + ob.overbooking);
+      }
+      const blockByDate = new Map<string, number>();
+      for (const a of availRows) blockByDate.set(fmt(a.date), (blockByDate.get(fmt(a.date)) || 0) + 1);
+      const soldByKey = new Map<string, number>();
+      for (const r of reservationRows) {
+        const k = fmt(r.date) + ':' + String(r.room_type_id || 0);
+        if (r.room_type_id) soldByKey.set(k, (soldByKey.get(k) || 0) + 1);
+      }
+
+      const totalByType = new Map<bigint, number>();
+      for (const rm of rooms) totalByType.set(rm.room_type_id, (totalByType.get(rm.room_type_id) || 0) + 1);
+      let totalRoomAll = 0;
+      for (const v of totalByType.values()) totalRoomAll += v;
+
+      const isOooOn = (wo: any, day: string): boolean => {
+        const d = new Date(day + 'T00:00:00');
+        if (!wo.start_date || wo.start_date > d) return false;
+        if (wo.end_date) return wo.end_date > d;
+        return true;
+      };
+      const oooByDate = new Map<string, number>();
+      for (const day of days) oooByDate.set(day, workOrderRows.filter((w: any) => isOooOn(w, day)).length);
+      const soldByDate = new Map<string, number>();
+      for (const day of days) {
+        const key = day;
+        let c = 0;
+        for (const r of reservationRows) if (fmt(r.date) === key && r.status_reservation !== 3) c++;
+        soldByDate.set(key, c);
+      }
+
+      // ── Rows ──
+      const data: any[] = [];
+      const push = (row: any) => data.push({ id: 0, name: '', total: '', ...row });
+
+      const msgRow: any = { id: 0, name: 'Message', total: '' };
+      for (const day of days) {
+        const t = msgByDate.get(day);
+        msgRow[day] = t ? `<div class="bg-success px-1 py-1 text-white rounded-md mt-1 text-center">${t}</div>` : '';
+      }
+      push(msgRow);
+
+      const rcRow: any = { id: 0, name: 'Daily Rate Code', total: '' };
+      for (const day of days) {
+        const t = rcByDate.get(day);
+        rcRow[day] = t ? `<div class="bg-cyan px-1 py-1 text-white rounded-md mt-1 text-center">${t}</div>` : '';
+      }
+      push(rcRow);
+
+      const blankRow: any = { id: 0, name: '', total: '' };
+      for (const day of days) blankRow[day] = '';
+      push(blankRow);
+
+      for (const rt of roomTypes) {
+        const row: any = { id: Number(rt.id), name: rt.name, total: totalByType.get(rt.id) || 0 };
+        for (const day of days) {
+          const overbooking = obByKey.get(day + ':' + String(rt.id)) || 0;
+          row[day] = (totalByType.get(rt.id) || 0) + overbooking;
+        }
+        data.push(row);
+      }
+
+      for (let i = 0; i < 3; i++) push({});
+
+      const totalRow: any = { id: 0, name: 'Total Room', total: '' };
+      for (const day of days) totalRow[day] = totalRoomAll;
+      push(totalRow);
+
+      const soldRow: any = { id: 0, name: 'Room Sold', total: '' };
+      for (const day of days) soldRow[day] = soldByDate.get(day) || 0;
+      push(soldRow);
+
+      const oooRow: any = { id: 0, name: 'Out of Order', total: '' };
+      for (const day of days) oooRow[day] = oooByDate.get(day) || 0;
+      push(oooRow);
+
+      const blockRow: any = { id: 0, name: 'Blocked', total: '' };
+      for (const day of days) blockRow[day] = blockByDate.get(day) || 0;
+      push(blockRow);
+
+      const availRow: any = { id: 0, name: 'Available Room', total: '' };
+      for (const day of days) {
+        availRow[day] = totalRoomAll - (soldByDate.get(day) || 0) - (oooByDate.get(day) || 0) - (blockByDate.get(day) || 0);
+      }
+      push(availRow);
+
+      success(res, bigintToNumber(data), 'Success', 200, {
+        table,
+        permission: getPermissionFlags(req.user, 1141),
+        pagging: laravelPaging(data.length, 9999, 1),
+      } as any);
     } catch (err: any) { console.error('Statistic by room type error:', err); error(res, 'Failed to load statistic', 500); }
   }
 

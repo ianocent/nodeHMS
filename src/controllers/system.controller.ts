@@ -4,6 +4,16 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 
+// Laravel LogController@index table parity (Security Audit / Report Permission screens)
+const LOG_TABLE = [
+  { label: 'Datetime', key: 'created_at', type: 'datetime', is_search: false },
+  { label: 'Staff', key: 'causer', type: 'none', is_search: false },
+  { label: 'type', key: 'type', type: 'none', is_search: false },
+  { label: 'Module', key: 'subject_type', type: 'select', is_search: true },
+  { label: 'Activity', key: 'description', is_html: true, type: 'none', is_search: false },
+  { label: 'Action', key: 'action', type: 'action', is_search: false },
+];
+
 // Helper: coerce sort/status to number (matches Laravel int casting)
 function num(v: any, fallback = 0): number {
   if (v === undefined || v === null || v === '') return fallback;
@@ -303,7 +313,15 @@ export class SystemController {
         getPrisma().logs.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      const formatted = bigintToNumber(data).map((row: any) => ({
+        ...row,
+        causer: row.name || row.causer || null,
+        type: row.event || row.log_name || null,
+      }));
+
+      success(res, formatted, 'Success', 200, {
+        table: LOG_TABLE,
+        permission: { view: true, add: true, edit: true, delete: true },
         pagging: {
           current_page: page,
           last_page: Math.ceil(total / limit),

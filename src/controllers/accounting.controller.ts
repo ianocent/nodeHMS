@@ -4,6 +4,25 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 
+const ACCOUNTING_TABLE = [
+  { label: 'Date', key: 'date', type: 'date', is_search: true },
+  { label: 'Doc', key: 'number_note', type: 'none', is_search: false },
+  { label: 'Company', key: 'company_profile_id', type: 'autocomplete', url_autocomplete: '/cms/profile/company-v2', is_search: false },
+  { label: 'Amount', key: 'amount', type: 'number', is_search: false },
+  { label: 'Outstanding', key: 'outstanding', type: 'none', is_search: false },
+  { label: 'Source', key: 'source', type: 'text', is_search: false },
+  { label: 'Description', key: 'description_accounting', type: 'none', is_search: false },
+  {
+    label: 'Processed', key: 'status_accounting', type: 'none', is_search: false,
+    options: [
+      { value: 1, label: 'Processed' },
+      { value: 2, label: 'Pending' },
+      { value: 3, label: 'Cancelled' },
+    ],
+  },
+  { label: 'Action', key: 'action', type: 'action', is_search: false },
+];
+
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
@@ -82,6 +101,8 @@ export class AccountingController {
       const formatted = records.map((r: any) => bigintToNumber(r));
 
       success(res, formatted, 'Success', 200, {
+        table: ACCOUNTING_TABLE,
+        permission: { view: true, add: true, edit: true, delete: true },
         pagging: {
           current_page: page,
           last_page: Math.ceil(total / limit),

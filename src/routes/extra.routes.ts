@@ -215,12 +215,29 @@ router.get('/statistic/occupancy', authMiddleware, requirePermission(80, 'view')
       },
     });
 
-    success(res, {
-      date: businessDate,
-      total_rooms: totalRooms,
-      occupied_rooms: occupiedRooms,
-      occupancy_pct: totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 10000) / 100 : 0,
-    }, 'Success');
+    const occupancyPct = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 10000) / 100 : 0;
+
+    success(res, [
+      {
+        id: 0,
+        name: 'Occupancy',
+        date: businessDate,
+        total_rooms: totalRooms,
+        occupied_rooms: occupiedRooms,
+        occupancy_pct: occupancyPct,
+      },
+    ], 'Success', 200, {
+      table: [
+        { label: 'Name', key: 'name', type: 'none', is_search: false },
+        { label: 'Date', key: 'date', type: 'date', is_search: false },
+        { label: 'Total Rooms', key: 'total_rooms', type: 'none', is_search: false },
+        { label: 'Occupied Rooms', key: 'occupied_rooms', type: 'none', is_search: false },
+        { label: 'Occupancy %', key: 'occupancy_pct', type: 'none', is_search: false },
+        { label: 'Action', key: 'action', type: 'action', is_search: false },
+      ],
+      permission: { view: true, add: true, edit: true, delete: true },
+      pagging: { current_page: 1, last_page: 1, per_page: 10, total: 1, from: 1, to: 1 },
+    });
   } catch (err: any) {
     error(res, err.message || 'Failed to fetch occupancy', 500);
   }

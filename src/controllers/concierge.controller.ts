@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { buildDefaultTable } from '../utils/table';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, ITEM_LOST_FOUND_STATUS, STATUS_LOST } from '../utils/cmsConfig';
 
@@ -114,6 +115,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -164,6 +166,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -214,6 +217,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -264,6 +268,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
         pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
