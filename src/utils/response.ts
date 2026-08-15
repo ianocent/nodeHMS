@@ -37,17 +37,14 @@ export function success(
   code = 200,
   meta?: ApiMeta
 ): Response {
-  // Laravel parity: list rows must send `status` as { value: bool, label: 'Active'|'Inactive' }
-  // (see User::formatData). Rows sent as raw int 0/1 render as "1"/"0" in TableView.
+  // List rows: `status` raw int 0/1 -> boolean so TableView renders ✓/✗ icons.
+  // (checkbox column; see table-edit/index.tsx render boolean -> checklist/cross)
   if (Array.isArray(data) && meta?.table?.some((c: any) => c.key === 'status')) {
     data = data.map((row: any) => {
       if (row && typeof row === 'object' && row.status !== undefined && (row.status === 0 || row.status === 1)) {
         return {
           ...row,
-          status: {
-            value: !!row.status,
-            label: row.status ? 'Active' : 'Inactive',
-          },
+          status: !!row.status,
         };
       }
       return row;

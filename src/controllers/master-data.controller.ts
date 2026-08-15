@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
-import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
+import { TABLES, STATUS_OPTIONS, laravelPaging, listPermission } from '../utils/tableMeta';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -13,6 +13,7 @@ const prisma = new PrismaClient({ adapter });
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
+  if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
   if (val && typeof val === 'object') {
     const out: any = {};
     for (const [k, v] of Object.entries(val)) {
@@ -92,19 +93,103 @@ export class MasterDataController {
 
       const where: any = { property_id: pid, deleted_at: null };
 
-      const [data, total] = await Promise.all([
+      const [data, total, codeBillings, codeGls] = await Promise.all([
         prisma.code_posts.findMany({
           where,
           orderBy: { id: 'desc' },
           skip: (page - 1) * limit,
           take: limit,
+          include: { code_billings: { select: { name: true } } },
         }),
         prisma.code_posts.count({ where }),
+        prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+        prisma.code_gls.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
       ]);
 
-      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      const billingOptions = codeBillings.map((c: any) => ({ value: Number(c.id), label: c.name }));
+      const glOptions = codeGls.map((g: any) => ({ value: Number(g.id), label: g.name }));
+      const glMap = new Map(codeGls.map((g: any) => [Number(g.id), g.name]));
+
+      // parity config('cms.type_code_post'): DEFAULT=Revenue, IS_PAYMENT=Payment, STATISTIC=Statistic
+      const relatedKeys = ['pay_commission', 'local_tax', 'service_charge', 'tax', 'local_tax_percentage', 'service_charge_percentage', 'tax_percentage', 'service_charge_include_local_tax', 'tax_include_local_tax', 'code_billing_id'];
+      const disabledKeys = ['pay_commission_disabled', 'local_tax_disabled', 'service_charge_disabled', 'tax_disabled', 'local_tax_percentage_disabled', 'service_charge_percentage_disabled', 'tax_percentage_disabled', 'service_charge_include_local_tax_disabled', 'tax_include_local_tax_disabled'];
+      const typeOptions = ['DEFAULT', 'IS_PAYMENT', 'STATISTIC'].map((t) => {
+        const restricted = t !== 'DEFAULT';
+        const billingMatch = t === 'IS_PAYMENT'
+          ? (billingOptions.find((b) => b.label.toLowerCase() === 'payment') ?? {})
+          : t === 'STATISTIC'
+            ? (billingOptions.find((b) => b.label.toLowerCase() === 'statistic') ?? {})
+            : {};
+        const opt: any = {
+          value: t,
+          label: t === 'DEFAULT' ? 'Revenue' : (t === 'IS_PAYMENT' ? 'Payment' : 'Statistic'),
+          pay_commission: false,
+          local_tax: false,
+          service_charge: false,
+          tax: false,
+          local_tax_percentage: 0,
+          service_charge_percentage: 0,
+          tax_percentage: 0,
+          service_charge_include_local_tax: false,
+          tax_include_local_tax: false,
+          code_billing_id: billingMatch,
+        };
+        disabledKeys.forEach((k) => { opt[k] = restricted; });
+        return opt;
+      });
+
+      const rows = bigintToNumber(data).map((r: any, i: number) => {
+        const glLabel = r.code_gl_id != null ? (glMap.get(Number(r.code_gl_id)) ?? '') : '';
+        return {
+          ...r,
+          no: (page - 1) * limit + i + 1,
+          // parity CodePost::formatData: booleans, type + relation keys as {value,label}
+          pay_commission: !!r.pay_commission,
+          is_pos: !!r.is_pos,
+          local_tax: !!r.local_tax,
+          service_charge: !!r.service_charge,
+          service_charge_include_local_tax: !!r.service_charge_include_local_tax,
+          tax: !!r.tax,
+          tax_include_local_tax: !!r.tax_include_local_tax,
+          type: {
+            value: r.type,
+            label: r.type === 'DEFAULT' ? 'Revenue' : (r.type === 'IS_PAYMENT' ? 'Payment' : 'Statistic'),
+          },
+          code_billing_id: {
+            value: r.code_billing_id,
+            label: r.code_billings?.name ?? '',
+          },
+          code_gl_id: {
+            value: r.code_gl_id,
+            label: glLabel,
+          },
+          code_gl_description: glLabel,
+          code_billings: undefined,
+        };
+      });
+
+      // parity CodePost::formatTable with dynamic options
+      const table = [
+        { label: 'No', key: 'no', type: 'none', is_search: false },
+        { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
+        { label: 'Post Code POS', key: 'is_pos', type: 'checkbox', is_search: true },
+        { label: 'Post Code', key: 'name', type: 'text', is_search: true },
+        { label: 'Type', key: 'type', type: 'select', options: typeOptions, related: relatedKeys, is_related: true, is_search: true },
+        { label: 'Billing Code', key: 'code_billing_id', type: 'select', options: billingOptions, is_search: true },
+        { label: 'Pay Commission', key: 'pay_commission', type: 'checkbox', related: relatedKeys, is_related: true, is_search: false },
+        { label: 'PB1', key: 'local_tax', type: 'checkbox', is_search: false },
+        { label: 'PB1 Percentage', key: 'local_tax_percentage', type: 'number', is_search: false },
+        { label: 'Service Charge', key: 'service_charge', type: 'checkbox', is_search: false },
+        { label: 'Service Charge Percentage', key: 'service_charge_percentage', type: 'number', is_search: false },
+        { label: 'Service Charge Include PB1', key: 'service_charge_include_local_tax', type: 'checkbox', is_search: false },
+        { label: 'Tax3', key: 'tax', type: 'checkbox', is_search: false },
+        { label: 'Tax3 Percentage', key: 'tax_percentage', type: 'number', is_search: false },
+        { label: 'Tax3 Include PB1', key: 'tax_include_local_tax', type: 'checkbox', is_search: false },
+        { label: 'GL Code', key: 'code_gl_id', type: 'select', options: glOptions, is_search: true },
+        { label: 'GL Description', key: 'code_gl_description', type: 'none', is_search: false },
+      ];
       success(res, rows, 'Success', 200, {
-        table: TABLES.codePost,
+        table,
         pagging: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
@@ -328,7 +413,7 @@ export class MasterDataController {
 
       const where: any = { property_id: pid, deleted_at: null };
 
-      const [data, total] = await Promise.all([
+      const [data, total, codePosts] = await Promise.all([
         prisma.code_items.findMany({
           where,
           orderBy: { id: 'desc' },
@@ -337,11 +422,29 @@ export class MasterDataController {
           include: { code_posts: { select: { id: true, name: true } } },
         }),
         prisma.code_items.count({ where }),
+        prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
       ]);
 
-      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      const postOptions = codePosts.map((p: any) => ({ value: Number(p.id), label: p.name }));
+
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({
+        ...r,
+        no: (page - 1) * limit + i + 1,
+        // parity CodeItem::formatData
+        code_post_id: { value: r.code_post_id, label: r.code_posts?.name ?? '' },
+        process_on: r.process_on ? { value: r.process_on, label: r.process_on } : null,
+        calculator: r.calculator ? { value: r.calculator, label: r.calculator } : null,
+        code_posts: undefined,
+      }));
+
+      const table = TABLES.codeItem.map((c) => ({ ...c }));
+      const postIdx = table.findIndex((c: any) => c.key === 'code_post_id');
+      if (postIdx >= 0) table[postIdx].options = postOptions;
+      table.push({ label: 'Process On', key: 'process_on', type: 'select', options: [{ value: 'Actual Day', label: 'Actual Day' }, { value: 'Next Day', label: 'Next Day' }], is_search: true });
+      table.push({ label: 'Calculator', key: 'calculator', type: 'select', options: [{ value: 'Adult', label: 'Adult' }, { value: 'Child', label: 'Child' }, { value: 'Room', label: 'Room' }], is_search: true });
+
       success(res, rows, 'Success', 200, {
-        table: TABLES.codeItem,
+        table,
         pagging: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
@@ -731,15 +834,65 @@ export class MasterDataController {
       permission: listPermission(req, { add: true, edit: true, delete: true }),
     } as any);
   }
-  static async typePaymentList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.type_payments, req, res, TABLES.typePayment); }
+  static async typePaymentList(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const { page, limit, search } = parsePagination(req.query);
+      const where: any = { property_id: pid, deleted_at: null };
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+
+      const [data, total, codePosts, companies] = await Promise.all([
+        prisma.type_payments.findMany({
+          where,
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          include: { code_posts: { select: { id: true, name: true } } },
+        }),
+        prisma.type_payments.count({ where }),
+        prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null, type: 'IS_PAYMENT' }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+        prisma.companies.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+      ]);
+
+      const companyMap = new Map(companies.map((c: any) => [Number(c.id), c.name]));
+
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({
+        ...r,
+        no: (page - 1) * limit + i + 1,
+        // parity TypePayment::formatData
+        code_post_id: { value: r.code_post_id, label: r.code_posts?.name ?? '' },
+        company_id: r.company_id != null ? { value: r.company_id, label: companyMap.get(Number(r.company_id)) ?? '' } : null,
+        surcharge_type: { value: r.surcharge_type, label: r.surcharge_type === 0 ? 'Percentage' : 'Amount' },
+        code_posts: undefined,
+      }));
+
+      const table = TABLES.typePayment.map((c) => ({ ...c }));
+      const postIdx = table.findIndex((c: any) => c.key === 'code_post_id');
+      if (postIdx >= 0) table[postIdx].options = codePosts.map((p: any) => ({ value: Number(p.id), label: p.name }));
+      table.push({ label: 'Card No', key: 'card_no', type: 'checkbox', is_search: false });
+      table.push({ label: 'Card Name', key: 'card_name', type: 'checkbox', is_search: false });
+      table.push({ label: 'Voucher', key: 'voucher', type: 'checkbox', is_search: false });
+      table.push({ label: 'Surcharge Type', key: 'surcharge_type', type: 'select', options: [{ value: 0, label: 'Percentage' }, { value: 1, label: 'Amount' }], is_search: false });
+      table.push({ label: 'Surcharge', key: 'surcharge', type: 'number', is_search: false });
+
+      success(res, rows, 'Success', 200, {
+        table,
+        pagging: laravelPaging(total, limit, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      } as any);
+    } catch (err: any) {
+      console.error('TypePayment list error:', err);
+      error(res, 'Failed to list type payments', 500);
+    }
+  }
   static async typePaymentShow(req: Request, res: Response): Promise<void> {
     try { const id = idParam(req.params.id); const d = await prisma.type_payments.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async typePaymentStore(req: Request, res: Response): Promise<void> {
     try {
-      const pid = BigInt(req.user?.lastProperty ?? 0); const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status } = req.body;
+      const pid = BigInt(req.user?.lastProperty ?? 0); const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status, company_id, is_company_ar, is_payment_ar, card_no, card_name, voucher } = req.body;
       if (!name) { badRequest(res, 'name required'); return; }
-      const d = await prisma.type_payments.create({ data: { property_id: pid, code_post_id: BigInt(code_post_id), code_billing_id: code_billing_id ? BigInt(code_billing_id) : null, name, pos: num(pos), front_office: num(front_office), surcharge_type: num(surcharge_type), surcharge: num(surcharge), status: num(status, 1), created_at: new Date(), updated_at: new Date() } });
+      const d = await prisma.type_payments.create({ data: { property_id: pid, code_post_id: BigInt(code_post_id), code_billing_id: code_billing_id ? BigInt(code_billing_id) : null, name, pos: num(pos), front_office: num(front_office), surcharge_type: num(surcharge_type), surcharge: num(surcharge), status: num(status, 1), company_id: company_id != null ? Number(company_id) : null, is_company_ar: bool(is_company_ar), is_payment_ar: bool(is_payment_ar), card_no: bool(card_no), card_name: bool(card_name), voucher: bool(voucher), created_at: new Date(), updated_at: new Date() } });
       success(res, bigintToNumber(d), 'Created');
     } catch (err: any) { error(res, 'Failed to create', 500); }
   }
@@ -747,11 +900,17 @@ export class MasterDataController {
     try {
       const id = idParam(req.params.id); const existing = await prisma.type_payments.findUnique({ where: { id } });
       if (!existing) { notFound(res); return; }
-      const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status } = req.body;
+      const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status, company_id, is_company_ar, is_payment_ar, card_no, card_name, voucher } = req.body;
       const data: any = { updated_at: new Date() };
       if (code_post_id !== undefined) data.code_post_id = BigInt(code_post_id); if (code_billing_id !== undefined) data.code_billing_id = code_billing_id ? BigInt(code_billing_id) : null;
       if (name !== undefined) data.name = name; if (pos !== undefined) data.pos = num(pos); if (front_office !== undefined) data.front_office = num(front_office);
       if (surcharge_type !== undefined) data.surcharge_type = num(surcharge_type); if (surcharge !== undefined) data.surcharge = num(surcharge); if (status !== undefined) data.status = num(status);
+      if (company_id !== undefined) data.company_id = company_id != null ? Number(company_id) : null;
+      if (is_company_ar !== undefined) data.is_company_ar = bool(is_company_ar);
+      if (is_payment_ar !== undefined) data.is_payment_ar = bool(is_payment_ar);
+      if (card_no !== undefined) data.card_no = bool(card_no);
+      if (card_name !== undefined) data.card_name = bool(card_name);
+      if (voucher !== undefined) data.voucher = bool(voucher);
       await prisma.type_payments.update({ where: { id }, data }); success(res, null, 'Updated');
     } catch (err: any) { error(res, 'Failed to update', 500); }
   }

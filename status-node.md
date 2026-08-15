@@ -321,3 +321,44 @@ Keluhan baru: setelah pilih property, dropdown profil cuma email/change password
 - Audit dropdown edit (reservation-fit form/edit + form-git/vr/dayuse + front-desk form/edit semua pakai GET /cms/reservation/{id}/update): master node SUDAH match Laravel (statuses/nrics/genders/regions/market_segment_1-4/source/status_reservations/status_guests/typemulti/cardtypes/companies/room_types/legend/markets); countries/cities dropdown diisi via fallback /cms/countryByRegion?region=all + /cms/cityByCountry?country= (route ada) — TIDAK dari master (Laravel juga begitu). Guest edit master juga lengkap. TIDAK ADA perubahan.
 - Verify: backend tsc bersih, jest 69/69.
 - BELUM rebuild+restart+probe. Setelah user rebuild: login → choose property → cek menu profil (Switch Property/Business Date/Task/START SHIFT), header nama user, warna status frontdesk (Reservation cyan), kolom Status list master (Active/Inactive).
+## 2026-08-15 sesi 4: Billing Setup dropdown/parity + sidebar menu title-case (BELUM COMMIT)
+
+Keluhan baru: di Master Setup/Billing Setup (code-billing, code-post, code-item, type-payment) banyak dropdown "No Options" saat edit inline, kolom Post Code tampil id bukan label (mis. "153" harus "Miscellaneous"), Post Code POS tampil "1"/"0" harus ceklis/silang; nama menu/submenu sidebar masih ada dash/underscore (rate-management, billing_setup) harus Title Case.
+
+### Billing Setup parity (master-data.controller.ts)
+- ROOT CAUSE: `codePostList`/`codeItemList`/`typePaymentList` spread rows mentah → id int mentah (code_billing_id/code_gl_id/code_post_id/company_id), boolean int 1/0 (is_pos dkk), type string mentah; table meta static TANPA options → TableView inline edit (table-edit/index.tsx:1597-1603 pakai item.options) → dropdown kosong "No Options".
+- `codePostList`: query include code_billings (name) + fetch code_billings/code_gls property untuk options; rows parity CodePost::formatData — booleans (pay_commission/is_pos/local_tax/service_charge/service_charge_include_local_tax/tax/tax_include_local_tax), type `{value,label}` (DEFAULT=Revenue/IS_PAYMENT=Payment/else Statistic), code_billing_id+code_gl_id+code_gl_description `{value,label}`; table penuh 17 kolom parity CodePost::formatTable (Status checkbox + is_pos checkbox + Type select options type_code_post + Billing Code select + Pay Commission/PB1/SC/Tax3 checkbox+number + GL Code select), type options bawa related keys + *_disabled (parity Laravel) biar changeHandler isi otomatis.
+- `codeItemList`: rows code_post_id `{value,label}` + process_on/calculator `{value,label}`; table: options code_post_id (dari code_posts property) + kolom Process On/Calculator select.
+- `typePaymentList`: ganti generic crudList → custom: rows code_post_id/company_id/surcharge_type `{value,label}` (fetch companies); table: options code_post_id (type IS_PAYMENT saja, parity Laravel), kolom Card No/Card Name/Voucher checkbox + Surcharge Type select (Percentage/Amount) + Surcharge number. store/update: + company_id/is_company_ar/is_payment_ar/card_no/card_name/voucher.
+- codeBillingList/table sudah match (name/description/sort + status transform sesi 3).
+
+### Sidebar menu naming (admin.controller.ts)
+- ROOT CAUSE: `toMenuResource` name = parseJsonField raw → menu slug plain ("billing_setup") kirim sebagai string; Sidebar.tsx:77/86 baca `name?.en` → undefined; menu management label juga raw.
+- FIX: helper `normalizeMenuLabel` (name utk resource: JSON translation tetap, string slug → regex [-_]+ → spasi + Title Case tiap kata → object {en,id}) + `labelFromMenuName` (string untuk menuList). Dipakai di toMenuResource + menuList. parity roleEdit buildTree sudah normalize manual (regex sama).
+
+### Verify
+- backend tsc bersih, frontend tsc bersih (frontend tidak diubah).
+- BELUM commit, BELUM rebuild. Setelah rebuild: cek code-post list (Post Code POS ceklis, Billing Code label, Type dropdown terisi, GL dropdown), code-item (Post Code label + Process On/Calculator), type-payment (Post Code/Company label + checkbox), sidebar (rate-management → Rate Management, billing_setup → Billing Setup).
+
+## 2026-08-15 sesi 4b: status icon + Decimal fix + sidebar normalize + scroll + rate grid table (BELUM COMMIT)
+
+### Status 1/0 -> icon ceklis/silang (semua list)
+- user minta status jadi icon ✓/✗ (bukan teks Active/Inactive). `utils/response.ts success()` transform: status int 0/1 -> BOOLEAN murni (sebelumnya {value,label}). TableView render boolean -> checklist.png/cross.png (table-edit/index.tsx:2095-2106).
+
+### [object Object] di PB1 Percentage dkk (Decimal Prisma)
+- ROOT CAUSE: Prisma Decimal -> object; bigintToNumber recurse Object.entries(Decimal) -> objek gede -> React render [object Object]. Kena SEMUA kolom decimal (local_tax_percentage, sales, cost, surcharge, rate grid...).
+- FIX: 28 file punya bigintToNumber lokal; script replace tambah guard sebelum object branch: `if (val && typeof val === ''object'' && typeof (val as any).toNumber === ''function'') return Number((val as any).toNumber());` -> Decimal jadi Number. Semua controller + extra.routes.ts.
+
+### Sidebar masih raw (SHIFT/shift, ROOM-S, WORK_O, SerSch)
+- "SHIFT/ROSTER/ROOM-S/WORK_O/SerSch" BUKAN di DB postgres (nama menu sekarang lowercase: shift/roster/room-status/work_orders) -> itu CACHE LAMA sessionStorage "sidebar_menus" dari masa Laravel. FIX frontend: hapus cache read+write di Sidebar.tsx (GetMenus selalu fetch /cms/menu; login switch tetap reset).
+- normalizeMenuLabel/labelFromMenuName (admin.controller.ts): sekarang normalize JUGAA nilai JSON translation ({en,id}) + title-case penuh: toLowerCase -> [-_]+ -> spasi -> collapse -> capitalize tiap kata ("work_orders"->"Work Orders", "USER ACCOUNT"->"User Account", "ROOM-S"->"Room S", "night-audit"->"Night Audit"). Dipakai di toMenuResource (sidebar + menu management resource) + menuList label.
+
+### Table ga bisa scroll kanan-kiri
+- ROOT CAUSE: `<table className="table-auto ... w-full">` = lebar pas container -> kolom numpuk, no overflow. FIX: `min-w-full whitespace-nowrap` di table-edit/index.tsx:1191 -> table melebar, container `.table-responsive` (sudah overflow-x:auto + scrollbar thin) muncul scroll.
+
+### Rate Setup/Bar Setup edit: Tab Rate table ga muncul
+- ROOT CAUSE: `RateController.rateGrid` + `barRateIndex` kirim response TANPA meta `table`; TableView render table hanya kalau `datatable?.table` ada (table-edit/index.tsx:1175) -> area kosong "Please Click Search".
+- FIX (parity RateRateController@index): GRID_FIELDS + stop_arrival/stop_departure/stop_sell (9 field); helper buildGridTable() (Dates rowspan 2 + header room type row 1 colspan + kolom per roomType_field row 2); rows: checkbox -> bool, number -> Number, kosong -> '-' (Laravel kirim '-' string); row.id diisi. Dipakai rateGrid + barRateIndex.
+
+### Verify
+- backend tsc bersih, frontend tsc bersih. BELUM rebuild. Rebuild: sidebar (Shift/Work Orders/User Account), status icon di semua list, PB1 Percentage angka, scroll horizontal, Rate grid table muncul setelah Search.

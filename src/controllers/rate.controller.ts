@@ -18,7 +18,39 @@ const STATUSES = [
   { value: 0, label: 'Inactive' },
 ];
 
-const GRID_FIELDS = ['one_adult', 'two_adult', 'extra_adult', 'extra_child', 'min_night', 'max_night'];
+// parity RateRate::formatTable (labels -> slug keys)
+const GRID_FIELDS = ['one_adult', 'two_adult', 'extra_adult', 'extra_child', 'min_night', 'max_night', 'stop_arrival', 'stop_departure', 'stop_sell'];
+
+const GRID_FIELD_TYPES: Record<string, string> = {
+  stop_arrival: 'checkbox',
+  stop_departure: 'checkbox',
+  stop_sell: 'checkbox',
+};
+
+function gridFieldLabel(field: string): string {
+  return field.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function gridFieldType(field: string): string {
+  return GRID_FIELD_TYPES[field] ?? 'number';
+}
+
+// parity RateRateController@index table: Dates row + room-type header (row 1, colspan=fields)
+// + one column per roomType_field (row 2)
+function buildGridTable(roomTypes: any[], fields: string[]): any[] {
+  const table: any[] = [
+    { label: 'Dates', key: 'date', type: 'none_date', customClass: 'w-nowwarp', rowspan: 2 },
+  ];
+  for (const rt of roomTypes) {
+    table.push({ label: rt.name, row: 1, colspan: fields.length, type: 'none', is_search: false });
+  }
+  for (const rt of roomTypes) {
+    for (const field of fields) {
+      table.push({ label: gridFieldLabel(field), row: 2, key: `${Number(rt.id)}_${field}`, type: gridFieldType(field), is_search: false });
+    }
+  }
+  return table;
+}
 
 const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
@@ -27,6 +59,7 @@ const RESTRICTION_FIELDS = ['stop_arrival', 'stop_departure', 'stop_sell', 'min_
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
+  if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
   if (val && typeof val === 'object') {
     const out: any = {};
     for (const [k, v] of Object.entries(val)) {
@@ -645,7 +678,12 @@ prisma.room_types.findMany({
             const match = rateRates.find(
               (rr) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id
             );
-            row[colKey] = match ? Number((match as any)[field] ?? 0) : null;
+            row[colKey] = match
+              ? (gridFieldType(field) === 'checkbox'
+                  ? !!Number((match as any)[field] ?? 0)
+                  : Number((match as any)[field] ?? 0))
+              : '-';
+            if (match) row.id = Number(match.id);
           }
         }
 
@@ -663,12 +701,13 @@ prisma.room_types.findMany({
       const master = {
         room_types: targetRoomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name, min_rate: Number(rt.min_rate) })),
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
-        fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
+        fields: GRID_FIELDS.map((f) => ({ value: f, label: gridFieldLabel(f) })),
       };
 
       success(res, rows, 'Success', 200, {
         permission,
         master,
+        table: buildGridTable(targetRoomTypes, selectedFields),
         pagging: {
           current_page: page,
           last_page: Math.ceil(totalDates / limit),
@@ -1163,7 +1202,12 @@ prisma.room_types.findMany({
             const match = rateRates.find(
               (rr) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id
             );
-            row[colKey] = match ? Number((match as any)[field] ?? 0) : null;
+            row[colKey] = match
+              ? (gridFieldType(field) === 'checkbox'
+                  ? !!Number((match as any)[field] ?? 0)
+                  : Number((match as any)[field] ?? 0))
+              : '-';
+            if (match) row.id = Number(match.id);
           }
         }
 
@@ -1181,7 +1225,7 @@ prisma.room_types.findMany({
       const master = {
         room_types: allRoomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name, min_rate: Number(rt.min_rate) })),
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
-        fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
+        fields: GRID_FIELDS.map((f) => ({ value: f, label: gridFieldLabel(f) })),
         bar_info: {
           id: Number(bar.id),
           name: bar.name,
@@ -1191,6 +1235,7 @@ prisma.room_types.findMany({
       success(res, rows, 'Success', 200, {
         permission,
         master,
+        table: buildGridTable(allRoomTypes, GRID_FIELDS),
         pagging: {
           current_page: page,
           last_page: Math.ceil(totalDates / limit),

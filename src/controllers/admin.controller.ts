@@ -20,6 +20,7 @@ function getPrisma() {
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
+  if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
   if (val && typeof val === 'object') {
     const out: any = {};
     for (const [k, v] of Object.entries(val)) out[k] = bigintToNumber(v);
@@ -423,7 +424,7 @@ export class AdminController {
 
       const buildTree = (parentId: bigint | null): any[] =>
         menus.filter(m => m.parent_id === parentId).map(m => ({
-          ...bigintToNumber(m), label: (() => { try { const p = JSON.parse(m.name); return p?.en || p?.id || m.name; } catch { return m.name; } })(),
+          ...bigintToNumber(m), label: labelFromMenuName(m.name),
           children: buildTree(m.id),
         }));
 
@@ -1112,6 +1113,45 @@ function parseJsonField(val: any, fallback: any): any {
   try { return JSON.parse(val); } catch { return val; }
 }
 
+// Normalize menu label: dash/underscore -> space, every word title-cased
+// ("work_orders" -> "Work Orders", "ROOM-S" -> "Room S", "shift" -> "Shift").
+// Applies to plain slugs and JSON translation values ({en,id}).
+function titleCaseMenuLabel(str: string): string {
+  return str
+    .toLowerCase()
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function normalizeMenuLabel(val: any): any {
+  const parsed = parseJsonField(val, {});
+  if (typeof parsed === 'string') {
+    const title = titleCaseMenuLabel(parsed);
+    return { en: title, id: title };
+  }
+  if (parsed && typeof parsed === 'object') {
+    const out: any = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      out[k] = typeof v === 'string' ? titleCaseMenuLabel(v) : v;
+    }
+    return out;
+  }
+  return parsed;
+}
+
+function labelFromMenuName(val: any): string {
+  const parsed = parseJsonField(val, {});
+  if (typeof parsed === 'string') return titleCaseMenuLabel(parsed);
+  if (parsed && typeof parsed === 'object') {
+    const en = typeof parsed.en === 'string' ? titleCaseMenuLabel(parsed.en) : parsed.en;
+    const id = typeof parsed.id === 'string' ? titleCaseMenuLabel(parsed.id) : parsed.id;
+    return en || id || '';
+  }
+  return '';
+}
+
 function menuPermissions(menuId: bigint, user: any): { view: boolean; edit: boolean; approve: boolean } {
   if (!user) return { view: false, edit: false, approve: false };
   if (user.superUser) return { view: true, edit: true, approve: true };
@@ -1150,7 +1190,7 @@ function toMenuResource(
     id: mappedId,
     parent_id: m.parent_id ? Number(m.parent_id) : null,
     page_id: null,
-    name: parseJsonField(m.name, {}),
+    name: normalizeMenuLabel(m.name),
     url,
     alias_url: aliasUrl,
     recursive: depth,

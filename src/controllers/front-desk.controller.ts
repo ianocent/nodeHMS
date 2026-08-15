@@ -83,6 +83,7 @@ const TABLE_COLUMNS = [
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
+  if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
   if (val && typeof val === 'object') {
     const out: any = {};
     for (const [k, v] of Object.entries(val)) {
