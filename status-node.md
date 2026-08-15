@@ -300,7 +300,7 @@ Keluhan baru: PUT /reservation/39651 500 (status_reservation String→Int), POST
 - Verify: backend tsc bersih, jest 69/69, frontend tsc bersih.
 - BELUM rebuild+restart+probe (user harus restart backend + frontend).
 
-## 2026-08-15 sesi 3: profile menu hilang + warna status + status Active/Inactive + audit dropdown (BELUM KECOMMIT)
+## 2026-08-15 sesi 3: profile menu hilang + warna status + status Active/Inactive + audit dropdown (kecoMMIT `33abdf2`, frontend `fa67f35`, KEPUSH)
 
 Keluhan baru: setelah pilih property, dropdown profil cuma email/change password/download/logout (Switch Property, Business Date, Task Message Details, START SHIFT hilang); nama profile jadi nama property; warna Reservation di list frontdesk ungu harus cyan; status 1/0 harus Active/Inactive; dropdown edit no options; filter frontdesk.
 
