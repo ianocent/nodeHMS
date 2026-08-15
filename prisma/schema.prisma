@@ -3053,6 +3053,24 @@ model role_menu_crud {
   @@index([menu_id])
 }
 
+model approval_matrices {
+  id          BigInt      @id @default(autoincrement())
+  property_id BigInt?
+  name        String?
+  code        String?
+  module_id   BigInt?
+  role_ids    Json?
+  status      Int?        @default(0)
+  created_at  DateTime?
+  updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?
+  updated_by  BigInt?
+  deleted_by  BigInt?
+
+  @@index([property_id])
+}
+
 model role_permissions {
   permission_id BigInt      
   role_id       BigInt      

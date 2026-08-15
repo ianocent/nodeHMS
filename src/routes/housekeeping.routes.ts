@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { HousekeepingController } from '../controllers/housekeeping.controller';
 import { RoomController } from '../controllers/room.controller';
+import { ServiceSchedulerController } from '../controllers/service-scheduler.controller';
 import { genericController } from '../controllers/generic.controller';
 import { success } from '../utils/response';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -75,18 +76,10 @@ router.post('/work-order-stock', authMiddleware, requirePermission(158, 'add'), 
 router.put('/work-order-stock/:id', authMiddleware, requirePermission(158, 'edit'), (req, res) => { workOrderStocksModel(req); generic.update(req, res); });
 router.delete('/work-order-stock/:id', authMiddleware, requirePermission(158, 'delete'), (req, res) => { workOrderStocksModel(req); generic.destroy(req, res); });
 
-// ── Service Scheduler (no dedicated model — return empty list) ──
-router.get('/housekeeping/service-scheduler', authMiddleware, requirePermission(158, 'view'), (req, res) => {
-  success(res, [], 'Success', 200, {
-    table: [
-      { label: 'Room', key: 'room', type: 'none', is_search: false },
-      { label: 'Date', key: 'date', type: 'none', is_search: false },
-      { label: 'Status', key: 'status', type: 'badge', is_search: false },
-    ],
-    permission: { view: true, add: true, edit: true, delete: true },
-    pagging: { current_page: 1, last_page: 1, per_page: 10, total: 0, from: 0, to: 0 },
-  });
-});
+// ── Service Scheduler (parity ServiceSchedulerController) ──
+router.get('/housekeeping/service-scheduler', authMiddleware, requirePermission(158, 'view'), ServiceSchedulerController.index);
+router.get('/housekeeping/service-scheduler/housekeepers', authMiddleware, requirePermission(158, 'view'), ServiceSchedulerController.housekeepers);
+router.get('/housekeeping/service-scheduler/shifts', authMiddleware, requirePermission(158, 'view'), ServiceSchedulerController.shifts);
 
 // Singular aliases for frontend compatibility
 router.get('/housekeeping-setup', authMiddleware, requirePermission(158, 'view'), HousekeepingController.setupList);

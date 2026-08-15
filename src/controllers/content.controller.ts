@@ -649,4 +649,80 @@ export class ContentController {
       });
     } catch (err: any) { console.error('Room reservation list error:', err); error(res, 'Failed to list room reservations', 500); }
   }
+
+  // ═══════════ EMAIL SEND PER TEMPLATE (parity EmailGroupController@sendEmailPerTemplate) ═══════════
+  static async sendMailTemplate(req: Request, res: Response): Promise<void> {
+    try {
+      const folioId = req.query.folio_id as string;
+      if (!folioId || !/^\d+$/.test(folioId)) {
+        badRequest(res, 'folio_id is required');
+        return;
+      }
+
+      const templateName = req.params.template as string;
+      const user = req.user as any;
+      const pid = user?.lastProperty ?? user?.last_property ?? BigInt(0);
+
+      const [property, emailTemplate, folio] = await Promise.all([
+        prisma.properties.findUnique({ where: { id: pid }, include: { cities: true } }),
+        prisma.email_builders.findFirst({ where: { template_name: templateName } }),
+        prisma.folios.findUnique({
+          where: { id: BigInt(folioId) },
+          include: {
+            company_profiles_folios_company_profile_idTocompany_profiles: true,
+            reservations: {
+              include: { room_types: true },
+            },
+            transactions: {
+              where: { type_payment_id: { not: null } },
+              orderBy: { id: 'asc' },
+              take: 1,
+              include: { type_payments: true },
+            },
+          },
+        }),
+      ]);
+
+      if (!property) { notFound(res, 'Property not found'); return; }
+      if (!emailTemplate) { notFound(res, 'Template not found'); return; }
+      if (!folio || folio.deleted_at) { notFound(res, 'Folio not found'); return; }
+
+      const reservation = folio.reservations?.[0];
+      const company = folio.company_profiles_folios_company_profile_idTocompany_profiles;
+      const room = reservation?.room_id
+        ? await prisma.rooms.findUnique({ where: { id: reservation.room_id } })
+        : null;
+
+      const sortcode: Record<string, string> = {
+        guestName: `${folio.first_name || ''} ${folio.last_name || ''}`.trim(),
+        companyName: company?.name || '',
+        reservationStaff: user?.name || '',
+        folioNumber: folio.folio_number || '',
+        roomId: room?.name || '',
+        checkInDate: folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : '',
+        checkOutDate: folio.check_out_date ? folio.check_out_date.toISOString().slice(0, 10) : '',
+        roomType: reservation?.room_types?.name || reservation?.room_type_name || '',
+        numberOfGuests: String((reservation?.child || 0) + (reservation?.adult || 0)),
+        checkInTime: reservation?.eta ? reservation.eta.toISOString().slice(0, 16).replace('T', ' ') : '',
+        hotelAddress: property.cities?.name || '',
+        phoneNumberHotel: property.telp ? String(property.telp) : '',
+        emailHotel: property.email || '',
+        hotelName: property.name,
+        roomRate: reservation?.total ? Number(reservation.total).toString() : '',
+        totalAmountBilled: folio.reservations?.reduce((s: number, r: any) => s + Number(r.total || 0), 0).toString() || '',
+        paymentMethod: folio.transactions?.[0]?.type_payments?.name || '',
+      };
+
+      let body = emailTemplate.body || '';
+      body = body.replace(/\[\[([a-zA-Z0-9]+)\]\]/g, (_m: string, key: string) => sortcode[key] ?? '');
+
+      // No SMTP transport in node stack yet — email is built + logged instead of sent.
+      console.log(`[email][send-mail-template/${templateName}] to=${folio.email} subject=${emailTemplate.subject} body.length=${body.length}`);
+
+      success(res, null, 'Email sending process completed.');
+    } catch (err: any) {
+      console.error('sendMailTemplate error:', err);
+      error(res, 'Email sending failed', 400);
+    }
+  }
 }

@@ -8,6 +8,7 @@ import { success, error, notFound } from '../utils/response';
 import { encrypt } from '../utils/encryption';
 import { GenericController } from '../controllers/generic.controller';
 import { RoomController } from '../controllers/room.controller';
+import { ApprovalMatrixController } from '../controllers/approval-matrix.controller';
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -536,5 +537,12 @@ router.get('/guest-request', authMiddleware, requirePermission(82, 'view'), asyn
 router.post('/email/email-send/master', authMiddleware, requirePermission(69, 'view'), async (req: Request, res: Response) => {
   success(res, { message: 'Email endpoint registered (handler pending Prisma model)' }, 'Success');
 });
+
+// ── Approval Matrix (frontend-only custom module) ──
+router.get('/approval/matrix', authMiddleware, ApprovalMatrixController.list);
+router.get('/approval/matrix/create', authMiddleware, ApprovalMatrixController.createForm);
+router.get('/approval/matrix/:id/update', authMiddleware, ApprovalMatrixController.editForm);
+router.post('/approval/matrix', authMiddleware, ApprovalMatrixController.store);
+router.put('/approval/matrix/:id', authMiddleware, ApprovalMatrixController.update);
 
 export default router;
