@@ -31,7 +31,12 @@ export function requestParser(
 
   // AES-256-CBC decryption for text/plain (matches Laravel DecryptRequestMiddleware)
   // Format: iv_hex:ciphertext_hex
-  if (req.headers['content-type'] === 'text/plain' && req.body) {
+  // Some clients send text/plain; charset=utf-8, so match on the mime type instead
+  // of requiring an exact string equality check.
+  const requestContentType = String(req.headers['content-type'] || '').toLowerCase();
+  const requestIsTextPlain = requestContentType.includes('text/plain');
+
+  if (requestIsTextPlain && req.body) {
     try {
       const encrypted = req.body.toString();
       const decrypted = decryptAES(encrypted);
@@ -74,11 +79,12 @@ export function requestParser(
       res.status(200);
     }
 
-    // Encrypt response when request was text/plain (AES handshake) or Accept header set
-    const incomingWasEncrypted = req.headers['content-type'] === 'text/plain';
-    if (incomingWasEncrypted || req.headers.accept === 'text/plain' || req.query.encrypt === 'true') {
+    // Encrypt response when request was text/plain (AES handshake) or Accept header set.
+    // Accept charset variants such as text/plain; charset=utf-8.
+    const incomingWasEncrypted = String(req.headers['content-type'] || '').toLowerCase().includes('text/plain');
+    if (incomingWasEncrypted || String(req.headers.accept || '').toLowerCase().includes('text/plain') || req.query.encrypt === 'true') {
       const encrypted = encryptAES(JSON.stringify(body));
-      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       return res.send(encrypted);
     }
 
