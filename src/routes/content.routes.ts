@@ -66,6 +66,9 @@ router.delete('/email/email-group/:id', authMiddleware, requirePermission(69, 'd
 // ── Email Send Master (email-send page) ──
 router.get('/email/email-send/master', authMiddleware, requirePermission(69, 'view'), ContentController.emailSendMaster);
 
+// ── Send Email (EmailGroupController@sendEmail parity) ──
+router.post('/email/send-mail', authMiddleware, requirePermission(69, 'add'), ContentController.sendEmail);
+
 // ── Send Email Per Template (parity EmailGroupController@sendEmailPerTemplate) ──
 router.get('/email/send-mail-template/:template', authMiddleware, requirePermission(69, 'view'), ContentController.sendMailTemplate);
 

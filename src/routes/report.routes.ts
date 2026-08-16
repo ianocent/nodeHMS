@@ -6,11 +6,8 @@ import { requirePermission } from '../middleware/permission.middleware';
 const router = Router();
 
 // ═══════════════════════════════════════════════════════════
-// Report Permissions
+// Report Permissions (diurus master-system.routes -> ReportPermissionController, parity Laravel)
 // ═══════════════════════════════════════════════════════════
-
-router.get('/cms/report-permission', authMiddleware, requirePermission(69, 'view'), ReportController.reportPermissionList);
-router.get('/cms/report-permission/permission', authMiddleware, requirePermission(69, 'view'), ReportController.reportPermission);
 
 // ═══════════════════════════════════════════════════════════
 // Report Batch Management

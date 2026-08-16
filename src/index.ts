@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
+import path from 'path';
 import { requestLogger } from './middleware/logger.middleware';
 import { requestParser } from './middleware/requestParser.middleware';
 import { errorHandler } from './middleware/errorHandler.middleware';
@@ -44,6 +45,9 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.text({ limit: '10mb', type: 'text/plain' }));
+
+// 2b. Static files — Laravel storage/app/public parity (/storage/{path})
+app.use('/storage', express.static(path.join(process.cwd(), 'storage')));
 
 // 3. Request logger
 app.use(requestLogger);

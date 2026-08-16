@@ -505,6 +505,56 @@ export class StaahController {
     }
   }
 
+  static async syncLogRetry(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParam(req.params.id);
+      const log = await prisma.staah_sync_logs.findUnique({ where: { id } });
+      if (!log) { notFound(res, 'Sync log not found'); return; }
+
+      const interface_ = await prisma.staah_interfaces.findUnique({ where: { id: log.staah_interface_id ? BigInt(log.staah_interface_id) : 0n } });
+      if (!interface_) { error(res, 'Interface not found', 404); return; }
+
+      const payload = log.payload ? JSON.parse(log.payload as string) : {};
+      let result: any;
+
+      switch (log.type) {
+        case 'ari':
+        case 'price':
+          result = await staahService.storeRates(payload);
+          break;
+        case 'room':
+          for (const room of payload.room || []) {
+            result = await staahService.createUpdateDeleteRoomType(room);
+          }
+          break;
+        case 'rate':
+          for (const rate of payload.rate || []) {
+            result = await staahService.createUpdateDeleteRatePlan(rate);
+          }
+          break;
+        default:
+          error(res, 'Unknown sync type for retry', 400);
+          return;
+      }
+
+      const ok = String(result?.Status ?? result?.status ?? 'unknown').toLowerCase() === 'success';
+      await prisma.staah_sync_logs.update({
+        where: { id },
+        data: {
+          status: ok ? 'success' : 'failed',
+          response: JSON.stringify(result),
+          message: ok ? 'Retry successful' : 'Retry failed',
+          synced_at: new Date(),
+          updated_at: new Date(),
+        },
+      });
+
+      success(res, result, ok ? 'Retry successful' : 'Retry failed');
+    } catch (err: any) {
+      error(res, 'Retry failed: ' + err.message, 500);
+    }
+  }
+
   // ═══════════════════════════════════════════════
   // STAah OTA Company Mappings
   // ═══════════════════════════════════════════════
@@ -557,6 +607,49 @@ export class StaahController {
     } catch (err: any) {
       console.error('OTA mapping create error:', err);
       error(res, 'Failed to create OTA mapping', 500);
+    }
+  }
+
+  static async otaMappingSync(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const interface_ = await prisma.staah_interfaces.findFirst({
+        where: { property_id: pid, deleted_at: null },
+      });
+      if (!interface_) { error(res, 'Staah interface not found', 404); return; }
+
+      const mappings = await staahService.listingRoomType(interface_.hotel_id);
+      const rates = await staahService.listingRatePlan(interface_.hotel_id);
+
+      const staahChannels = mappings.Data?.map((r: any) => ({
+        channel_id: r.ChannelID || r.channel_id || r.id,
+        channel_name: r.ChannelName || r.channel_name || r.name,
+      })) || [];
+
+      const existingMappings = await prisma.staah_ota_company_mappings.findMany({
+        where: { property_id: pid },
+      });
+
+      const created = [];
+      for (const ch of staahChannels) {
+        const exists = existingMappings.find((m: any) => m.channel_id === ch.channel_id);
+        if (!exists) {
+          const createdMapping = await prisma.staah_ota_company_mappings.create({
+            data: {
+              property_id: pid,
+              channel_id: ch.channel_id,
+              company_profile_id: 0n,
+              staah_interface_id: interface_.id,
+              status: true,
+            },
+          });
+          created.push(bigintToNumber(createdMapping));
+        }
+      }
+
+      success(res, { synced: created.length, total_channels: staahChannels.length, created }, 'OTA mappings synced');
+    } catch (err: any) {
+      error(res, 'OTA mapping sync failed: ' + err.message, 500);
     }
   }
 
@@ -803,6 +896,100 @@ export class StaahController {
     };
 
     success(res, [], 'Success', 200, { master: result } as any);
+  }
+
+  // ═══════════════════════════════════════════════
+  // STAah Rates Calendar (grid view)
+  // ═══════════════════════════════════════════════
+
+  static async ratesCalendar(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const { date_from, date_to, room_type_id, rate_id } = req.body;
+      if (!date_from || !date_to) {
+        error(res, 'date_from and date_to are required', 400);
+        return;
+      }
+
+      const interface_ = await prisma.staah_interfaces.findFirst({
+        where: { property_id: pid, deleted_at: null },
+      });
+      if (!interface_) {
+        error(res, 'Staah interface not found for property', 404);
+        return;
+      }
+
+      const roomTypes = await prisma.room_types.findMany({
+        where: { property_id: pid, deleted_at: null, status: 1 },
+        ...(room_type_id ? { where: { ...{ property_id: pid, deleted_at: null, status: 1 }, id: BigInt(room_type_id) } } : {}),
+        select: { id: true, name: true },
+      });
+
+      const rates = await prisma.rates.findMany({
+        where: {
+          property_id: pid,
+          deleted_at: null,
+          status: 1,
+          staah: true,
+          ...(rate_id ? { id: BigInt(rate_id) } : {}),
+        },
+        select: { id: true, name: true, code: true },
+      });
+
+      if (!roomTypes.length || !rates.length) {
+        success(res, { grid: [], dates: [], roomTypes, rates }, 'No room types or rates mapped to STAAH');
+        return;
+      }
+
+      const rateRates = await prisma.rate_rates.findMany({
+        where: {
+          rate_id: { in: rates.map((r: any) => r.id) },
+          room_type_id: { in: roomTypes.map((rt: any) => Number(rt.id)) },
+          date: { gte: new Date(`${date_from}T00:00:00Z`), lte: new Date(`${date_to}T23:59:59Z`) },
+          deleted_at: null,
+        },
+        orderBy: { date: 'asc' },
+      });
+
+      const dates: string[] = [];
+      const period = new Date(date_from);
+      const endDate = new Date(date_to);
+      while (period <= endDate) {
+        dates.push(period.toISOString().split('T')[0]);
+        period.setDate(period.getDate() + 1);
+      }
+
+      const grid: any[] = [];
+      for (const rt of roomTypes) {
+        const row: any = { room_type: { id: rt.id, name: rt.name, staah_room_id: rt.name.toLowerCase().replace(/\s+/g, '') }, rates: [] };
+        for (const rate of rates) {
+          const rateData: any = { rate: { id: rate.id, name: rate.name, code: rate.code || '', staah_rate_plan_id: (rate.code || rate.name || '').toLowerCase().replace(/\s+/g, '') }, dates: {} };
+          for (const date of dates) {
+            const rr = rateRates.find((r: any) => r.rate_id === rate.id && r.room_type_id === rt.id && r.date.toISOString().split('T')[0] === date);
+            if (rr) {
+              rateData.dates[date] = {
+                one_adult: Number(rr.one_adult),
+                two_adult: Number(rr.two_adult),
+                extra_adult: Number(rr.extra_adult),
+                extra_child: Number(rr.extra_child),
+                stop_sell: rr.stop_sell,
+                min_night: rr.min_night,
+                max_night: rr.max_night,
+                stop_arrival: rr.stop_arrival,
+                stop_departure: rr.stop_departure,
+              };
+            }
+          }
+          row.rates.push(rateData);
+        }
+        grid.push(row);
+      }
+
+      success(res, { grid, dates, roomTypes, rates }, 'Rates calendar generated');
+    } catch (err: any) {
+      console.error('Rates calendar error:', err);
+      error(res, 'Failed to generate rates calendar: ' + err.message, 500);
+    }
   }
 
   // ═══════════════════════════════════════════════

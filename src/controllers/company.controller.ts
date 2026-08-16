@@ -159,6 +159,139 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profiles.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
+  // ── Client (Client menu = Laravel CompanyController, table `companies`) ──
+  static async clientFormat(d: any, props: string): Promise<any> {
+    return {
+      id: Number(d.id),
+      ip: d.ip,
+      name: d.name,
+      email: d.email,
+      contract_expired: d.contract_expired,
+      join_date: d.join_date,
+      npwp: d.npwp,
+      no_tlp: d.no_tlp,
+      pic_name: d.pic_name,
+      created_at: d.created_at,
+      created_by: d.created_by ? Number(d.created_by) : null,
+      properties: props,
+      status: { value: !!d.status, label: d.status ? 'Active' : 'Inactive' },
+    };
+  }
+
+  static async clientList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
+      const s = req.query.search as string;
+      const trash = req.query.trash === '1' || req.query.trash === 'true';
+      const where: any = { deleted_at: trash ? { not: null } : null };
+      if (s) where.OR = [
+        { name: { contains: s, mode: 'insensitive' } },
+        { ip: { contains: s, mode: 'insensitive' } },
+        { npwp: { contains: s, mode: 'insensitive' } },
+        { no_tlp: { contains: s, mode: 'insensitive' } },
+      ];
+      const [data, total, links] = await Promise.all([
+        prisma.companies.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),
+        prisma.companies.count({ where }),
+        prisma.model_has_companies.findMany({ where: { model_type: 'App\\Models\\Property' }, include: { companies: { select: { id: true } } } }),
+      ]);
+      const propNames = await prisma.properties.findMany({ where: { id: { in: [...new Set(links.map((l: any) => l.model_id))] } }, select: { id: true, name: true } });
+      const byCompany: any = {};
+      for (const l of links) {
+        const cid = Number(l.company_id);
+        (byCompany[cid] = byCompany[cid] || []).push(propNames.find((p: any) => p.id === l.model_id)?.name || '');
+      }
+      const rows = bn(data).map((r: any, i: number) => ({
+        no: (page - 1) * lim + i + 1,
+        ...r,
+        properties: (byCompany[r.id] || []).filter(Boolean).join(', '),
+        status: { value: !!r.status, label: r.status ? 'Active' : 'Inactive' },
+      }));
+      success(res, rows, 'Success', 200, {
+        table: TABLES.company,
+        pagging: laravelPaging(total, lim, page),
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+      });
+    } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
+  }
+
+  static async clientShow(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; }
+      const id = BigInt(raw);
+      const d = await prisma.companies.findUnique({ where: { id } });
+      if (!d) { notFound(res); return; }
+      success(res, await CompanyController.clientFormat(d, ''), 'Success');
+    } catch (err: any) { error(res, 'Failed', 500); }
+  }
+
+  static async clientCreateForm(req: Request, res: Response): Promise<void> {
+    try {
+      const master = { statuses: STATUSES };
+      if (req.params.id !== undefined) {
+        const id = idP(req.params.id);
+        const d = await prisma.companies.findUnique({ where: { id } });
+        if (!d) { notFound(res); return; }
+        const links = await prisma.model_has_companies.findMany({ where: { company_id: id, model_type: 'App\\Models\\Property' } });
+        const props = await prisma.properties.findMany({ where: { id: { in: links.map((l: any) => l.model_id) } }, select: { name: true } });
+        success(res, await CompanyController.clientFormat(d, props.map((p: any) => p.name).join(', ')), 'Success', 200, { master });
+        return;
+      }
+      success(res, {}, 'Success', 200, { master });
+    } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
+  }
+
+  static async clientStore(req: Request, res: Response): Promise<void> {
+    try {
+      const { name, email, ip, contract_expired, join_date, npwp, no_tlp, pic_name, status } = req.body;
+      if (!name) { badRequest(res, 'name required'); return; }
+      if (email) {
+        const dup = await prisma.companies.findFirst({ where: { email, deleted_at: null } });
+        if (dup) { badRequest(res, 'The email has already been taken.'); return; }
+      }
+      const d = await prisma.companies.create({
+        data: {
+          name, email, ip, contract_expired: contract_expired || null, join_date: join_date || null,
+          npwp, no_tlp, pic_name,
+          status: status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : 0,
+          created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
+        },
+      });
+      success(res, await CompanyController.clientFormat(d, ''), 'Created');
+    } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
+  }
+
+  static async clientUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idP(req.params.id);
+      const existing = await prisma.companies.findUnique({ where: { id } });
+      if (!existing) { notFound(res); return; }
+      const { name, email, ip, contract_expired, join_date, npwp, no_tlp, pic_name, status } = req.body;
+      if (name !== undefined && !name) { badRequest(res, 'name required'); return; }
+      if (email) {
+        const dup = await prisma.companies.findFirst({ where: { email, deleted_at: null, NOT: { id } } });
+        if (dup) { badRequest(res, 'The email has already been taken.'); return; }
+      }
+      const data: any = { updated_at: new Date() };
+      if (name !== undefined) data.name = name;
+      if (email !== undefined) data.email = email;
+      if (ip !== undefined) data.ip = ip;
+      if (contract_expired !== undefined) data.contract_expired = contract_expired || null;
+      if (join_date !== undefined) data.join_date = join_date || null;
+      if (npwp !== undefined) data.npwp = npwp;
+      if (no_tlp !== undefined) data.no_tlp = no_tlp;
+      if (pic_name !== undefined) data.pic_name = pic_name;
+      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : 0;
+      const d = await prisma.companies.update({ where: { id }, data });
+      success(res, await CompanyController.clientFormat(d, ''), 'Updated');
+    } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
+  }
+
+  static async clientDestroy(req: Request, res: Response): Promise<void> {
+    try { const id = idP(req.params.id); await prisma.companies.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
+  }
+
   // ── Contact Person ──
   static async contactList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }

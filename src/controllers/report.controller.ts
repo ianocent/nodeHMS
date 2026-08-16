@@ -6,6 +6,8 @@ import ExcelJS from 'exceljs';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { STATUSES } from '../utils/cmsConfig';
 
+const STATUS_RESERVATION_CANCEL = 2; // config cms.status_reservation.cancel_reservation.id
+
 // Laravel ReportPermission::formatTable parity
 const REPORT_PERMISSION_TABLE = [
   { label: 'No', key: 'no', type: 'none', is_search: false },
@@ -283,38 +285,369 @@ async function getOnResvBal(params: any): Promise<any[]> {
   }));
 }
 
-async function getRoomDivision(params: any): Promise<any[]> {
-  const pid = params.propertyId;
-  const startDate = params.startDate || formatDate(new Date());
-  const endDate = params.endDate || startDate;
+function nf(v: any, dec = 0): string {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Number(v);
+  if (!isFinite(n)) return '';
+  return n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+}
+
+function reservationRatePrice(r: any): number {
+  const d = safeParseJson(r?.data);
+  const p = d?.rate_price;
+  return p !== undefined && p !== null && p !== '' ? Number(p) : Number(r?.amount) || 0;
+}
+
+function startOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function endOfDay(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+}
+
+async function getBusinessDate(pid: bigint): Promise<string> {
+  const last = await prisma.log_audits.findFirst({
+    where: { property_id: Number(pid), deleted_at: null },
+    orderBy: { date: 'desc' },
+  });
+  if (last?.date) {
+    const d = new Date(last.date);
+    d.setDate(d.getDate() + 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  return formatDate(new Date());
+}
+
+async function getSegmentData(pid: bigint, segment: string, start: Date, end: Date, segmentNumber: number): Promise<number[]> {
+  const typeIds = (await prisma.types.findMany({
+    where: { group: `market-segment-${segmentNumber}`, name: segment, deleted_at: null, status: 1 },
+    select: { id: true },
+  })).map((t: any) => t.id);
+  if (!typeIds.length) return [0, 0, 0, 0];
+
+  const mht = await prisma.model_has_types.findMany({
+    where: { model_type: 'App\\Models\\Folio', type_id: { in: typeIds } },
+    select: { model_id: true },
+  });
+  const folioIds = [...new Set(mht.map((m: any) => m.model_id))];
+  if (!folioIds.length) return [0, 0, 0, 0];
+
+  const folios = await prisma.folios.findMany({
+    where: {
+      id: { in: folioIds },
+      check_in_date: { gte: start, lte: end },
+      status_reservation: { not: STATUS_RESERVATION_CANCEL },
+      deleted_at: null,
+    },
+    select: { id: true },
+  });
+  if (!folios.length) return [0, 0, 0, 0];
 
   const reservations = await prisma.reservations.findMany({
+    where: { folio_id: { in: folios.map((f: any) => f.id) }, is_posting: 0, deleted_at: null },
+  });
+
+  const roomCount = reservations.length;
+  const revenue = reservations.reduce((s: number, r: any) => s + reservationRatePrice(r), 0);
+  const totalRooms = await prisma.rooms.count({ where: { property_id: pid, deleted_at: null } });
+  const percentage = totalRooms > 0 ? (roomCount / totalRooms) * 100 : 0;
+  const average = roomCount > 0 ? revenue / roomCount : 0;
+
+  return [roomCount, percentage, revenue, average];
+}
+
+async function getRoomDivisionTotalData(pid: bigint, date: Date, totalRooms: number): Promise<any[]> {
+  const dayStart = startOfDay(date);
+  const dayEnd = endOfDay(date);
+  const notCancel = { not: STATUS_RESERVATION_CANCEL };
+
+  const occupiedRows = await prisma.reservations.findMany({
     where: {
       property_id: pid,
+      date: { gte: dayStart, lte: dayEnd },
       deleted_at: null,
-      date: {
-        gte: new Date(`${startDate}T00:00:00Z`),
-        lte: new Date(`${endDate}T23:59:59Z`),
-      },
+      folios: { status_reservation: notCancel },
     },
-    include: {
-      room_types: { select: { name: true } },
+  });
+  const occupiedRooms = occupiedRows.length;
+  const revenue = occupiedRows.reduce((s: number, r: any) => s + reservationRatePrice(r), 0);
+
+  const blockedRooms = await prisma.rooms.count({ where: { property_id: pid, room_status: 3, deleted_at: null } });
+  const vacantRooms = totalRooms - occupiedRooms - blockedRooms;
+
+  const dayUseRooms = await prisma.reservations.count({
+    where: {
+      property_id: pid,
+      check_in_date: { gte: dayStart, lte: dayEnd },
+      check_out_date: { gte: dayStart, lte: dayEnd },
+      deleted_at: null,
+      folios: { status_reservation: notCancel },
     },
   });
 
-  const byType: Record<string, { count: number; revenue: number }> = {};
-  for (const r of reservations) {
-    const name = r.room_types?.name || r.room_type_name || 'Unknown';
-    if (!byType[name]) byType[name] = { count: 0, revenue: 0 };
-    byType[name].count += r.night || 0;
-    byType[name].revenue += Number(r.amount);
+  const complimentaryRooms = await prisma.folios.count({
+    where: {
+      property_id: pid,
+      complimentary: true,
+      check_in_date: { gte: dayStart, lte: dayEnd },
+      status_reservation: notCancel,
+      deleted_at: null,
+    },
+  });
+
+  const occupancyPercentage = totalRooms > 0 ? (occupiedRooms / totalRooms) * 100 : 0;
+  const averageRate = occupiedRooms > 0 ? revenue / occupiedRooms : 0;
+  const pct = (n: number) => (totalRooms > 0 ? (n / totalRooms) * 100 : 0);
+
+  return [
+    { name: 'Occupancy (inclu COMP)', today: [occupiedRooms, occupancyPercentage, revenue, averageRate], mtd: [0, 0, 0, 0], ytd: [0, 0, 0, 0] },
+    { name: 'Block', today: [blockedRooms, pct(blockedRooms), null, null], mtd: [0, 0, null, null], ytd: [0, 0, null, null] },
+    { name: 'Vacant', today: [vacantRooms, pct(vacantRooms), null, null], mtd: [0, 0, null, null], ytd: [0, 0, null, null] },
+    { name: 'Total Rooms', today: [totalRooms, 100, null, null], mtd: [0, 0, null, null], ytd: [0, 0, null, null] },
+    { name: 'Day Use', today: [dayUseRooms, pct(dayUseRooms), null, null], mtd: [0, 0, null, null], ytd: [0, 0, null, null] },
+    { name: 'Complimentary', today: [complimentaryRooms, pct(complimentaryRooms), null, null], mtd: [0, 0, null, null], ytd: [0, 0, null, null] },
+  ];
+}
+
+async function getRoomDivision(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+
+  const rawDate = params.date || (params.startDate || formatDate(new Date()));
+  const parsed = new Date(`${rawDate}T00:00:00`);
+  if (isNaN(parsed.getTime())) {
+    const bd = await getBusinessDate(pid);
+    params.date = bd;
+  } else {
+    params.date = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+  }
+  const date = new Date(`${params.date}T00:00:00`);
+  const totalRooms = await prisma.rooms.count({ where: { property_id: pid, deleted_at: null } });
+
+  const reportData: any[] = [];
+
+  for (let i = 1; i <= 4; i++) {
+    const segmentNames = (await prisma.types.findMany({
+      where: { group: `market-segment-${i}`, deleted_at: null, status: 1 },
+      select: { name: true },
+    })).map((t: any) => t.name);
+
+    reportData.push({
+      name: `Market Segment ${i}`,
+      isHeader: true,
+      today: [null, null, null, null],
+      mtd: [null, null, null, null],
+      ytd: [null, null, null, null],
+    });
+
+    const todayTotal = [0, 0, 0, 0];
+    const mtdTotal = [0, 0, 0, 0];
+    const ytdTotal = [0, 0, 0, 0];
+
+    for (const segment of segmentNames) {
+      const todayData = await getSegmentData(pid, segment, date, date, i);
+      const mtdData = await getSegmentData(pid, segment, startOfDay(new Date(date.getFullYear(), date.getMonth(), 1)), date, i);
+      const ytdData = await getSegmentData(pid, segment, startOfDay(new Date(date.getFullYear(), 0, 1)), date, i);
+
+      for (let j = 0; j < 4; j++) {
+        todayTotal[j] += todayData[j] ?? 0;
+        mtdTotal[j] += mtdData[j] ?? 0;
+        ytdTotal[j] += ytdData[j] ?? 0;
+      }
+
+      reportData.push({ name: segment, isHeader: false, today: todayData, mtd: mtdData, ytd: ytdData });
+    }
+
+    reportData.push({
+      name: `Total Market Segment ${i}`,
+      isHeader: false,
+      today: [
+        todayTotal[0],
+        totalRooms > 0 ? (todayTotal[0] / totalRooms) * 100 : 0,
+        todayTotal[2],
+        todayTotal[0] > 0 ? todayTotal[2] / todayTotal[0] : 0,
+      ],
+      mtd: [
+        mtdTotal[0],
+        totalRooms > 0 ? (mtdTotal[0] / totalRooms) * 100 : 0,
+        mtdTotal[2],
+        mtdTotal[0] > 0 ? mtdTotal[2] / mtdTotal[0] : 0,
+      ],
+      ytd: [
+        ytdTotal[0],
+        totalRooms > 0 ? (ytdTotal[0] / totalRooms) * 100 : 0,
+        ytdTotal[2],
+        ytdTotal[0] > 0 ? ytdTotal[2] / ytdTotal[0] : 0,
+      ],
+    });
+
+    reportData.push({
+      name: 'spacer', isHeader: false,
+      today: [null, null, null, null],
+      mtd: [null, null, null, null],
+      ytd: [null, null, null, null],
+    });
   }
 
-  return Object.entries(byType).map(([roomType, vals]) => ({
-    room_type: roomType,
-    room_nights: vals.count,
-    revenue: vals.revenue,
-  }));
+  reportData.push(...(await getRoomDivisionTotalData(pid, date, totalRooms)));
+
+  return reportData;
+}
+
+function renderRoomDivisionHtml(reportData: any[], dateDMY: string, startDate: string, endDate: string): string {
+  const rows = reportData.map((row: any) => {
+    if (row.name === 'spacer') {
+      return `<tr class="spacer"><td colspan="13"></td></tr>`;
+    }
+    if (row.isHeader) {
+      return `<tr class="segment-header"><td colspan="13" class="segment-name">${row.name}</td></tr>`;
+    }
+    if (row.name.startsWith('Total Market Segment')) {
+      return `<tr class="segment-total"><td class="segment-name">${row.name}</td>${['today', 'mtd', 'ytd'].map((p) => {
+        const c = row[p];
+        return `<td>${c[0] !== null && c[0] !== undefined ? nf(c[0]) : ''}</td><td>${c[1] !== null && c[1] !== undefined ? nf(c[1], 2) : ''}</td><td>${c[2] !== null && c[2] !== undefined ? nf(c[2], 2) : ''}</td><td>${c[3] !== null && c[3] !== undefined ? nf(c[3], 2) : ''}</td>`;
+      }).join('')}</tr>`;
+    }
+    const bold = ['Occupancy (inclu COMP)', 'Total Rooms'].includes(row.name);
+    return `<tr${bold ? ' class="bold"' : ''}><td class="segment-name">${row.name}</td>${['today', 'mtd', 'ytd'].map((p) => {
+      const c = row[p];
+      return `<td>${c[0] !== null && c[0] !== undefined ? nf(c[0]) : ''}</td><td>${c[1] !== null && c[1] !== undefined ? nf(c[1], 2) : ''}</td><td>${c[2] !== null && c[2] !== undefined ? nf(c[2], 2) : ''}</td><td>${c[3] !== null && c[3] !== undefined ? nf(c[3], 2) : ''}</td>`;
+    }).join('')}</tr>`;
+  }).join('\n');
+
+  const dateLabel = startDate === endDate ? `For Business Date: ${startDate}` : `For Business Date From ${startDate} To ${endDate}`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Room Division Report</title>
+<style>
+body { font-family: Arial, sans-serif; font-size: 10px; line-height: 1.2; padding: 20px; }
+h1, h2 { color: #333; text-align: center; margin-bottom: 10px; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+th, td { border: 1px solid #ddd; padding: 4px; text-align: right; }
+th { background-color: #f2f2f2; font-weight: normal; }
+tr { page-break-inside: avoid; }
+.segment-name { text-align: left; }
+.bold { font-weight: bold; }
+.spacer { height: 10px; }
+.spacer td { border: none; }
+.main-title { text-align: center; }
+.segment-header { background-color: #e6e6e6; font-weight: bold; }
+.segment-total { background-color: #f9f9f9; font-weight: bold; font-style: italic; }
+main { text-transform: uppercase; }
+</style>
+</head>
+<body>
+<main>
+<table>
+<thead>
+<tr>
+<th rowspan="2" class="main-title">Market Segment</th>
+<th colspan="4" class="main-title">Today</th>
+<th colspan="4" class="main-title">Month To Date</th>
+<th colspan="4" class="main-title">Year To Date</th>
+</tr>
+<tr>
+<th>Room</th><th>Occupancy %</th><th>Revenue</th><th>ARR</th>
+<th>Room</th><th>Occupancy %</th><th>Revenue</th><th>ARR</th>
+<th>Room</th><th>%</th><th>Revenue</th><th>ARR</th>
+</tr>
+</thead>
+<tbody>
+${rows}
+</tbody>
+</table>
+</main>
+</body>
+</html>`;
+}
+
+async function renderPdf(
+  html: string,
+  opts: { header?: string; footer?: string; landscape?: boolean } = {}
+): Promise<Buffer> {
+  let puppeteer: any;
+  try {
+    puppeteer = require('puppeteer-core');
+  } catch {
+    throw new Error('puppeteer-core tidak terpasang. Jalankan: npm install puppeteer-core');
+  }
+
+  const fs = require('fs');
+  const candidates = [
+    process.env.CHROME_PATH,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  ].filter(Boolean);
+  const executablePath = candidates.find((p): p is string => !!p && fs.existsSync(p));
+  if (!executablePath) {
+    throw new Error('Chrome/Edge tidak ditemukan untuk render PDF');
+  }
+
+  const browser = await puppeteer.launch({ executablePath, args: ['--no-sandbox', '--disable-gpu'] });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      landscape: opts.landscape !== false,
+      displayHeaderFooter: true,
+      margin: { top: '45mm', bottom: '35mm', left: '10mm', right: '10mm' },
+      headerTemplate: opts.header || '<div></div>',
+      footerTemplate: opts.footer || '<div></div>',
+    });
+  } finally {
+    await browser.close();
+  }
+}
+
+async function renderRoomDivisionPdf(res: Response, reportData: any[], params: any): Promise<void> {
+  const [y, m, d] = params.date.split('-').map(Number);
+  const dateDMY = `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}/${y}`;
+  const startDate = params.date;
+  const endDate = params.date;
+  const now = new Date();
+  const nowStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+  const header = `<div style="font-family: Arial, sans-serif; font-size: 10px; width: 100%; text-align: center; padding: 0 10mm;"><div style="font-size: 14px; font-weight: bold;">Room Division Report</div><div style="font-size: 12px;">For Business Date: ${startDate}</div></div>`;
+  const footer = `<div style="font-family: Arial, sans-serif; font-size: 9px; width: 100%; padding: 0 10mm;"><strong>Account/Transaction Report</strong><br><strong>Printed On:</strong> ${nowStr}</div>`;
+
+  const pdf = await renderPdf(renderRoomDivisionHtml(reportData, dateDMY, startDate, endDate), { header, footer, landscape: true });
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="room-division${startDate}.pdf"`);
+  res.send(pdf);
+}
+
+function renderGenericReportHtml(data: any[], title: string, dateStr: string): string {
+  if (!data.length) {
+    return `<!DOCTYPE html><html><head><title>${title}</title><style>body{font-family:Arial,sans-serif;padding:20px;text-align:center;}</style></head><body><h2>${title}</h2><p>Tidak ada data</p></body></html>`;
+  }
+  const cols = Object.keys(data[0]);
+  const headerRow = cols.map(c => `<th>${c.replace(/_/g, ' ').replace(/\b\w/g, (x: string) => x.toUpperCase())}</th>`).join('');
+  const rows = data.map(row => `<tr>${cols.map(c => `<td>${row[c] !== null && row[c] !== undefined ? row[c] : ''}</td>`).join('')}</tr>`).join('\n');
+  const now = new Date();
+  const nowStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>${title}</title>
+<style>body{font-family:Arial,sans-serif;font-size:9px;padding:20px;}h2{text-align:center;margin-bottom:5px;}p{text-align:center;margin:0;font-size:10px;}table{border-collapse:collapse;width:100%;margin-top:15px;}th,td{border:1px solid #ddd;padding:3px;text-align:left;}th{background:#f2f2f2;font-weight:bold;}tr:nth-child(even){background:#fafafa;}</style></head>
+<body><h2>${title}</h2><p>Date: ${dateStr}</p><table><thead><tr>${headerRow}</tr></thead><tbody>${rows}</tbody></table><p style="margin-top:20px;text-align:right;font-size:8px;">Printed: ${nowStr}</p></body></html>`;
+}
+
+async function renderGenericReportPdf(res: Response, data: any[], title: string, dateStr: string, fileName: string, landscape = false): Promise<void> {
+  const now = new Date();
+  const nowStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const header = `<div style="font-family:Arial,sans-serif;font-size:10px;width:100%;text-align:center;padding:0 10mm;"><div style="font-size:14px;font-weight:bold;">${title}</div><div style="font-size:12px;">Date: ${dateStr}</div></div>`;
+  const footer = `<div style="font-family:Arial,sans-serif;font-size:9px;width:100%;padding:0 10mm;"><strong>Account/Transaction Report</strong><br><strong>Printed On:</strong> ${nowStr}</div>`;
+  const pdf = await renderPdf(renderGenericReportHtml(data, title, dateStr), { header, footer, landscape });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}.pdf"`);
+  res.send(pdf);
 }
 
 async function getNationalityStatistic(params: any): Promise<any[]> {
@@ -651,7 +984,6 @@ function safeStringify(v: any): string {
 
 const ROOM_STATUS_NAME: Record<number, string> = { 0: 'Vacant', 1: 'Occupied', 2: 'Out of Order', 3: 'Reserved' };
 const MAID_STATUS_NAME: Record<number, string> = { 0: 'Clean', 1: 'Dirty', 2: 'Maid in Room', 3: 'Inspection Required' };
-const STATUS_RESERVATION_CANCEL = 2;
 const STATUS_RESERVATION_CHECK_IN = 0;
 const STATUS_RESERVATION_RESERVATION = 3;
 const STATUS_RESERVATION_PENDING = 5;
@@ -3620,6 +3952,125 @@ async function getRoomOccupancyChart(params: any): Promise<any[]> {
   }];
 }
 
+async function getRoomTypeRevenueReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const start = params.startDate || params.date;
+  const end = params.endDate || start;
+  const reservations = await prisma.reservations.findMany({
+    where: { property_id: pid, deleted_at: null, date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) } },
+    include: { room_types: { select: { name: true } } },
+  });
+  const byType: Record<string, { revenue: number; nights: number; count: number }> = {};
+  for (const r of reservations) {
+    const name = r.room_types?.name || r.room_type_name || 'Unknown';
+    if (!byType[name]) byType[name] = { revenue: 0, nights: 0, count: 0 };
+    byType[name].revenue += Number(r.amount);
+    byType[name].nights += r.night || 0;
+    byType[name].count += 1;
+  }
+  return Object.entries(byType).map(([room_type, v]) => ({
+    room_type,
+    room_nights: v.nights,
+    reservations: v.count,
+    revenue: v.revenue,
+    avg_rate: v.nights > 0 ? v.revenue / v.nights : 0,
+  }));
+}
+
+async function getOwiRevenueReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const start = params.startDate || params.date;
+  const end = params.endDate || start;
+  const folios = await prisma.folios.findMany({
+    where: { property_id: pid, deleted_at: null, check_in_date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) }, is_walk_in: true },
+    select: { id: true, folio_number: true, first_name: true, last_name: true, check_in_date: true, total_amount: true },
+  });
+  return folios.map((f: any) => ({
+    folio_number: f.folio_number,
+    guest_name: `${f.first_name || ''} ${f.last_name || ''}`.trim(),
+    check_in: f.check_in_date ? formatDate(f.check_in_date) : '',
+    total_amount: Number(f.total_amount),
+  }));
+}
+
+async function getOccupancyRevenueReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const start = params.startDate || params.date;
+  const end = params.endDate || start;
+  const reservations = await prisma.reservations.findMany({
+    where: { property_id: pid, deleted_at: null, date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) } },
+    include: { room_types: { select: { name: true } } },
+  });
+  const totalRooms = await prisma.rooms.count({ where: { property_id: pid, deleted_at: null } });
+  const days = Math.max(1, Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / 86400000) + 1);
+  const totalRoomNights = totalRooms * days;
+  const occupiedNights = reservations.reduce((s: number, r: any) => s + (r.night || 0), 0);
+  const revenue = reservations.reduce((s: number, r: any) => s + Number(r.amount), 0);
+  const occupancy = totalRoomNights > 0 ? (occupiedNights / totalRoomNights) * 100 : 0;
+  const arr = occupiedNights > 0 ? revenue / occupiedNights : 0;
+  return [{ period: `${start} to ${end}`, total_rooms: totalRooms, total_room_nights: totalRoomNights, occupied_nights: occupiedNights, occupancy_pct: occupancy, revenue, arr }];
+}
+
+async function getFinancialReport(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const start = params.startDate || params.date;
+  const end = params.endDate || start;
+  const folios = await prisma.folios.findMany({
+    where: { property_id: pid, deleted_at: null, check_in_date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) } },
+    select: { id: true, total_amount: true, status_reservation: true },
+  });
+  const totalRevenue = folios.reduce((s: number, f: any) => s + Number(f.total_amount), 0);
+  const cancelled = folios.filter((f: any) => f.status_reservation === 2).length;
+  return [{
+    period: `${start} to ${end}`,
+    total_folios: folios.length,
+    cancelled_folios: cancelled,
+    net_folios: folios.length - cancelled,
+    total_revenue: totalRevenue,
+    avg_per_folio: folios.length > 0 ? totalRevenue / folios.length : 0,
+  }];
+}
+
+async function getAllCompaniesRoomRevenueBreakdown(params: any): Promise<any[]> {
+  const pid = params.propertyId;
+  const start = params.startDate || params.date;
+  const end = params.endDate || start;
+  const folios = await prisma.folios.findMany({
+    where: { property_id: pid, deleted_at: null, check_in_date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) }, company_profile_id: { gt: 0 } },
+    select: { id: true, company_name: true, total_amount: true },
+  });
+  const folioIds = folios.map((f: any) => f.id);
+  const reservations = await prisma.reservations.findMany({
+    where: { folio_id: { in: folioIds }, deleted_at: null },
+    select: { folio_id: true, night: true, amount: true },
+  });
+  const resByFolio: Record<string, { nights: number; revenue: number }> = {};
+  for (const r of reservations) {
+    const key = String(r.folio_id);
+    if (!resByFolio[key]) resByFolio[key] = { nights: 0, revenue: 0 };
+    resByFolio[key].nights += r.night || 0;
+    resByFolio[key].revenue += Number(r.amount);
+  }
+  const byCompany: Record<string, { nights: number; revenue: number; folios: number }> = {};
+  for (const f of folios) {
+    const name = f.company_name || 'Unknown';
+    if (!byCompany[name]) byCompany[name] = { nights: 0, revenue: 0, folios: 0 };
+    byCompany[name].folios += 1;
+    byCompany[name].revenue += Number(f.total_amount);
+    const res = resByFolio[String(f.id)];
+    if (res) {
+      byCompany[name].nights += res.nights;
+      byCompany[name].revenue += res.revenue;
+    }
+  }
+  return Object.entries(byCompany).map(([company, v]) => ({
+    company,
+    folios: v.folios,
+    room_nights: v.nights,
+    revenue: v.revenue,
+  }));
+}
+
 function getGenericReport(name: string, params: any): any[] {
   return [{
     report: name,
@@ -3668,6 +4119,11 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'account/tax-breakdown-detail': (p: any) => getAsyncJobReport('tax_breakdown_detail', p),
   'account/daily-sales-report': getAccountDailySalesReport,
   'account/daily-statistic-report': getDailyStatisticReport,
+  'account/room-type-revenue-report': getRoomTypeRevenueReport,
+  'account/owi-revenue-report': getOwiRevenueReport,
+  'occupancy-revenue-report': getOccupancyRevenueReport,
+  'financial-report': getFinancialReport,
+  'batch/sales-marketing/all-companies-room-revenue-breakdown-report': getAllCompaniesRoomRevenueBreakdown,
   'batch/frontoffice/free-of-charge-detail-report': getFreeOfChargeDetailReport,
   'batch/frontoffice/reservations-by-staff': getReservationsByStaffReport,
   'batch/frontoffice/room-type-detailed-report': getRoomTypeDetailedReport,
@@ -3875,6 +4331,96 @@ export class ReportController {
         const data = await reportHandlers[reportKey](params);
 
         if (typeOps === 'view') {
+          if (reportKey === 'batch/after-night-audit/room-division' || reportKey === 'batch/after-night-audit/room-division/view') {
+            await renderRoomDivisionPdf(res, data, params);
+            return;
+          }
+          if (reportKey.startsWith('account/')) {
+            const baseKey = reportKey.replace('/view', '');
+            const titleMap: Record<string, string> = {
+              'account/transaction-report': 'Transaction Report',
+              'account/cash-detailed': 'Cash Detailed Report',
+              'account/cash-summary': 'Cash Summary Report',
+              'account/guest-ledger-report': 'Guest Ledger Report',
+              'account/on-resv-bal': 'On Reservation Balance',
+              'account/comission-for-booking': 'Commission for Booking',
+              'account/comission-for-booking-company': 'Commission for Booking Company',
+              'account/tax-breakdown-summary': 'Tax Breakdown Summary',
+              'account/in-house-folio-bal-history': 'In-House Folio Balance History',
+              'account/transaction-report-by-staff': 'Transaction Report by Staff',
+              'account/daily-revenue-report': 'Daily Revenue Report',
+              'account/tax-breakdown-detail': 'Tax Breakdown Detail',
+              'account/daily-sales-report': 'Daily Sales Report',
+              'account/daily-statistic-report': 'Daily Statistic Report',
+              'account/room-type-revenue-report': 'Room Type Revenue Report',
+              'account/owi-revenue-report': 'OWI Revenue Report',
+            };
+            const title = titleMap[baseKey] || baseKey.split('/').pop()?.replace(/-/g, ' ') || 'Report';
+            const dateStr = params.date || new Date().toISOString().slice(0, 10);
+            const fileName = baseKey.replace('/', '-');
+            await renderGenericReportPdf(res, data, title, dateStr, fileName, false);
+            return;
+          }
+          if (reportKey.startsWith('batch/')) {
+            const baseKey = reportKey.replace('/view', '');
+            const titleMap: Record<string, string> = {
+              'batch/after-night-audit/daily-statistic': 'Daily Statistic',
+              'batch/after-night-audit/in-house-folio-balance': 'In-House Folio Balance',
+              'batch/after-night-audit/vacant-rooms': 'Vacant Rooms',
+              'batch/after-night-audit/no-show': 'No Show',
+              'batch/after-night-audit/on-resv-bal': 'On Reservation Balance',
+              'batch/after-night-audit/nationality-statistic': 'Nationality Statistic',
+              'batch/after-night-audit/expected-arrival-summary': 'Expected Arrival Summary',
+              'batch/after-night-audit/expected-departure-summary': 'Expected Departure Summary',
+              'batch/after-night-audit/in-house-foliobal': 'In-House Folio Balance',
+              'batch/before-night-audit/before-in-house-foliobal': 'Before In-House Folio Balance',
+              'batch/housekeeping/room-status-report': 'Room Status Report',
+              'batch/housekeeping/block-rooms-report': 'Block Rooms Report',
+              'batch/housekeeping/room-change-history': 'Room Change History',
+              'batch/frontoffice/cancellation-listing': 'Cancellation Listing',
+              'batch/frontoffice/birthday-report': 'Birthday Report',
+              'batch/after-night-audit/roomtype-utilization': 'Room Type Utilization',
+              'batch/after-night-audit/inclusive-items': 'Inclusive Items',
+              'batch/before-night-audit/rate-code-analysis': 'Rate Code Analysis',
+              'batch/before-night-audit/vacant-and-dirty-rooms': 'Vacant and Dirty Rooms',
+              'batch/after-night-audit/daily-room-forecast': 'Daily Room Forecast',
+              'batch/before-night-audit/breakfast-report': 'Breakfast Report',
+              'batch/before-night-audit/room-revenue-breakdown': 'Room Revenue Breakdown',
+              'batch/frontoffice/daily-sales-report': 'Daily Sales Report',
+              'batch/frontoffice/daily-revenue-report': 'Daily Revenue Report',
+              'batch/frontoffice/free-of-charge-detail-report': 'Free of Charge Detail Report',
+              'batch/frontoffice/reservations-by-staff': 'Reservations by Staff',
+              'batch/frontoffice/room-type-detailed-report': 'Room Type Detailed Report',
+              'batch/frontoffice/in-house-guest-listing': 'In-House Guest Listing',
+              'batch/frontoffice/room-type-monthly-report': 'Room Type Monthly Report',
+              'batch/frontoffice/same-day-check-out-check-in-report': 'Same Day Check Out Check In',
+              'batch/frontoffice/transaction-by-staff-report': 'Transaction by Staff Report',
+              'batch/sales-marketing/all-companies-room-revenue': 'All Companies Room Revenue',
+              'batch/sales-marketing/all-companies-room-revenue-breakdown-report': 'All Companies Room Revenue Breakdown',
+              'batch/sales-marketing/market-segmentation-report': 'Market Segmentation Report',
+              'batch/sales-marketing/nationality-statistics-detailed': 'Nationality Statistics Detailed',
+              'batch/sales-marketing/staff-sales-summary': 'Staff Sales Summary',
+              'batch/sales-marketing/room-occupancy-chart': 'Room Occupancy Chart',
+            };
+            const title = titleMap[baseKey] || baseKey.split('/').pop()?.replace(/-/g, ' ') || 'Report';
+            const dateStr = params.date || new Date().toISOString().slice(0, 10);
+            const fileName = baseKey.replace('/', '-');
+            const isLandscape = baseKey.includes('room-occupancy-chart') || baseKey.includes('market-segmentation');
+            await renderGenericReportPdf(res, data, title, dateStr, fileName, isLandscape);
+            return;
+          }
+          if (['occupancy-revenue-report', 'financial-report'].includes(reportKey.replace('/view', ''))) {
+            const baseKey = reportKey.replace('/view', '');
+            const titleMap: Record<string, string> = {
+              'occupancy-revenue-report': 'Occupancy Revenue Report',
+              'financial-report': 'Financial Report',
+            };
+            const title = titleMap[baseKey] || baseKey.replace(/-/g, ' ');
+            const dateStr = params.date || new Date().toISOString().slice(0, 10);
+            const fileName = baseKey.replace('/', '-');
+            await renderGenericReportPdf(res, data, title, dateStr, fileName, false);
+            return;
+          }
           const fileName = segments.join('-') || 'report';
           await generateExcel(res, data, Object.keys(data[0] || {}).map((k) => ({
             header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
@@ -3955,11 +4501,8 @@ export class ReportController {
       }];
 
       if (typeOps === 'view') {
-        const columns = Object.keys(rows[0]).map((k) => ({
-          header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-          key: k,
-        }));
-        await generateExcel(res, rows, columns, `folio-${folio.folio_number}-${documentType}`);
+        const dateStr = new Date().toISOString().slice(0, 10);
+        await renderGenericReportPdf(res, rows, `Folio Document - ${documentType}`, dateStr, `folio-${folio.folio_number}-${documentType}`, false);
       } else {
         success(res, bigintToNumber(folio), 'Success');
       }
@@ -4006,11 +4549,8 @@ export class ReportController {
       }];
 
       if (typeOps === 'view') {
-        const columns = Object.keys(rows[0]).map((k) => ({
-          header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-          key: k,
-        }));
-        await generateExcel(res, rows, columns, `event-${id}-${reportType}`);
+        const dateStr = new Date().toISOString().slice(0, 10);
+        await renderGenericReportPdf(res, rows, `Event Report - ${reportType}`, dateStr, `event-${id}-${reportType}`, false);
       } else {
         success(res, bigintToNumber(event), 'Success');
       }
@@ -4045,19 +4585,8 @@ export class ReportController {
       }));
 
       if (typeOps === 'view') {
-        const columns = [
-          { header: 'Company Name', key: 'name', width: 30 },
-          { header: 'Type', key: 'type', width: 15 },
-          { header: 'Account', key: 'account', width: 15 },
-          { header: 'Email', key: 'email', width: 25 },
-          { header: 'Phone', key: 'phone', width: 20 },
-          { header: 'City', key: 'city', width: 20 },
-          { header: 'Country', key: 'country', width: 20 },
-          { header: 'Credit Limit', key: 'credit_limit', width: 15 },
-          { header: 'Remaining', key: 'remaining', width: 15 },
-          { header: 'Status', key: 'status', width: 15 },
-        ];
-        await generateExcel(res, rows, columns, 'company-profiles');
+        const dateStr = new Date().toISOString().slice(0, 10);
+        await renderGenericReportPdf(res, rows, 'Company Profiles', dateStr, 'company-profiles', false);
       } else {
         success(res, rows, 'Success', 200, {
           pagging: {
@@ -4126,20 +4655,8 @@ export class ReportController {
           total_amount: Number(f.total_amount),
         }));
 
-        const columns = [
-          { header: 'Folio Number', key: 'folio_number', width: 18 },
-          { header: 'Guest Name', key: 'guest_name', width: 25 },
-          { header: 'Check In', key: 'check_in', width: 14 },
-          { header: 'Check Out', key: 'check_out', width: 14 },
-          { header: 'Room Type', key: 'room_type', width: 18 },
-          { header: 'Room', key: 'room_name', width: 12 },
-          { header: 'Night', key: 'night', width: 8 },
-          { header: 'Adult', key: 'adult', width: 8 },
-          { header: 'Child', key: 'child', width: 8 },
-          { header: 'Company', key: 'company', width: 20 },
-          { header: 'Total Amount', key: 'total_amount', width: 15 },
-        ];
-        await generateExcel(res, rows, columns, 'guest-listing-report');
+        const dateStr = new Date().toISOString().slice(0, 10);
+        await renderGenericReportPdf(res, rows, 'Guest Listing Report', dateStr, 'guest-listing-report', true);
       } else {
         const [data, total] = await Promise.all([
           prisma.folios.findMany({

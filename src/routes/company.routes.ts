@@ -15,24 +15,24 @@ router.post('/profile/company', authMiddleware, CompanyController.store);
 router.put('/profile/company/:id', authMiddleware, CompanyController.update);
 router.delete('/profile/company/:id', authMiddleware, CompanyController.destroy);
 
-// Singular aliases for frontend compatibility (/cms/company, /cms/client)
-router.get('/company', authMiddleware, CompanyController.list);
+// Client menu (Laravel CompanyController, table `companies`) — /cms/company + /cms/client aliases
+router.get('/company', authMiddleware, CompanyController.clientList);
 router.get('/company-v2', authMiddleware, CompanyController.autocomplete);
-router.get('/company/create', authMiddleware, CompanyController.createForm);
-router.get('/company/:id', authMiddleware, CompanyController.show);
-router.get('/company/:id/update', authMiddleware, CompanyController.createForm);
-router.post('/company', authMiddleware, CompanyController.store);
-router.put('/company/:id', authMiddleware, CompanyController.update);
-router.delete('/company/:id', authMiddleware, CompanyController.destroy);
+router.get('/company/create', authMiddleware, CompanyController.clientCreateForm);
+router.get('/company/:id', authMiddleware, CompanyController.clientShow);
+router.get('/company/:id/update', authMiddleware, CompanyController.clientCreateForm);
+router.post('/company', authMiddleware, CompanyController.clientStore);
+router.put('/company/:id', authMiddleware, CompanyController.clientUpdate);
+router.delete('/company/:id', authMiddleware, CompanyController.clientDestroy);
 
-router.get('/client', authMiddleware, CompanyController.list);
+router.get('/client', authMiddleware, CompanyController.clientList);
 router.get('/client-v2', authMiddleware, CompanyController.autocomplete);
-router.get('/client/create', authMiddleware, CompanyController.createForm);
-router.get('/client/:id', authMiddleware, CompanyController.show);
-router.get('/client/:id/update', authMiddleware, CompanyController.createForm);
-router.post('/client', authMiddleware, CompanyController.store);
-router.put('/client/:id', authMiddleware, CompanyController.update);
-router.delete('/client/:id', authMiddleware, CompanyController.destroy);
+router.get('/client/create', authMiddleware, CompanyController.clientCreateForm);
+router.get('/client/:id', authMiddleware, CompanyController.clientShow);
+router.get('/client/:id/update', authMiddleware, CompanyController.clientCreateForm);
+router.post('/client', authMiddleware, CompanyController.clientStore);
+router.put('/client/:id', authMiddleware, CompanyController.clientUpdate);
+router.delete('/client/:id', authMiddleware, CompanyController.clientDestroy);
 
 // Contact Person
 router.get('/profile/company-contact', authMiddleware, CompanyController.contactList);

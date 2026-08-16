@@ -1088,7 +1088,8 @@ export class RoomController {
         buildings: buildings.map((b: any) => ({ value: Number(b.id), label: b.name })),
       };
 
-      success(res, master, 'Success');
+      // Frontend reads dataoption?.master?.* → master must be top-level meta (Laravel additional() parity)
+      success(res, {}, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Room create form error:', err);
       error(res, 'Failed to load form data', 500);
@@ -1162,11 +1163,16 @@ export class RoomController {
         },
       });
 
-      // Sync room configurations via model_has_types
-      if (room_configuration_ids && Array.isArray(room_configuration_ids) && room_configuration_ids.length > 0) {
+      // Sync room configurations + floor/building via model_has_types (Laravel syncTypes parity)
+      const { floor, building } = req.body;
+      const typeIds: bigint[] = [];
+      for (const v of [...(Array.isArray(room_configuration_ids) ? room_configuration_ids : []), floor, building]) {
+        if (v !== undefined && v !== null && v !== '' && v !== 0) typeIds.push(BigInt(v));
+      }
+      if (typeIds.length > 0) {
         await prisma.model_has_types.createMany({
-          data: room_configuration_ids.map((typeId: any) => ({
-            type_id: BigInt(typeId),
+          data: [...new Set(typeIds.map(String))].map((s) => ({
+            type_id: BigInt(s),
             model_id: room.id,
             model_type: 'App\\Models\\Room',
           })),
@@ -1277,9 +1283,34 @@ export class RoomController {
       // Get selected configurations
       const mht = await prisma.model_has_types.findMany({
         where: { model_id: id, model_type: 'App\\Models\\Room' },
-        select: { type_id: true },
+        include: { types: { select: { id: true, name: true, group: true } } },
       });
-      const selectedConfigIds = mht.map((m) => Number(m.type_id));
+      const selectedRoomConfigs = mht.filter((m) => m.types.group === 'room-configuration').map((m) => m.types);
+      const floorType = mht.find((m) => m.types.group === 'floor');
+      const buildingType = mht.find((m) => m.types.group === 'building');
+
+      // Laravel Room::formatData() parity — frontend room/form expects {value,label} shape
+      const data: any = {
+        id: Number(room.id),
+        name: room.name,
+        description: room.description,
+        phone_ext: room.phone_ext,
+        map_id: room.map_id,
+        max_pax: room.max_pax,
+        total_bed: room.total_bed,
+        with_tv: Number(room.with_tv) || 0,
+        with_shower: Number(room.with_shower) || 0,
+        cleaning_time: room.cleaning_time,
+        linen_days: room.linen_days,
+        sort: room.sort,
+        address_code: room.address_code,
+        room_id: room.rooms ? { value: Number(room.rooms.id), label: room.rooms.name } : {},
+        room_type_id: room.room_types ? { value: Number(room.room_types.id), label: room.room_types.name } : {},
+        building: buildingType ? { value: Number(buildingType.types.id), label: buildingType.types.name } : {},
+        floor: floorType ? { value: Number(floorType.types.id), label: floorType.types.name } : {},
+        status: { value: room.status, label: room.status === STATUS_ACTIVE ? 'Active' : 'Inactive' },
+        room_configuration: selectedRoomConfigs.map((t: any) => ({ value: Number(t.id), label: t.name })),
+      };
 
       const master = {
         statuses: [
@@ -1293,10 +1324,9 @@ export class RoomController {
         in_room_equiptments: inRoomEquipments.map((e: any) => ({ value: Number(e.id), label: e.name })),
         floors: floors.map((f: any) => ({ value: Number(f.id), label: f.name })),
         buildings: buildings.map((b: any) => ({ value: Number(b.id), label: b.name })),
-        selected_room_configurations: selectedConfigIds,
       };
 
-      success(res, { ...bigintToNumber(room), master }, 'Success');
+      success(res, data, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Room edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -1364,15 +1394,20 @@ export class RoomController {
 
       await prisma.rooms.update({ where: { id }, data: updateData });
 
-      // Sync room configurations via model_has_types
+      // Sync room configurations + floor/building via model_has_types (Laravel syncTypes parity)
       if (room_configuration_ids !== undefined && Array.isArray(room_configuration_ids)) {
+        const { floor, building } = req.body;
+        const typeIds: bigint[] = [];
+        for (const v of [...room_configuration_ids, floor, building]) {
+          if (v !== undefined && v !== null && v !== '' && v !== 0) typeIds.push(BigInt(v));
+        }
         await prisma.model_has_types.deleteMany({
           where: { model_id: id, model_type: 'App\\Models\\Room' },
         });
-        if (room_configuration_ids.length > 0) {
+        if (typeIds.length > 0) {
           await prisma.model_has_types.createMany({
-            data: room_configuration_ids.map((typeId: any) => ({
-              type_id: BigInt(typeId),
+            data: [...new Set(typeIds.map(String))].map((s) => ({
+              type_id: BigInt(s),
               model_id: id,
               model_type: 'App\\Models\\Room',
             })),

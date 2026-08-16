@@ -204,7 +204,7 @@ export class AdminController {
       const role = await getPrisma().roles.create({
         data: {
           property_id: pid, name, display_name: display_name || null,
-          guard_name: guard_name || 'web', status: status ?? 1,
+          guard_name: guard_name || 'web', status: status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : (status ?? 1),
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
@@ -361,7 +361,8 @@ export class AdminController {
       if (name !== undefined) data.name = name;
       if (display_name !== undefined) data.display_name = display_name;
       if (guard_name !== undefined) data.guard_name = guard_name;
-      if (status !== undefined) data.status = status;
+      // Frontend sends status as {value,label} object (formattedRole parity) — coerce to int
+      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : 0;
 
       await getPrisma().roles.update({ where: { id }, data });
 
@@ -543,7 +544,7 @@ export class AdminController {
           visibility: visibility || null, uri_table: uri_table || null, type_table: type_table || null,
           target: target ?? 0, media: media || null, data: data || null,
           left: left ?? 0, right: right ?? 0, child_type: child_type || null,
-          sort: sort ?? 0, status: status ?? 1,
+          sort: sort ?? 0, status: status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : (status ?? 1),
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
@@ -571,7 +572,7 @@ export class AdminController {
       if (right !== undefined) upd.right = right;
       if (child_type !== undefined) upd.child_type = child_type;
       if (sort !== undefined) upd.sort = Number(sort);
-      if (status !== undefined) upd.status = Number(status);
+      if (status !== undefined) upd.status = status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : (status?.value === 0 || status === 0 || status === false || status === 'false' ? 0 : Number(status));
       await getPrisma().menus.update({ where: { id }, data: upd });
       success(res, null, 'Menu updated');
     } catch (err: any) { error(res, 'Failed to update menu', 500); }
@@ -1156,6 +1157,12 @@ export class AdminController {
 
       const perms = menuPermissions(1115n, req.user);
       success(res, data, 'Success', 200, {
+        // Laravel MenuController@index parity — table-drag renders data?.table?.map + row.status?.label
+        table: [
+          { label: 'Status', key: 'status', type: 'none', is_search: false },
+          { label: 'Name', key: 'name', type: 'none', is_search: true },
+          { label: 'Url', key: 'url', type: 'none', is_search: false },
+        ],
         pagging,
         permission: { view: perms.view, add: perms.edit, edit: perms.edit, delete: perms.edit },
         datas: allMenus.map(m => ({ ...bigintToNumber(m), name: parseJsonField(m.name, {}) })),
@@ -1292,7 +1299,8 @@ function toMenuResource(
     media: parseJsonField(m.media, {}),
     target: m.target,
     module: m.visibility ?? '',
-    status: m.status ?? 0,
+    // table-drag renders status as {value,label} object (Laravel MenuResources getStatus parity)
+    status: { value: m.status ?? 0, label: m.status ? 'Active' : 'Inactive' },
     is_view: perms.view,
     is_edit: perms.edit,
     is_need_approval: perms.approve,

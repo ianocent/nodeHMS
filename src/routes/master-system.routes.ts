@@ -1,12 +1,17 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { MasterDataController } from '../controllers/master-data.controller';
 import { AccountingController } from '../controllers/accounting.controller';
 import { PosController } from '../controllers/pos.controller';
 import { SystemController } from '../controllers/system.controller';
+import { DayUseRateController, ReportPermissionController } from '../controllers/master-extra.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 
 const router = Router();
+
+// Multipart form-data for setup (TableViewDocument sends FormData; Laravel parity)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
 // ═════════════════════════════════════════════════════════
 // Master Data — Code Post (Product Categories)
@@ -122,14 +127,41 @@ router.get('/system-balance/:type', authMiddleware, requirePermission(69, 'view'
 // ═════════════════════════════════════════════════════════
 
 router.get('/log', authMiddleware, requirePermission(69, 'view'), SystemController.logList);
-router.get('/setup', authMiddleware, requirePermission(69, 'view'), SystemController.setup);
-router.get('/setup/get-type', authMiddleware, requirePermission(69, 'view'), SystemController.setupGetType);
-router.get('/setup/create', authMiddleware, requirePermission(69, 'add'), SystemController.setupCreate);
-router.get('/setup/:id', authMiddleware, requirePermission(69, 'view'), SystemController.setupShow);
-router.post('/setup', authMiddleware, requirePermission(69, 'add'), SystemController.setupStore);
-router.put('/setup/:id', authMiddleware, requirePermission(69, 'edit'), SystemController.setupUpdate);
-router.delete('/setup/:id', authMiddleware, requirePermission(69, 'delete'), SystemController.setupDestroy);
+// Setup permission: Laravel TypeController uses menu 1125 (ENGINEERING SETUP) for add/edit crud perms
+router.get('/setup', authMiddleware, requirePermission(1125, 'view'), SystemController.setup);
+router.get('/setup/get-type', authMiddleware, requirePermission(1125, 'view'), SystemController.setupGetType);
+router.get('/setup/create', authMiddleware, requirePermission(1125, 'add'), SystemController.setupCreate);
+router.get('/setup/:id', authMiddleware, requirePermission(1125, 'view'), SystemController.setupShow);
+// POST /setup accepts both AES-JSON (table-edit) and multipart FormData (table-view-document)
+router.post('/setup', authMiddleware, requirePermission(1125, 'add'), upload.none(), SystemController.setupStore);
+// Laravel: Route::post('setup/{type}/update-file') — multipart file update
+router.post('/setup/:id/update-file', authMiddleware, requirePermission(1125, 'edit'), upload.single('file'), SystemController.setupUpdateWithFile);
+router.put('/setup/:id', authMiddleware, requirePermission(1125, 'edit'), SystemController.setupUpdate);
+router.delete('/setup/:id', authMiddleware, requirePermission(1125, 'delete'), SystemController.setupDestroy);
 router.get('/post-code-budget', authMiddleware, requirePermission(69, 'view'), SystemController.postCodeBudget);
+
+// ══════════════════════════════════════════════════════════
+// Day Use Rate (menu 1161) — DayUseRateController parity, permission menu 86
+// ══════════════════════════════════════════════════════════
+
+router.get('/day-use-rate', authMiddleware, requirePermission(86, 'view'), DayUseRateController.index);
+router.post('/day-use-rate', authMiddleware, requirePermission(86, 'add'), DayUseRateController.store);
+router.put('/day-use-rate/:id', authMiddleware, requirePermission(86, 'edit'), DayUseRateController.update);
+router.delete('/day-use-rate/:id', authMiddleware, requirePermission(86, 'delete'), DayUseRateController.destroy);
+
+// ══════════════════════════════════════════════════════════
+// Report Permission (menu 1109) — ReportPermissionController parity, permission menu 1126
+// ══════════════════════════════════════════════════════════
+
+router.get('/report-permission/permission', authMiddleware, ReportPermissionController.getPermission);
+router.get('/report-permission', authMiddleware, requirePermission(1126, 'view'), ReportPermissionController.index);
+router.get('/report-permission/create', authMiddleware, requirePermission(1126, 'add'), ReportPermissionController.create);
+router.post('/report-permission', authMiddleware, requirePermission(1126, 'add'), ReportPermissionController.store);
+router.get('/report-permission/:id', authMiddleware, requirePermission(1126, 'view'), ReportPermissionController.show);
+router.get('/report-permission/:id/edit', authMiddleware, requirePermission(1126, 'edit'), ReportPermissionController.edit);
+router.get('/report-permission/:id/update', authMiddleware, requirePermission(1126, 'edit'), ReportPermissionController.edit);
+router.put('/report-permission/:id', authMiddleware, requirePermission(1126, 'edit'), ReportPermissionController.update);
+router.delete('/report-permission/:id', authMiddleware, requirePermission(1126, 'delete'), ReportPermissionController.destroy);
 
 // Night Audit — Room Change
 router.get('/room-changes', authMiddleware, requirePermission(69, 'view'), SystemController.roomChangeList);

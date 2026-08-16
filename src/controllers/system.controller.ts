@@ -1,8 +1,44 @@
 import { Request, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+
+// Laravel storage/app/public parity — files served at /storage/{path}
+const STORAGE_DIR = path.join(process.cwd(), 'storage');
+
+// Multipart fields arrive as raw strings — normalize "null"/"undefined"/"" → null (requestParser runs before multer)
+function normalizeStr(v: any): any {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (t === '' || t === 'null' || t === 'undefined') return null;
+    return t;
+  }
+  return v;
+}
+
+// Laravel HasTypes::syncTypes parity for area/template-floor-plan (Type<->Type via model_has_types)
+async function syncAreaTypes(typeId: bigint, building: any, floor: any): Promise<void> {
+  const prisma = getPrisma();
+  const bfTypes = await prisma.types.findMany({
+    where: { OR: [{ group: 'building' }, { group: 'floor' }] },
+    select: { id: true },
+  });
+  if (bfTypes.length) {
+    await prisma.model_has_types.deleteMany({
+      where: { model_type: 'App\\Models\\Type', model_id: typeId, type_id: { in: bfTypes.map(t => t.id) } },
+    });
+  }
+  const ids = [building, floor].filter(v => v !== undefined && v !== null && v !== '');
+  for (const v of ids) {
+    await prisma.model_has_types.create({
+      data: { model_type: 'App\\Models\\Type', model_id: typeId, type_id: BigInt(v) },
+    });
+  }
+}
 
 // Laravel LogController@index table parity (Security Audit / Report Permission screens)
 const LOG_TABLE = [
@@ -363,21 +399,95 @@ export class SystemController {
       const rest = data.filter(d => !/normal/i.test(d.name));
       const ordered = [...normal, ...rest];
 
-      const rows = ordered.map((d, i) => ({
-        no: (page - 1) * limit + i + 1,
-        id: Number(d.id),
-        name: d.name,
-        description: d.description,
-        image: d.image,
-        text: d.text,
-        group: d.group,
-        sort: d.sort,
-        status: d.status,
-      }));
+      // Laravel TypeController@index parity — area/template-floor-plan expose Building+Floor
+      let bfOptions: { building: any[]; floor: any[] } = { building: [], floor: [] };
+      let mhtMap = new Map<string, bigint[]>();
+      if (group === 'area' || group === 'template-floor-plan') {
+        // Laravel: options NOT property-scoped
+        const bfTypes = await getPrisma().types.findMany({
+          where: { deleted_at: null },
+          orderBy: { sort: 'asc' },
+        });
+        bfOptions = {
+          building: bfTypes.filter(t => t.group === 'building').map(t => ({ value: Number(t.id), label: t.name })),
+          floor: bfTypes.filter(t => t.group === 'floor').map(t => ({ value: Number(t.id), label: t.name })),
+        };
+        const links = await getPrisma().model_has_types.findMany({
+          where: { model_type: 'App\\Models\\Type', model_id: { in: ordered.map(d => d.id) } },
+          select: { model_id: true, type_id: true },
+        });
+        for (const l of links) {
+          const key = String(l.model_id);
+          if (!mhtMap.has(key)) mhtMap.set(key, []);
+          mhtMap.get(key)!.push(l.type_id);
+        }
+      }
+
+      // Laravel TypeController@index parity — master-report: Group Report + Action options + row links
+      let mrOptions: { group_report: any[]; action_report: any[] } = { group_report: [], action_report: [] };
+      let mrMap = new Map<string, any[]>();
+      if (group === 'master-report') {
+        const mrTypes = await getPrisma().types.findMany({ where: { deleted_at: null } });
+        mrOptions = {
+          group_report: mrTypes.filter(t => t.group === 'group-report').map(t => ({ value: Number(t.id), label: t.name })),
+          action_report: mrTypes.filter(t => t.group === 'action-report').map(t => ({ value: Number(t.id), label: t.name })),
+        };
+        const links = await getPrisma().model_has_types.findMany({
+          where: { model_type: 'App\\Models\\Type', model_id: { in: ordered.map(d => d.id) } },
+          select: { model_id: true, type_id: true },
+        });
+        const byId = new Map(mrTypes.map(t => [Number(t.id), t]));
+        for (const l of links) {
+          const key = String(l.model_id);
+          const t = byId.get(Number(l.type_id));
+          if (!t) continue;
+          if (!mrMap.has(key)) mrMap.set(key, []);
+          mrMap.get(key)!.push({ value: Number(t.id), label: t.name, group: t.group });
+        }
+      }
+
+      const rows = ordered.map((d, i) => {
+        const row: any = {
+          no: (page - 1) * limit + i + 1,
+          id: Number(d.id),
+          name: d.name,
+          description: d.description,
+          image: d.image,
+          text: d.text,
+          group: d.group,
+          sort: d.sort,
+          status: d.status,
+        };
+        if (group === 'area' || group === 'template-floor-plan') {
+          const linked = mhtMap.get(String(d.id)) || [];
+          row.building = bfOptions.building.find(o => linked.includes(BigInt(o.value))) || {};
+          row.floor = bfOptions.floor.find(o => linked.includes(BigInt(o.value))) || {};
+        }
+        if (group === 'master-report') {
+          const linked = mrMap.get(String(d.id)) || [];
+          row.group_report = linked.filter(l => l.group === 'group-report').map(l => ({ value: l.value, label: l.label }));
+          row.action_report = linked.filter(l => l.group === 'action-report').map(l => ({ value: l.value, label: l.label }));
+        }
+        return row;
+      });
+
+      const table = setupTable(group);
+      if (group === 'area' || group === 'template-floor-plan') {
+        for (const col of table) {
+          if (col.key === 'building') col.options = bfOptions.building;
+          if (col.key === 'floor') col.options = bfOptions.floor;
+        }
+      }
+      if (group === 'master-report') {
+        for (const col of table) {
+          if (col.key === 'group_report') col.options = mrOptions.group_report;
+          if (col.key === 'action_report') col.options = mrOptions.action_report;
+        }
+      }
 
       const perms = crudPermission(req.user, 1125n);
       success(res, rows, 'Success', 200, {
-        table: setupTable(group),
+        table,
         pagging: laravelPaging(total, limit, page),
         permission: { view: true, add: perms.add, edit: perms.edit, delete: perms.delete },
       });
@@ -395,7 +505,8 @@ export class SystemController {
       const where: any = { property_id: propertyId, deleted_at: null, status: 1 };
       if (group) where.group = group;
       const data = await getPrisma().types.findMany({ where, orderBy: { sort: 'asc' } });
-      success(res, data.map(d => ({ id: Number(d.id), name: d.name })), 'Success');
+      // Laravel TypeController@getType parity — { value, label }
+      success(res, data.map(d => ({ value: Number(d.id), label: d.name })), 'Success');
     } catch (err: any) {
       console.error('Setup get-type error:', err);
       error(res, 'Failed to load types', 500);
@@ -409,7 +520,7 @@ export class SystemController {
         master: {
           statuses: [
             { value: 1, label: 'Active' },
-            { value: 2, label: 'Inactive' },
+            { value: 0, label: 'Inactive' },
           ],
         },
       });
@@ -441,7 +552,7 @@ export class SystemController {
       const body = req.body || {};
       const query = req.query || {};
       const group = body.group || query.group || '';
-      const { name, description, status, sort, text, image } = body;
+      const { name, description, status, sort, text, image, building, floor } = body;
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const dup = await getPrisma().types.findFirst({ where: { name, group: group || '', property_id: propertyId } });
@@ -452,9 +563,9 @@ export class SystemController {
           property_id: propertyId,
           group: group || '',
           name,
-          description: description || null,
-          text: text || null,
-          image: image || null,
+          description: normalizeStr(description),
+          text: normalizeStr(text),
+          image: normalizeStr(image),
           sort: num(sort),
           status: status === true || status === 'true' ? 1 : (status ?? 1),
           created_at: new Date(),
@@ -462,6 +573,12 @@ export class SystemController {
           created_by: req.user?.id || null,
         },
       });
+
+      // Area/template-floor-plan: sync Building+Floor Type self-relations (Laravel syncTypes parity)
+      if (group === 'area' || group === 'template-floor-plan') {
+        await syncAreaTypes(d.id, building, floor);
+      }
+
       success(res, bigintToNumber(d), 'Created');
     } catch (err: any) {
       console.error('Setup store error:', err);
@@ -480,21 +597,69 @@ export class SystemController {
 
       const body = req.body || {};
       const query = req.query || {};
-      const group = body.group || query.group;
-      const { name, description, status, sort, text, image } = body;
+      const group = body.group || query.group || existing.group;
+      const { name, description, status, sort, text, image, building, floor } = body;
       const data: any = { updated_at: new Date(), updated_by: req.user?.id || null };
-      if (name !== undefined) data.name = name;
+      if (name !== undefined) data.name = normalizeStr(name);
       if (group !== undefined) data.group = group;
-      if (description !== undefined) data.description = description;
-      if (text !== undefined) data.text = text;
-      if (image !== undefined) data.image = image;
+      if (description !== undefined) data.description = normalizeStr(description);
+      if (text !== undefined) data.text = normalizeStr(text);
+      if (image !== undefined) data.image = normalizeStr(image);
       if (sort !== undefined) data.sort = num(sort);
       if (status !== undefined) data.status = status === true || status === 'true' || status === 1 ? 1 : num(status, 0);
 
       await getPrisma().types.update({ where: { id }, data });
+
+      // Area/template-floor-plan: sync Building+Floor Type self-relations (Laravel syncTypes parity)
+      if (group === 'area' || group === 'template-floor-plan') {
+        await syncAreaTypes(id, building, floor);
+      }
+
       success(res, null, 'Updated');
     } catch (err: any) {
       console.error('Setup update error:', err);
+      error(res, 'Failed to update setup', 500);
+    }
+  }
+
+  // ==================== SETUP UPDATE WITH FILE (TypeController@updateWithFile parity) ====================
+  // Frontend (TableViewDocument config=true, room-configuration) sends multipart FormData
+  static async setupUpdateWithFile(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res); return; }
+      const id = BigInt(raw);
+      const existing = await getPrisma().types.findUnique({ where: { id } });
+      if (!existing) { notFound(res); return; }
+
+      const body = req.body || {};
+      const group = body.group || req.query.group || existing.group;
+      const { name, description, status, sort, text } = body;
+      const file: any = (req as any).file;
+
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id || null };
+      if (name !== undefined) data.name = normalizeStr(name);
+      if (group !== undefined) data.group = group;
+      if (description !== undefined) data.description = normalizeStr(description);
+      if (text !== undefined) data.text = normalizeStr(text);
+      if (sort !== undefined) data.sort = num(sort);
+      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 ? 1 : num(status, 0);
+
+      if (file && file.buffer) {
+        if (existing.image) {
+          try { fs.unlinkSync(path.join(STORAGE_DIR, existing.image)); } catch { /* ignore */ }
+        }
+        const ext = path.extname(file.originalname || '') || '.jpg';
+        const filename = `types/${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`;
+        fs.mkdirSync(path.join(STORAGE_DIR, 'types'), { recursive: true });
+        fs.writeFileSync(path.join(STORAGE_DIR, filename), file.buffer);
+        data.image = filename;
+      }
+
+      await getPrisma().types.update({ where: { id }, data });
+      success(res, null, 'Updated');
+    } catch (err: any) {
+      console.error('Setup update-file error:', err);
       error(res, 'Failed to update setup', 500);
     }
   }

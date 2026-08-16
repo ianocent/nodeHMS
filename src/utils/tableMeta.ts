@@ -3,7 +3,7 @@ import { Request } from 'express';
 
 export const STATUS_OPTIONS = [
   { value: 1, label: 'Active' },
-  { value: 2, label: 'Inactive' },
+  { value: 0, label: 'Inactive' },
 ];
 
 export function laravelPaging(total: number, limit: number, page: number): Record<string, number> {
@@ -159,9 +159,35 @@ export function setupTable(group: string): any[] {
       ? [{ label: 'No', key: 'sort', type: 'number', is_search: false }]
       : [NO_COL()]),
     { label: name, key: 'name', type: 'text', is_search: true },
-    { label: 'Description', key: 'description', type: 'text', is_search: true },
-    { label: 'Image', key: 'image' },
   ];
+
+  // Laravel Type::formatTable() parity — description hidden for these groups
+  if (!['room-configuration', 'guest-title', 'guest-status', 'company-type', 'guest-type', 'market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4'].includes(group)) {
+    table.push({ label: 'Description', key: 'description', type: 'text', is_search: true });
+  }
+
+  // Image (file_document) only for room-configuration
+  if (group === 'room-configuration') {
+    table.push({ label: 'Image', key: 'image', type: 'file_document', is_search: false });
+  }
+
+  // Area/template-floor-plan: Building + Floor selects (options injected by controller)
+  if (group === 'area' || group === 'template-floor-plan') {
+    table.push({ label: 'Building', key: 'building', type: 'select', options: [], is_search: true });
+    table.push({ label: 'Floor', key: 'floor', type: 'select', options: [], is_search: true });
+  }
+
+  // template-floor-plan: SVG text column
+  if (group === 'template-floor-plan') {
+    table.push({ label: 'SVG', key: 'text', type: 'text', is_search: true });
+  }
+
+  // master-report: Group Report (select) + Action (select_multiple) — options injected by controller
+  if (group === 'master-report') {
+    table.push({ label: 'Group Report', key: 'group_report', type: 'select', options: [], is_search: true });
+    table.push({ label: 'Action', key: 'action_report', type: 'select_multiple', options: [], is_search: true });
+  }
+
   return table;
 }
 

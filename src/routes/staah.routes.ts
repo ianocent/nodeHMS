@@ -21,6 +21,7 @@ router.post('/staah/webhook/confirm-booking', StaahWebhookController.processConf
 router.get('/staah/interfaces', authMiddleware, requirePermission(69, 'view'), StaahController.interfaceList);
 router.post('/staah/interfaces', authMiddleware, requirePermission(69, 'add'), StaahController.interfaceCreate);
 router.get('/staah/interfaces/master', authMiddleware, requirePermission(69, 'view'), StaahController.master);
+router.get('/staah/interfaces/rates-calendar', authMiddleware, requirePermission(69, 'view'), StaahController.ratesCalendar);
 router.get('/staah/interfaces/test-connection', authMiddleware, requirePermission(69, 'view'), StaahController.testConnection);
 router.get('/staah/interfaces/:id', authMiddleware, requirePermission(69, 'view'), StaahController.interfaceShow);
 router.get('/staah/interfaces/:id/edit', authMiddleware, requirePermission(69, 'edit'), StaahController.interfaceEdit);
@@ -57,12 +58,14 @@ router.post('/staah/reservations/:id/pending', authMiddleware, requirePermission
 // ═══════════════════════════════════════════════════
 
 router.get('/staah/sync-logs', authMiddleware, requirePermission(69, 'view'), StaahController.syncLogList);
+router.post('/staah/sync-logs/:id/retry', authMiddleware, requirePermission(69, 'edit'), StaahController.syncLogRetry);
 
 // ═══════════════════════════════════════════════════
 // STAAH OTA Company Mappings
 // ═══════════════════════════════════════════════════
 
 router.get('/staah/ota-mappings', authMiddleware, requirePermission(69, 'view'), StaahController.otaMappingList);
+router.post('/staah/ota-mappings/sync', authMiddleware, requirePermission(69, 'edit'), StaahController.otaMappingSync);
 router.post('/staah/ota-mappings', authMiddleware, requirePermission(69, 'edit'), StaahController.otaMappingCreate);
 router.put('/staah/ota-mappings/:id', authMiddleware, requirePermission(69, 'edit'), StaahController.otaMappingUpdate);
 router.delete('/staah/ota-mappings/:id', authMiddleware, requirePermission(69, 'delete'), StaahController.otaMappingDestroy);
@@ -91,6 +94,7 @@ router.post('/staah/sync-price', authMiddleware, requirePermission(69, 'edit'), 
 router.get('/staah/interface', authMiddleware, requirePermission(69, 'view'), StaahController.interfaceList);
 router.post('/staah/interface', authMiddleware, requirePermission(69, 'add'), StaahController.interfaceCreate);
 router.get('/staah/interface/master', authMiddleware, requirePermission(69, 'view'), StaahController.master);
+router.get('/staah/interface/rates-calendar', authMiddleware, requirePermission(69, 'view'), StaahController.ratesCalendar);
 router.get('/staah/interface/test-connection', authMiddleware, requirePermission(69, 'view'), StaahController.testConnection);
 router.get('/staah/interface/:id', authMiddleware, requirePermission(69, 'view'), StaahController.interfaceShow);
 router.get('/staah/interface/:id/edit', authMiddleware, requirePermission(69, 'edit'), StaahController.interfaceEdit);

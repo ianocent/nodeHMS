@@ -128,14 +128,23 @@ export class UserController {
    */
   static async create(req: Request, res: Response): Promise<void> {
     try {
-      const [companies, properties, roles] = await Promise.all([
-        prisma.companies.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const [propLinks, properties, roles] = await Promise.all([
+        // Laravel: Company::onlyActive()->where('id', $Currentproperty->companies->first()->id)
+        prisma.model_has_companies.findMany({
+          where: { model_id: pid, model_type: 'App\\Models\\Property' },
+          select: { company_id: true }
+        }),
         prisma.properties.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.roles.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } })
       ]);
+      const propCompanies = await prisma.companies.findMany({
+        where: { id: { in: propLinks.map((l: any) => l.company_id) }, status: 1, deleted_at: null },
+        select: { id: true, name: true }
+      });
 
       const master = {
-        companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        companies: propCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name })),
         properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
         roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
@@ -144,7 +153,8 @@ export class UserController {
         ]
       };
 
-      success(res, master, 'Success');
+      // Frontend reads dataoption?.master?.roles/companies/properties — master must be top-level meta
+      success(res, {}, 'Success', 200, { master });
     } catch (err: any) {
       console.error('User create form error:', err);
       error(res, 'Failed to load form data', 500);
@@ -201,19 +211,27 @@ export class UserController {
         });
       }
 
-      // Create property assignments
+      // Create property assignments (Laravel: model_has_properties)
       if (property_ids?.length) {
         for (const pid of property_ids) {
-          await prisma.model_has_menus.create({
-            data: { model_id: user.id, model_type: 'App\\Models\\User', menu_id: pid }
+          await prisma.model_has_properties.create({
+            data: { model_id: user.id, model_type: 'App\\Models\\User', property_id: BigInt(pid) }
           });
         }
       }
 
-      // Create company assignment
-      if (company_id) {
-        await prisma.model_has_company_profiles.create({
-          data: { model_id: user.id, model_type: 'App\\Models\\User', company_profile_id: BigInt(company_id) }
+      // Create company assignment (Laravel: model_has_companies, table `companies`)
+      let cid = company_id;
+      if (!cid) {
+        const mine = await prisma.model_has_companies.findFirst({
+          where: { model_id: req.user?.id, model_type: 'App\\Models\\User' },
+          select: { company_id: true }
+        });
+        cid = mine ? Number(mine.company_id) : null;
+      }
+      if (cid) {
+        await prisma.model_has_companies.create({
+          data: { model_id: user.id, model_type: 'App\\Models\\User', company_id: BigInt(cid) }
         });
       }
 
@@ -271,16 +289,33 @@ export class UserController {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
-      const [user, companies, properties, roles, modelRoles] = await Promise.all([
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const [user, propLinks, properties, roles, modelRoles, userProps, userCompanies] = await Promise.all([
         prisma.users.findUnique({ where: { id } }),
-        prisma.companies.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
+        // Laravel: Company::onlyActive()->where('id', $Currentproperty->companies->first()->id)
+        prisma.model_has_companies.findMany({
+          where: { model_id: pid, model_type: 'App\\Models\\Property' },
+          select: { company_id: true }
+        }),
         prisma.properties.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.roles.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.model_has_roles.findMany({
           where: { model_id: id, model_type: 'App\\Models\\User' },
           include: { roles: true }
+        }),
+        prisma.model_has_properties.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\User' },
+          include: { properties: { select: { id: true, name: true } } }
+        }),
+        prisma.model_has_companies.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\User' },
+          include: { companies: { select: { id: true, name: true } } }
         })
       ]);
+      const propCompanies = await prisma.companies.findMany({
+        where: { id: { in: propLinks.map((l: any) => l.company_id) }, status: 1, deleted_at: null },
+        select: { id: true, name: true }
+      });
 
       if (!user || user.deleted_at) {
         notFound(res, 'User not found');
@@ -288,7 +323,7 @@ export class UserController {
       }
 
       const master = {
-        companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
+        companies: propCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name })),
         properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
         roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
@@ -297,7 +332,17 @@ export class UserController {
         ]
       };
 
-      success(res, bigintToNumber({ ...user, id: Number(user.id), roles: modelRoles.map((mr: any) => mr.roles), master }), 'Success');
+      // Laravel User::formatData() parity: roles single {value,label}, properties array, relation.companies first
+      const data: any = bigintToNumber({ ...user, id: Number(user.id) });
+      const props = userProps.map((p: any) => ({ value: Number(p.properties.id), label: p.properties.name }));
+      const comps = userCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name }));
+      data.roles = modelRoles.length ? { value: Number(modelRoles[0].roles.id), label: modelRoles[0].roles.name } : null;
+      data.properties = props;
+      data.companies = comps[0] || null;
+      data.relation = { roles: data.roles ? [data.roles] : [], properties: props, companies: comps[0] || null };
+      data.status = { value: !!user.status, label: user.status ? 'Active' : 'Inactive' };
+      delete data.password;
+      success(res, data, 'Success', 200, { master });
     } catch (err: any) {
       console.error('User edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -361,21 +406,21 @@ export class UserController {
 
       await prisma.users.update({ where: { id }, data });
 
-      // Sync properties
+      // Sync properties (Laravel: model_has_properties)
       if (property_ids?.length) {
-        await prisma.model_has_menus.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\User' } });
+        await prisma.model_has_properties.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\User' } });
         for (const pid of property_ids) {
-          await prisma.model_has_menus.create({
-            data: { model_id: id, model_type: 'App\\Models\\User', menu_id: pid }
+          await prisma.model_has_properties.create({
+            data: { model_id: id, model_type: 'App\\Models\\User', property_id: BigInt(pid) }
           });
         }
       }
 
-      // Sync companies
+      // Sync companies (Laravel: model_has_companies, table `companies`)
       if (company_id) {
-        await prisma.model_has_company_profiles.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\User' } });
-        await prisma.model_has_company_profiles.create({
-          data: { model_id: id, model_type: 'App\\Models\\User', company_profile_id: BigInt(company_id) }
+        await prisma.model_has_companies.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\User' } });
+        await prisma.model_has_companies.create({
+          data: { model_id: id, model_type: 'App\\Models\\User', company_id: BigInt(company_id) }
         });
       }
 

@@ -27,6 +27,15 @@ function toBigInt(val: any): bigint {
   return BigInt(val);
 }
 
+function validateStaahWebhookAuth(req: Request): boolean {
+  if (process.env.STAAH_WEBHOOK_BYPASS_AUTH === 'true') return true;
+  const username = req.headers['username'] as string || req.query.username as string;
+  const password = req.headers['password'] as string || req.query.password as string;
+  const validUsername = process.env.STAAH_WEBHOOK_USERNAME;
+  const validPassword = process.env.STAAH_WEBHOOK_PASSWORD;
+  return username === validUsername && password === validPassword;
+}
+
 export class StaahWebhookController {
   static async healthCheck(req: Request, res: Response): Promise<void> {
     success(res, { status: 'ok', service: 'STAAH Webhook', timestamp: new Date().toISOString() }, 'Webhook active');
@@ -34,6 +43,10 @@ export class StaahWebhookController {
 
   static async handleReservationPush(req: Request, res: Response): Promise<void> {
     try {
+      if (!validateStaahWebhookAuth(req)) {
+        error(res, 'Unauthorized', 401);
+        return;
+      }
       const payload = req.body;
 
       // Extract reservation data
