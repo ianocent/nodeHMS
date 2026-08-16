@@ -1,0 +1,46 @@
+route,backend_exists,backend_route_file,controller_files,create_from_routes,update_from_routes,create_in_controller,update_in_controller,notes,possible_false_negative
+accounting,yes,master-system.routes.ts,master-data.controller.ts;accounting.controller.ts;pos.controller.ts;system.controller.ts;master-extra.controller.ts;master-extra.controller.ts,no,no,yes,yes,system.controller.ts:found save/upsert/insert,yes
+api,no,,,no,no,no,no,,no
+approval,yes,extra.routes.ts,generic.controller.ts;room.controller.ts;approval-matrix.controller.ts,no,no,yes,yes,,yes
+approval-matrix,no,,,no,no,no,no,,no
+choose-property,no,,,no,no,no,no,,no
+client,yes,company.routes.ts,company.controller.ts,yes,no,yes,yes,,no
+concierge,yes,concierge.routes.ts,concierge.controller.ts,no,no,no,no,,no
+content,yes,content.routes.ts,content.controller.ts,no,no,no,no,,no
+dashboard,yes,statistic.routes.ts,statistic.controller.ts,no,no,no,no,,no
+dynamic-rate,yes,rate.routes.ts,rate.controller.ts;dynamic-rate.controller.ts;promotion.controller.ts;rate-addon.controller.ts;company-contract-rate.controller.ts;reservation.controller.ts;bar.controller.ts,yes,no,yes,yes,,no
+end-of-day,no,,,no,no,no,no,,no
+endshift,no,,,no,no,no,no,,no
+event,yes,event.routes.ts,event.controller.ts,yes,no,no,no,event.controller.ts:found save/upsert/insert,yes
+front-desk,yes,front-desk.routes.ts,front-desk.controller.ts;pos.controller.ts,no,no,no,no,front-desk.controller.ts:found save/upsert/insert,yes
+gallery,no,,,no,no,no,no,,no
+guest,yes,user-guest.routes.ts,user.controller.ts;guest.controller.ts,yes,no,yes,yes,,no
+guest-request,yes,extra.routes.ts,generic.controller.ts;room.controller.ts;approval-matrix.controller.ts,no,no,yes,yes,,yes
+hotel-competitor,yes,extra.routes.ts,generic.controller.ts;room.controller.ts;approval-matrix.controller.ts,yes,no,yes,yes,,no
+house-keeping,no,,,no,no,no,no,,no
+log,yes,admin.routes.ts,admin.controller.ts;generic.controller.ts,no,no,yes,yes,admin.controller.ts:found save/upsert/insert,yes
+master-capacity,yes,event.routes.ts,event.controller.ts,yes,no,no,no,event.controller.ts:found save/upsert/insert,yes
+master-inventory,yes,event.routes.ts,event.controller.ts,no,no,no,no,event.controller.ts:found save/upsert/insert,yes
+master-layout,yes,event.routes.ts,event.controller.ts,no,no,no,no,event.controller.ts:found save/upsert/insert,yes
+master-setup,no,,,no,no,no,no,,no
+master-venue,yes,event.routes.ts,event.controller.ts,no,no,no,no,event.controller.ts:found save/upsert/insert,yes
+module,no,,,no,no,no,no,,no
+navigation-menu,no,,,no,no,no,no,,no
+night-audit,yes,master-system.routes.ts,master-data.controller.ts;accounting.controller.ts;pos.controller.ts;system.controller.ts;master-extra.controller.ts;master-extra.controller.ts,no,no,yes,yes,system.controller.ts:found save/upsert/insert,yes
+page-builder,no,,,no,no,no,no,,no
+permission,yes,admin.routes.ts,admin.controller.ts;generic.controller.ts,yes,no,yes,yes,admin.controller.ts:found save/upsert/insert,yes
+pos-transactions,no,,,no,no,no,no,,no
+post,no,,,no,no,no,no,,no
+postcode-budget,no,,,no,no,no,no,,no
+profile,yes,company.routes.ts,company.controller.ts,no,no,yes,yes,,yes
+property,yes,admin.routes.ts,admin.controller.ts;generic.controller.ts,yes,no,yes,yes,admin.controller.ts:found save/upsert/insert,yes
+rate-management,no,,,no,no,no,no,,no
+reporting,no,,,no,no,no,no,,no
+reservation,yes,reservation.routes.ts,reservation.controller.ts,yes,yes,yes,yes,,no
+role,yes,admin.routes.ts,admin.controller.ts;generic.controller.ts,yes,no,yes,yes,admin.controller.ts:found save/upsert/insert,yes
+room-statistic,yes,extra.routes.ts,generic.controller.ts;room.controller.ts;approval-matrix.controller.ts,yes,no,yes,yes,,no
+settings,yes,admin.routes.ts,admin.controller.ts;generic.controller.ts,yes,no,yes,yes,admin.controller.ts:found save/upsert/insert,yes
+staah,yes,staah.routes.ts,staah.controller.ts;staah-webhook.controller.ts,no,no,no,no,staah-webhook.controller.ts:found save/upsert/insert,yes
+system-balance,yes,master-system.routes.ts,master-data.controller.ts;accounting.controller.ts;pos.controller.ts;system.controller.ts;master-extra.controller.ts;master-extra.controller.ts,no,no,yes,yes,system.controller.ts:found save/upsert/insert,yes
+user,yes,admin.routes.ts,admin.controller.ts;generic.controller.ts,no,no,yes,yes,admin.controller.ts:found save/upsert/insert,yes
+utility,no,,,no,no,no,no,,no
