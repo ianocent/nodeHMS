@@ -71,6 +71,7 @@ export class MasterDataController {
         master.code_posts = codePosts.map(c => ({ value: Number(c.id), label: `${c.name}${c.type ? ` (${c.type})` : ''}` }));
         master.code_billings = codeBillings.map(c => ({ value: Number(c.id), label: c.name }));
         master.code_gls = codeGls.map(c => ({ value: Number(c.id), label: c.name }));
+        master.statuses = STATUS_OPTIONS;
       } catch { /* master optional */ }
 
       if (idRaw && /^\d+$/.test(idRaw)) {

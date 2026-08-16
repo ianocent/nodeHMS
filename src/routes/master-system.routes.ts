@@ -5,10 +5,12 @@ import { AccountingController } from '../controllers/accounting.controller';
 import { PosController } from '../controllers/pos.controller';
 import { SystemController } from '../controllers/system.controller';
 import { DayUseRateController, ReportPermissionController } from '../controllers/master-extra.controller';
+import { GenericController } from '../controllers/generic.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 
 const router = Router();
+const generic = new GenericController();
 
 // Multipart form-data for setup (TableViewDocument sends FormData; Laravel parity)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
@@ -80,10 +82,15 @@ router.delete('/code-gl/:id', authMiddleware, requirePermission(69, 'delete'), M
 
 // ══════════════════════════════════════════════════════════
 // POS — Transactions & Matrix Sales
-// ═════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 
 router.get('/transaction/pos', authMiddleware, requirePermission(69, 'view'), PosController.listTransactions);
-router.get('/pos-matrix-sales', authMiddleware, requirePermission(69, 'view'), PosController.listMatrixSales);
+router.get('/pos-matrix-sales', authMiddleware, requirePermission(1124, 'view'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.list(req, res); });
+router.get('/pos-matrix-sales/create', authMiddleware, requirePermission(1124, 'add'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.createForm(req, res); });
+router.post('/pos-matrix-sales', authMiddleware, requirePermission(1124, 'add'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.create(req, res); });
+router.get('/pos-matrix-sales/:id/update', authMiddleware, requirePermission(1124, 'edit'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.editForm(req, res); });
+router.put('/pos-matrix-sales/:id', authMiddleware, requirePermission(1124, 'edit'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.update(req, res); });
+router.delete('/pos-matrix-sales/:id', authMiddleware, requirePermission(1124, 'delete'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.destroy(req, res); });
 
 // ══════════════════════════════════════════════════════════
 // Accounting — List by type (invoice, credit-note, debit-note, payment, refund, adjustment)

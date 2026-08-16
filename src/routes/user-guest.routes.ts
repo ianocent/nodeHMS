@@ -127,4 +127,8 @@ router.get('/profile/guest-loyalty-card', authMiddleware, requirePermission(82, 
 router.post('/profile/guest-loyalty-card', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.loyaltyStore(req, res); });
 router.delete('/profile/guest-loyalty-card/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.loyaltyDestroy);
 
+// Merge Guest (menu 84)
+router.put('/profile/guest/:id/merge', authMiddleware, requirePermission(84, 'edit'), GuestController.mergeUpdate);
+router.post('/profile/guest/update-batch', authMiddleware, requirePermission(84, 'edit'), GuestController.batchUpdate);
+
 export default router;

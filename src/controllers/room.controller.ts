@@ -175,7 +175,7 @@ export class RoomController {
         roomTypeGroupings: roomTypeGroupings.map((t: any) => ({ value: Number(t.id), label: t.name })),
       };
 
-      success(res, master, 'Success');
+      success(res, {}, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Room type create form error:', err);
       error(res, 'Failed to load form data', 500);
@@ -189,7 +189,7 @@ export class RoomController {
     try {
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
-      const { name, description, specification, is_physical, rate, min_rate, sort, status } = req.body;
+      const { name, description, specification, is_physical, rate, min_rate, sort, status, room_type_grouping } = req.body;
 
       const errors: Record<string, string[]> = {};
       if (!name) errors.name = ['The name field is required.'];
@@ -214,6 +214,17 @@ export class RoomController {
           created_by: userId,
         },
       });
+
+      if (room_type_grouping !== undefined && room_type_grouping !== null && room_type_grouping !== '') {
+        const groupingIds = Array.isArray(room_type_grouping)
+          ? room_type_grouping.map((g: any) => BigInt(g?.value ?? g))
+          : [BigInt(room_type_grouping)];
+        for (const gid of groupingIds) {
+          await prisma.model_has_types.create({
+            data: { model_id: roomType.id, model_type: 'App\\Models\\RoomType', type_id: gid },
+          });
+        }
+      }
 
       success(res, bigintToNumber(roomType), 'Success', 200);
     } catch (err: any) {
@@ -464,14 +475,35 @@ export class RoomController {
         return;
       }
 
+      const groupingLinks = await prisma.model_has_types.findMany({
+        where: { model_id: id, model_type: 'App\\Models\\RoomType' },
+        include: { types: { select: { id: true, name: true } } },
+      });
+
+      const roomTypeGroupings = await prisma.types.findMany({
+        where: {
+          deleted_at: null,
+          status: STATUS_ACTIVE,
+          group: 'room-type-grouping',
+        },
+        select: { id: true, name: true },
+        orderBy: { sort: 'asc' },
+      });
+
       const master = {
         statuses: [
           { value: 1, label: 'Active' },
           { value: 0, label: 'Inactive' },
         ],
+        roomTypeGroupings: roomTypeGroupings.map((t: any) => ({ value: Number(t.id), label: t.name })),
       };
 
-      success(res, { ...bigintToNumber(roomType), master }, 'Success');
+      const data = bigintToNumber(roomType);
+      data.room_type_grouping = groupingLinks.length
+        ? groupingLinks.map((l: any) => ({ value: Number(l.types.id), label: l.types.name }))
+        : [];
+
+      success(res, data, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Room type edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -493,7 +525,22 @@ export class RoomController {
         return;
       }
 
-      const { name, description, specification, is_physical, rate, min_rate, sort, status } = req.body;
+      const { name, description, specification, is_physical, rate, min_rate, sort, status, room_type_grouping } = req.body;
+
+      // Laravel guard: active -> inactive blocked when room type has live reservation
+      if (Number(existing.status) === 1 && status !== undefined && Number(status) === 0) {
+        const liveResv = await prisma.reservations.findFirst({
+          where: {
+            room_type_id: id,
+            deleted_at: null,
+            folios: { status: { notIn: [2, 1] }, deleted_at: null },
+          },
+        });
+        if (liveResv) {
+          badRequest(res, 'Cannot change status to inactive, because there is a reservation with this room type');
+          return;
+        }
+      }
 
       const updateData: any = { updated_at: new Date(), updated_by: userId };
       if (name !== undefined) updateData.name = name;
@@ -506,6 +553,19 @@ export class RoomController {
       if (status !== undefined) updateData.status = Number(status);
 
       await prisma.room_types.update({ where: { id }, data: updateData });
+
+      if (room_type_grouping !== undefined && room_type_grouping !== null) {
+        await prisma.model_has_types.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\RoomType' } });
+        const groupingIds = Array.isArray(room_type_grouping)
+          ? room_type_grouping.map((g: any) => BigInt(g?.value ?? g))
+          : [BigInt(room_type_grouping)];
+        for (const gid of groupingIds) {
+          if (Number.isNaN(Number(gid))) continue;
+          await prisma.model_has_types.create({
+            data: { model_id: id, model_type: 'App\\Models\\RoomType', type_id: gid },
+          });
+        }
+      }
 
       const updated = await prisma.room_types.findUnique({ where: { id } });
       success(res, bigintToNumber(updated), 'Success');

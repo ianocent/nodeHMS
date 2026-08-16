@@ -144,7 +144,7 @@ export class UserController {
       });
 
       const master = {
-        companies: propCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name })),
+        companies: propCompanies.map((c: any) => ({ value: Number(c.id), label: c.name })),
         properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
         roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
@@ -211,13 +211,13 @@ export class UserController {
         });
       }
 
-      // Create property assignments (Laravel: model_has_properties)
-      if (property_ids?.length) {
-        for (const pid of property_ids) {
-          await prisma.model_has_properties.create({
-            data: { model_id: user.id, model_type: 'App\\Models\\User', property_id: BigInt(pid) }
-          });
-        }
+      // Create property assignments (Laravel: sync [lastProperty] when empty)
+      const propsToSync = property_ids?.length ? property_ids : [req.user?.lastProperty];
+      for (const pid of propsToSync) {
+        if (pid == null) continue;
+        await prisma.model_has_properties.create({
+          data: { model_id: user.id, model_type: 'App\\Models\\User', property_id: BigInt(pid) }
+        });
       }
 
       // Create company assignment (Laravel: model_has_companies, table `companies`)
@@ -323,7 +323,7 @@ export class UserController {
       }
 
       const master = {
-        companies: propCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name })),
+        companies: propCompanies.map((c: any) => ({ value: Number(c.id), label: c.name })),
         properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
         roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
@@ -371,7 +371,7 @@ export class UserController {
       if (!name) errors.name = ['The name field is required.'];
       if (!username) errors.username = ['The username field is required.'];
       if (!email) errors.email = ['The email field is required.'];
-      if (!status) errors.status = ['The status field is required.'];
+      if (status === undefined || status === null || status === '') errors.status = ['The status field is required.'];
 
       const existing = await prisma.users.findFirst({
         where: { OR: [{ username }, { email }], id: { not: id }, deleted_at: null }

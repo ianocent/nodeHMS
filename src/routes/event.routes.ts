@@ -119,8 +119,17 @@ router.get('/event-timeline/timeline', authMiddleware, requirePermission(211, 'v
 
 // Frontend master-* page aliases (TableView only, forms are stubs)
 router.get('/master-venue', authMiddleware, requirePermission(211, 'view'), EventController.venueList);
+router.post('/master-venue', authMiddleware, requirePermission(211, 'add'), EventController.venueStore);
+router.put('/master-venue/:id', authMiddleware, requirePermission(211, 'edit'), EventController.venueUpdate);
+router.delete('/master-venue/:id', authMiddleware, requirePermission(211, 'delete'), EventController.venueDestroy);
 router.get('/master-layout', authMiddleware, requirePermission(211, 'view'), EventController.layoutList);
+router.post('/master-layout', authMiddleware, requirePermission(211, 'add'), EventController.layoutStore);
+router.put('/master-layout/:id', authMiddleware, requirePermission(211, 'edit'), EventController.layoutUpdate);
+router.delete('/master-layout/:id', authMiddleware, requirePermission(211, 'delete'), EventController.layoutDestroy);
 router.get('/master-inventory', authMiddleware, requirePermission(211, 'view'), EventController.inventoryList);
+router.post('/master-inventory', authMiddleware, requirePermission(211, 'add'), EventController.inventoryStore);
+router.put('/master-inventory/:id', authMiddleware, requirePermission(211, 'edit'), EventController.inventoryUpdate);
+router.delete('/master-inventory/:id', authMiddleware, requirePermission(211, 'delete'), EventController.inventoryDestroy);
 router.get('/master-capacity', authMiddleware, requirePermission(211, 'view'), EventController.capacityList);
 router.post('/master-capacity', authMiddleware, requirePermission(211, 'add'), EventController.capacityStore);
 router.put('/master-capacity/:id', authMiddleware, requirePermission(211, 'edit'), EventController.capacityUpdate);

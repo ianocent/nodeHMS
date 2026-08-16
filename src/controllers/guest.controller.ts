@@ -1015,4 +1015,38 @@ export class GuestController {
       error(res, 'Failed to load guest listing report', 500);
     }
   }
+
+  // Merge Guest (menu 84) — Laravel GuestProfileController@mergeUpdate parity
+  static async mergeUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const data = req.body;
+      const guest = await prisma.guest_profiles.update({
+        where: { id },
+        data: { ...data, updated_at: new Date(), updated_by: req.user?.id ?? null },
+      });
+      success(res, bigintToNumber(guest), 'Guest merged', 200);
+    } catch (err: any) {
+      console.error('Merge guest error:', err);
+      error(res, 'Failed to merge guest', 500);
+    }
+  }
+
+  // Batch update after merge (frontend custom endpoint)
+  static async batchUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const { guest_profiles } = req.body;
+      if (guest_profiles?.length > 0) {
+        const ids = guest_profiles.map((p: any) => BigInt(String(p.id)));
+        await prisma.guest_profiles.updateMany({
+          where: { id: { in: ids } },
+          data: { deleted_at: new Date(), deleted_by: req.user?.id ?? null },
+        });
+      }
+      success(res, null, 'Batch update completed', 200);
+    } catch (err: any) {
+      console.error('Batch update guest error:', err);
+      error(res, 'Failed to batch update guests', 500);
+    }
+  }
 }
