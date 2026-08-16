@@ -26,6 +26,8 @@ import statisticRoutes from './routes/statistic.routes';
 import genericRoutes from './routes/generic.routes';
 import extraRoutes from './routes/extra.routes';
 import contentRoutes from './routes/content.routes';
+import { firebaseRoutes } from './controllers/firebase.controller';
+import { initQueue } from './config/queue';
 
 const app: Express = express();
 const port = process.env.PORT || 3000;
@@ -173,6 +175,11 @@ app.use('/api', contentRoutes);
 app.use('/cms', contentRoutes);
 mountLegacyCmsAlias(contentRoutes);
 
+// Firebase Push Notifications
+app.use('/api', firebaseRoutes);
+app.use('/cms', firebaseRoutes);
+mountLegacyCmsAlias(firebaseRoutes);
+
 // ============================================================
 // 404 Catch-all
 // ============================================================
@@ -188,15 +195,21 @@ app.use(errorHandler);
 // ============================================================
 // Start Server
 // ============================================================
-app.listen(port, () => {
-  console.log(`[server] HMS Anyaman running at http://localhost:${port}`);
-  console.log(`[server] Phase 4.2: Room Management active`);
-  console.log(`[server] Phase 4.3: Pricing & Rate Management active`);
-  console.log(`[server] Phase 4.4: STAAH OTA Integration active`);
-  console.log(`[server] Phase 4.5: POS & Accounting active`);
-  console.log(`[server] Phase 4.6: Reports active (Excel)`);
-  console.log(`[server] Phase 4.7: Admin, Master Setup, Company active`);
-  console.log(`[server] Phase 4.8: Housekeeping, Concierge, Event, Statistic, Night Audit, Front Desk Extras, Guest Sub-features active`);
-});
+const startServer = async () => {
+  await initQueue();
+  
+  app.listen(port, () => {
+    console.log(`[server] HMS Anyaman running at http://localhost:${port}`);
+    console.log(`[server] Phase 4.2: Room Management active`);
+    console.log(`[server] Phase 4.3: Pricing & Rate Management active`);
+    console.log(`[server] Phase 4.4: STAAH OTA Integration active`);
+    console.log(`[server] Phase 4.5: POS & Accounting active`);
+    console.log(`[server] Phase 4.6: Reports active (Excel)`);
+    console.log(`[server] Phase 4.7: Admin, Master Setup, Company active`);
+    console.log(`[server] Phase 4.8: Housekeeping, Concierge, Event, Statistic, Night Audit, Front Desk Extras, Guest Sub-features active`);
+  });
+};
+
+startServer();
 
 export default app;

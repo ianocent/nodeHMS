@@ -55,9 +55,11 @@
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "express-validator": "^7.3.2",
+    "firebase-admin": "^14.2.0",
     "multer": "^2.2.0",
     "mysql2": "^3.6.5",
     "pg": "^8.11.3",
+    "pg-boss": "^12.27.0",
     "puppeteer-core": "^25.7.0"
   },
   "devDependencies": {

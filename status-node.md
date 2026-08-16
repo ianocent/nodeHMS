@@ -404,3 +404,62 @@ Keluhan baru: di Master Setup/Billing Setup (code-billing, code-post, code-item,
 - fe-uri-check.mjs di-update handle wildcard {*path}: 0 missing report (317 FE URI; sisa 1 false positive reservation/ledger/move = concat id runtime, route ada).
 - Verify: backend tsc --noEmit bersih. BELUM rebuild/restart/probe (user restart dulu). Frontend TIDAK diubah.
 - Issues: nodeHMS #4 (endpoint diff) tinggal komentar update; #3 STAAH M6 + #5 cutover masih open.
+
+## 2026-08-16 sesi 6: Review False Negatives
+- Review `frontend_crud_detailed_marked.csv` selesai. 15 entri "possible_false_negative" (accounting, approval, event, front-desk, dll) **semua false negative beneran**. Route backend sudah ada tapi gak kedetect script karena path dinamis atau alias.
+- Tidak ada route CRUD missing yang perlu dikerjakan dari list ini. Lanjut ke milestone STAAH background jobs.
+
+## 2026-08-16 sesi 7: Background Jobs Queue — STAAH ARI + Cron (SELESAI)
+- `src/config/queue.ts`: pg-boss ESM import fix via dynamic import, `initQueue()` registers 4 workers + cron schedules.
+- 4 job handlers di `src/queue/jobs/`:
+  - `SyncPriceStaah` — every minute: pick rate `staah=true & sync_staah=false`, push prices via `StaahService.storeRates`, mark `sync_staah=true`.
+  - `pullStaahReservations` — every 5 min: pull reservations per active `staah_interfaces`, upsert `staah_reservations`, ack notifications.
+  - `syncStaahRoomAvailability` — every 5 min per property (dispatched): compute available rooms (physical - reserved), push roomstosell to STAAH, cache MD5 hash skip unchanged.
+  - `checkExpiredRequestBookings` — hourly: warn 23-24h pending, auto-cancel 24h+ via `StaahService.cancelRequestBooking`, log to `staah_sync_logs`.
+- TypeScript build bersih, jest 73/73 pass.
+- Cron aktif setelah restart server (`node dist/src/index.js`).
+- Issue nodeHMS #3 (STAAH jobs/ARI) → background jobs DONE. Sisa: ARI push verification + cutover (#5).
+
+## 2026-08-16 sesi 8: Third-Party Integrations — Firebase Push + OTA Webhooks (SELESAI)
+- **Firebase Push Notifications** (`src/services/firebase.service.ts`, `src/controllers/firebase.controller.ts`):
+  - `firebase-admin` v14 integrated with proper submodule imports (app, messaging).
+  - Service: `sendToUser`, `sendToToken`, `sendToMultipleTokens`, `sendToTopic`, `subscribeToTopic`, `unsubscribeFromTopic`.
+  - Credentials via env: `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`.
+  - Routes (mounted at `/api`, `/cms`, `/api/cms`):
+    - `POST /firebase/test-push` — test send to current user (auth required)
+    - `POST /firebase/send-user` — send to specific userId (admin, perm 69 edit)
+    - `POST /firebase/send-users` — multicast to userIds array (admin, perm 69 edit)
+    - `POST /firebase/send-topic` — send to FCM topic (admin, perm 69 edit)
+    - `POST /firebase/subscribe` — subscribe user tokens to topic (admin, perm 69 edit)
+    - `POST /firebase/unsubscribe` — unsubscribe from topic (admin, perm 69 edit)
+    - `POST /firebase/save-token` — save FCM token (alias for admin.saveFcmToken)
+  - TSC clean, jest 73/73 pass.
+- **STAAH OTA Webhooks** (already implemented in `src/controllers/staah-webhook.controller.ts`):
+  - `GET /staah/webhook/health` — health check
+  - `POST /staah/webhook/reservation-push` — handle incoming reservation push from STAAH (basic auth via headers/query)
+  - `POST /staah/webhook/confirm-booking` — confirm pending booking → create folio + reservations
+  - Auth: `validateStaahWebhookAuth` checks `username`/`password` headers vs env `STAAH_WEBHOOK_USERNAME`/`STAAH_WEBHOOK_PASSWORD` (bypass via `STAAH_WEBHOOK_BYPASS_AUTH=true`)
+  - Routes mounted at `/api/staah/webhook/*`, `/cms/staah/webhook/*` via staahRoutes.
+- Third-Party Integrations milestone: Firebase Push DONE, STAAH Webhooks DONE.
+
+## 2026-08-16 sesi 9: Frontend Integration Verification + Cutover Preparation (MULAI)
+- **Frontend-node audit** (`frontend-node/`):
+  - Next.js 14 + React 18 + TypeScript, Redux Toolkit + redux-persist (SSR-safe).
+  - AES-256-CBC encryption matches backend (key: `lbwyBzfgzUIvXZFShJuikaWvLJhIVq36`).
+  - API base: `NEXT_PUBLIC_API_URL` (default `http://localhost:3001`) — should use `.env` not hardcoded.
+  - Permission system: `useFormPermission()` hook + `hasPermission()` utility — super-user roles: `developer`/`administrator`/`admin`/`anyaman`.
+  - Known issue: `permissionHelper.ts` strict `=== true` check fails for `1`/`"true"` values — needs truthy check (hms-frontend issue #2).
+  - Firebase client SDK v10.7.1 present (`@capacitor/push-notifications` for native).
+  - Rewrites cover all major modules (reservation, rate-management, house-keeping, event, staah, etc.).
+  - Build: `yarn run build` (yarn.lock v1 tracked).
+- **Backend-node ready for cutover**:
+  - All 4 STAAH cron jobs registered in pg-boss queue.
+  - Firebase push service + routes implemented.
+  - STAAH webhook endpoints active.
+  - 73/73 tests pass, TSC clean.
+- **Next steps for cutover**:
+  1. Verify all frontend pages against live backend-node (probe scripts).
+  2. Fix any 4xx/5xx from route mismatches.
+  3. Configure Firebase credentials in `.env` for both frontend + backend.
+  4. Run production build + PM2 deploy.
+  5. Switch DNS/traffic from Laravel to Node.
