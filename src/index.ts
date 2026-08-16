@@ -69,41 +69,54 @@ app.get('/api/status', (_req: Request, res: Response) => {
   success(res, { db: 'connected', phase: 4 }, 'API operational');
 });
 
+const mountLegacyCmsAlias = (...routers: any[]) => {
+  routers.forEach((router) => app.use('/api/cms', router));
+};
+
 // Auth routes — matches Laravel cms.php prefix
 app.use('/api', authRoutes);
 app.use('/cms', authRoutes);
+mountLegacyCmsAlias(authRoutes);
 
 // User & Guest routes — Phase 4.1
 app.use('/api', userGuestRoutes);
 app.use('/cms', userGuestRoutes);
+mountLegacyCmsAlias(userGuestRoutes);
 
 // Reservation routes — Phase 4.2
 app.use('/api', reservationRoutes);
 app.use('/cms', reservationRoutes);
+mountLegacyCmsAlias(reservationRoutes);
 
 // Pricing & Rate routes — Phase 4.3
 app.use('/api', rateRoutes);
 app.use('/cms', rateRoutes);
+mountLegacyCmsAlias(rateRoutes);
 
 // Room Management routes — Phase 4.2
 app.use('/api', roomRoutes);
 app.use('/cms', roomRoutes);
+mountLegacyCmsAlias(roomRoutes);
 
 // Front Desk routes — Phase 4.2
 app.use('/api', frontDeskRoutes);
 app.use('/cms', frontDeskRoutes);
+mountLegacyCmsAlias(frontDeskRoutes);
 
 // Folio Management routes — Phase 4.2
 app.use('/api', folioRoutes);
 app.use('/cms', folioRoutes);
+mountLegacyCmsAlias(folioRoutes);
 
 // STAAH OTA Integration routes — Phase 4.4
 app.use('/api', staahRoutes);
 app.use('/cms', staahRoutes);
+mountLegacyCmsAlias(staahRoutes);
 
 // POS & Accounting routes — Phase 4.5
 app.use('/api', masterSystemRoutes);
 app.use('/cms', masterSystemRoutes);
+mountLegacyCmsAlias(masterSystemRoutes);
 
 // Reports routes — Phase 4.6
 // report.routes.ts uses absolute /cms/... paths → mount at root (no prefix strip)
@@ -114,30 +127,37 @@ app.use('/api', reportRoutes);
 // Admin routes — Roles, Permissions, Menus, Settings, Tasks, Logs
 app.use('/api', adminRoutes);
 app.use('/cms', adminRoutes);
+mountLegacyCmsAlias(adminRoutes);
 
 // Master Setup routes — TypePayment, Countries, Cities, Holidays
 app.use('/api', masterSetupRoutes);
 app.use('/cms', masterSetupRoutes);
+mountLegacyCmsAlias(masterSetupRoutes);
 
 // Company Profile routes — Sales & Marketing
 app.use('/api', companyRoutes);
 app.use('/cms', companyRoutes);
+mountLegacyCmsAlias(companyRoutes);
 
 // Housekeeping routes — Phase 4.8
 app.use('/api', housekeepingRoutes);
 app.use('/cms', housekeepingRoutes);
+mountLegacyCmsAlias(housekeepingRoutes);
 
 // Concierge routes — Phase 4.8
 app.use('/api', conciergeRoutes);
 app.use('/cms', conciergeRoutes);
+mountLegacyCmsAlias(conciergeRoutes);
 
 // Event Management routes — Phase 4.8
 app.use('/api', eventRoutes);
 app.use('/cms', eventRoutes);
+mountLegacyCmsAlias(eventRoutes);
 
 // Statistic routes — Phase 4.8
 app.use('/api', statisticRoutes);
 app.use('/cms', statisticRoutes);
+mountLegacyCmsAlias(statisticRoutes);
 
 // Generic CRUD routes — Phase 5.2 (auto-generates list/create/show/update/delete/restore for any model)
 app.use('/api/generic', genericRoutes);
@@ -146,10 +166,12 @@ app.use('/cms/generic', genericRoutes);
 // Extra modules — allotment, overbooking, yield, competitor, statistic/occupancy, countryByRegion, email
 app.use('/api', extraRoutes);
 app.use('/cms', extraRoutes);
+mountLegacyCmsAlias(extraRoutes);
 
 // Content module — Phase 8 (contents, banners, cancelation rules, emails, other-guests)
 app.use('/api', contentRoutes);
 app.use('/cms', contentRoutes);
+mountLegacyCmsAlias(contentRoutes);
 
 // ============================================================
 // 404 Catch-all

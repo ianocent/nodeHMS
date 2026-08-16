@@ -192,6 +192,13 @@ describe('Reports', () => {
     expect([200, 400, 500]).toContain(res.status);
     if (res.status === 200) expectLaravelFormat(res);
   });
+
+  test('GET /api/cms/report/account/daily-statistic-report?typeOps=view returns Excel export', async () => {
+    const res = await request(app).get('/api/cms/report/account/daily-statistic-report?typeOps=view&date=2024-01-01');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('spreadsheetml');
+    expect(res.headers['content-disposition']).toContain('.xlsx');
+  });
 });
 
 // ═════════════════════════════════════════════════════════
