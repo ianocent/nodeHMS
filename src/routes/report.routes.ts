@@ -24,6 +24,7 @@ router.get('/cms/report/batch/download-reports-batch', authMiddleware, requirePe
 router.get('/cms/report/batch/folio/:id/:docType', authMiddleware, requirePermission(69, 'view'), ReportController.folioDocument);
 router.get('/cms/report/event/:id/:reportType', authMiddleware, requirePermission(69, 'view'), ReportController.eventReport);
 router.get('/cms/report/company-profile', authMiddleware, requirePermission(69, 'view'), ReportController.companyProfileReport);
+router.get('/cms/report/companyprofile', authMiddleware, requirePermission(69, 'view'), ReportController.companyProfileReport);
 
 // ═══════════════════════════════════════════════════════════
 // Report — Wildcard handler (after-night-audit, before-night-audit, account, frontoffice, etc.)
@@ -39,6 +40,7 @@ router.get('/cms/night-audit/audit', authMiddleware, requirePermission(69, 'view
 router.get('/cms/staff', authMiddleware, requirePermission(69, 'view'), ReportController.staffList);
 router.get('/cms/master/countries', authMiddleware, requirePermission(69, 'view'), ReportController.masterCountries);
 router.get('/cms/cityByCountry', authMiddleware, requirePermission(69, 'view'), ReportController.cityByCountry);
+router.get('/cms/citybycountry', authMiddleware, requirePermission(69, 'view'), ReportController.cityByCountry);
 
 // ═══════════════════════════════════════════════════════════
 // Guest Listing Report (under /cms/guest path)

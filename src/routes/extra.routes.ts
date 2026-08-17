@@ -247,7 +247,8 @@ router.get('/statistic/occupancy', authMiddleware, requirePermission(80, 'view')
 // ── Country By Region (master data lookup) ──
 // Laravel parity (CountryController@getCountryByRegion): returns [{value, label}];
 // region 'all'/'undefined'/'null' → all countries; else countries filtered by region_id
-router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), async (req: Request, res: Response) => {
+// Support both camelCase and lowercase for FE/BE contract standardization
+const countryByRegionHandler = async (req: Request, res: Response) => {
   try {
     const region = (req.query.region as string) || 'all';
     const toOptions = (rows: any[]) => rows.map((c: any) => ({ value: Number(c.id), label: c.name }));
@@ -273,7 +274,10 @@ router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), as
   } catch (err: any) {
     error(res, err.message || 'Failed to fetch countries', 500);
   }
-});
+};
+
+router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
+router.get('/countrybyregion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
 
 // ── Assign Room (GET — fetch available rooms for assignment dropdown) ──
 router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async (req: Request, res: Response) => {
