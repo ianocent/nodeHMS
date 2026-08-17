@@ -112,6 +112,18 @@ const guestIdFromQuery = (req: any) => {
   req.params.guestId = String(req.query.guest_id ?? req.query.guestId ?? req.query.data ?? '');
 };
 
+// Request Notes (Laravel GuestProfileRequestNoteController parity)
+router.get('/profile/guest-notes', authMiddleware, requirePermission(82, 'view'), GuestController.notesList);
+router.post('/profile/guest-notes', authMiddleware, requirePermission(82, 'add'), GuestController.notesStore);
+router.put('/profile/guest-notes/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.notesUpdate);
+router.delete('/profile/guest-notes/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.notesDestroy);
+
+// Family Member (Laravel GuestProfileFamilyMemberController parity)
+router.get('/profile/guest-family-member', authMiddleware, requirePermission(82, 'view'), GuestController.familyMemberList);
+router.post('/profile/guest-family-member', authMiddleware, requirePermission(82, 'add'), GuestController.familyMemberStore);
+router.put('/profile/guest-family-member/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.familyMemberUpdate);
+router.delete('/profile/guest-family-member/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.familyMemberDestroy);
+
 router.get('/profile/guest-folio', authMiddleware, requirePermission(82, 'view'), GuestController.folioList);
 router.get('/profile/guest-document', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.documentList(req, res); });
 router.post('/profile/guest-document', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.documentStore(req, res); });

@@ -39,6 +39,7 @@ router.get('/profile/company-contact', authMiddleware, CompanyController.contact
 router.post('/profile/company-contact', authMiddleware, CompanyController.contactStore);
 router.put('/profile/company-contact/:id', authMiddleware, CompanyController.contactUpdate);
 router.delete('/profile/company-contact/:id', authMiddleware, CompanyController.contactDestroy);
+router.get('/profile/company/contactPerson/:id', authMiddleware, CompanyController.contactPersonByCompany);
 
 // Department
 router.get('/profile/company-department', authMiddleware, CompanyController.deptList);

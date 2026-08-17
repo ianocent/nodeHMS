@@ -311,6 +311,19 @@ export class CompanyController {
   static async contactDestroy(req: Request, res: Response): Promise<void> {
     try { const id = idP(req.params.id); await prisma.company_profile_contact_persons.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
+  // Laravel CompanyProfileContactPersonController@getContactPerson (GET /profile/company/contactPerson/:id)
+  static async contactPersonByCompany(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { badRequest(res, 'Company profile id is required'); return; }
+      const data = await prisma.company_profile_contact_persons.findMany({
+        where: { company_profile_id: BigInt(raw), status: 1, deleted_at: null },
+        orderBy: { is_default: 'desc' },
+        select: { id: true, name: true },
+      });
+      res.json({ code: 200, message: 'Success', data: data.map((c: any) => ({ value: Number(c.id), label: c.name })) });
+    } catch (err: any) { console.error('Contact person by company error:', err); error(res, 'Failed', 500); }
+  }
 
   // ── Department ──
   static async deptList(req: Request, res: Response): Promise<void> {

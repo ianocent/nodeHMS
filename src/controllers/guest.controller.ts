@@ -61,6 +61,12 @@ function parsePaginationFn(query: any) {
   return { page, limit, search, sort, order };
 }
 
+function paggingFn(total: number, limit: number, page: number) {
+  const lastPage = limit > 0 ? Math.max(1, Math.ceil(total / limit)) : 1;
+  const from = total === 0 ? 0 : (page - 1) * limit + 1;
+  return { current_page: page, last_page: lastPage, per_page: limit, total, from, to: Math.min(total, page * limit) };
+}
+
 export class GuestController {
   /**
    * GET /api/guests
@@ -1048,5 +1054,164 @@ export class GuestController {
       console.error('Batch update guest error:', err);
       error(res, 'Failed to batch update guests', 500);
     }
+  }
+
+  // ==================== REQUEST NOTES (Laravel GuestProfileRequestNoteController parity) ====================
+  static async notesList(req: Request, res: Response): Promise<void> {
+    try {
+      const { page, limit, search } = parsePaginationFn(req.query);
+      const guestId = String(req.query.guest_id ?? '');
+      if (!guestId) {
+        success(res, [], 'No guest ID provided.', 200, {
+          table: GuestController.notesTable(),
+          pagging: paggingFn(0, limit, page),
+          permission: { view: true, delete: true },
+          search_data: [],
+        });
+        return;
+      }
+      const where: any = { id_guest_profile: BigInt(guestId), deleted_at: null };
+      if (search) where.OR = [{ note: { contains: search, mode: 'insensitive' } }, { username: { contains: search, mode: 'insensitive' } }];
+      const [data, total] = await Promise.all([
+        prisma.guest_profile_request_notes.findMany({ where, orderBy: { id: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.guest_profile_request_notes.count({ where }),
+      ]);
+      const permFlags = getPermissionFlags(req.user, 82);
+      const permission = { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit };
+      success(res, bigintToNumber(data), 'Success', 200, { table: GuestController.notesTable(), pagging: paggingFn(total, limit, page), permission, search_data: [] });
+    } catch (err: any) { console.error('Notes list error:', err); error(res, 'Failed to list notes', 500); }
+  }
+
+  static async notesStore(req: Request, res: Response): Promise<void> {
+    try {
+      const { guest_id, note, frequency, time, arrival } = req.body;
+      if (!guest_id) { badRequest(res, 'The guest id field is required.'); return; }
+      if (!frequency) { badRequest(res, 'The frequency field is required.'); return; }
+      if (!time) { badRequest(res, 'The time field is required.'); return; }
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const noteRow = await prisma.guest_profile_request_notes.create({
+        data: {
+          id_guest_profile: BigInt(guest_id), property_id: pid, frequency, time, note: note ?? null,
+          username: req.user?.name ?? '', arrival: arrival ?? false, status: 1,
+          created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
+        },
+      });
+      success(res, bigintToNumber(noteRow), 'Note created successfully.', 201);
+    } catch (err: any) { console.error('Notes store error:', err); error(res, 'Failed to create note', 500); }
+  }
+
+  static async notesUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Note not found'); return; }
+      const { note, frequency, time, arrival } = req.body;
+      const data: any = { username: req.user?.name ?? '', updated_at: new Date(), updated_by: req.user?.id };
+      if (note !== undefined) data.note = note;
+      if (frequency !== undefined) data.frequency = frequency;
+      if (time !== undefined) data.time = time;
+      if (arrival !== undefined) data.arrival = arrival;
+      const updated = await prisma.guest_profile_request_notes.update({ where: { id: BigInt(raw) }, data });
+      success(res, bigintToNumber(updated), 'Note updated successfully.');
+    } catch (err: any) { console.error('Notes update error:', err); error(res, 'Failed to update note', 500); }
+  }
+
+  static async notesDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Note not found'); return; }
+      await prisma.guest_profile_request_notes.update({ where: { id: BigInt(raw) }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+      success(res, null, 'Note deleted successfully.');
+    } catch (err: any) { console.error('Notes destroy error:', err); error(res, 'Failed to delete note', 500); }
+  }
+
+  private static notesTable(): any[] {
+    const frequencyOptions = ['Daily', 'Once', 'Twice'].map((v) => ({ value: v, label: v }));
+    const timeOptions = ['Morning', 'Evening', 'Everyday', 'Arrival'].map((v) => ({ value: v, label: v }));
+    return [
+      { label: 'Frequency', key: 'frequency', type: 'select', is_search: false, options: frequencyOptions },
+      { label: 'Time', key: 'time', type: 'select', is_search: false, options: timeOptions },
+      { label: 'Note', key: 'note', type: 'text', is_search: false },
+      { label: 'Username', key: 'username', type: 'none', is_search: false },
+      { label: 'Arrival', key: 'arrival', type: 'checkbox', is_search: false },
+    ];
+  }
+
+  // ==================== FAMILY MEMBER (Laravel GuestProfileFamilyMemberController parity) ====================
+  static async familyMemberList(req: Request, res: Response): Promise<void> {
+    try {
+      const { page, limit } = parsePaginationFn(req.query);
+      const guestId = String(req.query.guest_id ?? '');
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      if (!guestId) {
+        success(res, [], 'No guest ID provided.', 200, {
+          table: GuestController.familyMemberTable(),
+          pagging: paggingFn(0, limit, page),
+          permission: { edit: true },
+          search_data: [],
+        });
+        return;
+      }
+      const searchField = req.query.search_field as string;
+      const searchValue = String(req.query.search_value ?? '');
+      const where: any = { guest_profile_id: BigInt(guestId), property_id: pid, deleted_at: null };
+      if (searchField && searchValue && ['relationship', 'status'].includes(searchField)) {
+        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+      }
+      const [data, total] = await Promise.all([
+        prisma.guest_profile_family_members.findMany({ where, orderBy: { updated_at: 'desc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.guest_profile_family_members.count({ where }),
+      ]);
+      const permFlags = getPermissionFlags(req.user, 82);
+      const permission = { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete };
+      success(res, bigintToNumber(data), 'Success', 200, { table: GuestController.familyMemberTable(), pagging: paggingFn(total, limit, page), permission, search_data: [] });
+    } catch (err: any) { console.error('Family member list error:', err); error(res, 'Failed to list family members', 500); }
+  }
+
+  static async familyMemberStore(req: Request, res: Response): Promise<void> {
+    try {
+      const { guest_id, has_guest_profile_id, relationship } = req.body;
+      if (!guest_id || !has_guest_profile_id) { badRequest(res, 'The guest id field is required.'); return; }
+      if (!relationship) { badRequest(res, 'The relationship field is required.'); return; }
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const guestId = BigInt(guest_id);
+      const memberId = BigInt(has_guest_profile_id);
+      await prisma.guest_profile_family_members.create({
+        data: { property_id: pid, guest_profile_id: guestId, has_guest_profile_id: memberId, relationship, status: 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
+      });
+      const reverse = await prisma.guest_profile_family_members.create({
+        data: { property_id: pid, guest_profile_id: memberId, has_guest_profile_id: guestId, relationship, status: 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
+      });
+      success(res, bigintToNumber(reverse), 'Family member created successfully.', 201);
+    } catch (err: any) { console.error('Family member store error:', err); error(res, 'Failed to create family member', 500); }
+  }
+
+  static async familyMemberUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Family member not found'); return; }
+      const { relationship, status } = req.body;
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
+      if (relationship !== undefined) data.relationship = relationship;
+      if (status !== undefined) data.status = Number(status);
+      const updated = await prisma.guest_profile_family_members.update({ where: { id: BigInt(raw) }, data });
+      success(res, bigintToNumber(updated), 'Family member updated successfully.');
+    } catch (err: any) { console.error('Family member update error:', err); error(res, 'Failed to update family member', 500); }
+  }
+
+  static async familyMemberDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Family member not found'); return; }
+      await prisma.guest_profile_family_members.update({ where: { id: BigInt(raw) }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+      success(res, null, 'Family member deleted successfully.');
+    } catch (err: any) { console.error('Family member destroy error:', err); error(res, 'Failed to delete family member', 500); }
+  }
+
+  private static familyMemberTable(): any[] {
+    const relationshipOptions = ['Father', 'Mother', 'Children', 'Grandfather', 'Grandmother', 'Grandchildren', 'Brother', 'Sister', 'Uncle', 'Aunt', 'Cousin', 'Nephew', 'Niece', 'Other'].map((v) => ({ value: v, label: v }));
+    return [
+      { label: 'Family Member Name', key: 'has_guest_profile_id', type: 'autocomplete', url_autocomplete: '/cms/profile/guest-v2', is_search: true },
+      { label: 'Relationship', key: 'relationship', type: 'select', is_search: false, options: relationshipOptions },
+    ];
   }
 }
