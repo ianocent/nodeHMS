@@ -306,6 +306,52 @@ export class ConciergeController {
     } catch (err: any) { console.error('Lost & found form error:', err); error(res, 'Failed to load lost & found', 500); }
   }
 
+  // ==================== FORM / SHOW (frontend suffix routes) ====================
+  static async baggageForm(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const master: any = { statuses: STATUSES };
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) {
+        success(res, { status: 0 }, 'Success', 200, { master });
+        return;
+      }
+      const data = await prisma.baggages.findFirst({ where: { id: BigInt(idRaw), property_id: pid } });
+      if (!data || data.deleted_at) { notFound(res, 'Baggage not found'); return; }
+      success(res, bigintToNumber(data), 'Success', 200, { master });
+    } catch (err: any) { console.error('Baggage form error:', err); error(res, 'Failed to load baggage', 500); }
+  }
+
+  static async carParkForm(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const master: any = { statuses: STATUSES };
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) {
+        success(res, { status: 0 }, 'Success', 200, { master });
+        return;
+      }
+      const data = await prisma.car_parks.findFirst({ where: { id: BigInt(idRaw), property_id: pid } });
+      if (!data || data.deleted_at) { notFound(res, 'Car park not found'); return; }
+      success(res, bigintToNumber(data), 'Success', 200, { master });
+    } catch (err: any) { console.error('Car park form error:', err); error(res, 'Failed to load car park', 500); }
+  }
+
+  static async phoneBookGroupForm(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const master: any = { statuses: STATUSES };
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) {
+        success(res, { status: 0 }, 'Success', 200, { master });
+        return;
+      }
+      const data = await prisma.phone_book_groups.findFirst({ where: { id: BigInt(idRaw), property_id: pid } });
+      if (!data || data.deleted_at) { notFound(res, 'Phone book group not found'); return; }
+      success(res, bigintToNumber(data), 'Success', 200, { master });
+    } catch (err: any) { console.error('Phone book group form error:', err); error(res, 'Failed to load phone book group', 500); }
+  }
+
   static async lostFoundStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
