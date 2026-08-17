@@ -100,9 +100,10 @@ router.get('/accounting/get/:type', authMiddleware, requirePermission(69, 'view'
 router.get('/accounting/:type', authMiddleware, requirePermission(69, 'view'), AccountingController.list);
 router.get('/accounting/:type/create', authMiddleware, requirePermission(69, 'add'), AccountingController.createForm);
 router.post('/accounting/:type', authMiddleware, requirePermission(69, 'add'), AccountingController.store);
-router.put('/accounting/:type/:id', authMiddleware, requirePermission(69, 'edit'), AccountingController.updateStatus);
+router.put('/accounting/:type/:id', authMiddleware, requirePermission(69, 'edit'), AccountingController.update);
 router.post('/accounting/:type/update-status', authMiddleware, requirePermission(69, 'edit'), AccountingController.updateStatus);
 router.get('/accounting/:type/:id', authMiddleware, requirePermission(69, 'view'), AccountingController.show);
+router.get('/accounting/:type/:id/update', authMiddleware, requirePermission(69, 'edit'), AccountingController.edit);
 
 // ══════════════════════════════════════════════════════════
 // Allocation Accounting

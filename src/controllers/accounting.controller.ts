@@ -236,6 +236,103 @@ export class AccountingController {
   }
 
   // ─────────────────────────────────────────────
+  // GET /cms/accounting/{type}/{id}/update
+  // ─────────────────────────────────────────────
+  static async edit(req: Request, res: Response): Promise<void> {
+    try {
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Accounting record not found'); return; }
+      const id = BigInt(idRaw);
+
+      const record = await prisma.accountings.findUnique({
+        where: { id },
+        include: {
+          type_payments: { select: { id: true, name: true } },
+          folios: { select: { id: true, folio_number: true } },
+          properties: { select: { id: true, name: true } },
+        },
+      });
+
+      if (!record || record.deleted_at) {
+        notFound(res, 'Accounting record not found');
+        return;
+      }
+
+      success(res, bigintToNumber(record), 'Success', 200, {
+        master: {
+          status_accounting: [
+            { value: 1, label: 'Processed' },
+            { value: 2, label: 'Pending' },
+            { value: 3, label: 'Cancelled' },
+          ],
+        },
+      });
+    } catch (err: any) {
+      console.error('Accounting edit error:', err);
+      error(res, 'Failed to fetch accounting record', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  // PUT /cms/accounting/{type}/{id}
+  // ─────────────────────────────────────────────
+  static async update(req: Request, res: Response): Promise<void> {
+    try {
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Accounting record not found'); return; }
+      const id = BigInt(idRaw);
+
+      const record = await prisma.accountings.findUnique({ where: { id } });
+      if (!record || record.deleted_at) {
+        notFound(res, 'Accounting record not found');
+        return;
+      }
+
+      if (record.status_accounting === 1 || record.status_accounting === 3) {
+        badRequest(res, 'Data has been Processed or canceled');
+        return;
+      }
+
+      const { date, company_profile_id, description, amount, source, type_payment_id, group } = req.body;
+
+      if (!date || !company_profile_id || amount === undefined) {
+        badRequest(res, 'date, company_profile_id, and amount are required');
+        return;
+      }
+
+      const mappedType = group ? (TYPE_MAP[group] || null) : record.type_accounting;
+      let finalAmount = Number(amount);
+      if (group === 'credit-note' && finalAmount > 0) finalAmount *= -1;
+      if (group === 'payment' && finalAmount > 0) finalAmount *= -1;
+      if (group === 'debit-note' && finalAmount < 0) finalAmount *= -1;
+      if (group === 'refund' && finalAmount < 0) finalAmount *= -1;
+
+      const companyId = typeof company_profile_id === 'object' && company_profile_id !== null
+        ? company_profile_id.value
+        : company_profile_id;
+
+      const updated = await prisma.accountings.update({
+        where: { id },
+        data: {
+          type_accounting: mappedType ?? undefined,
+          doc_date: new Date(date),
+          amount: finalAmount,
+          source: source ?? undefined,
+          type_payment_id: type_payment_id !== undefined ? BigInt(type_payment_id) : undefined,
+          description: description ?? undefined,
+          company_profile_id: companyId !== undefined ? BigInt(companyId) : undefined,
+          updated_at: new Date(),
+        },
+      });
+
+      success(res, bigintToNumber(updated), 'Success');
+    } catch (err: any) {
+      console.error('Accounting update error:', err);
+      error(res, 'Failed to update accounting record', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────
   // POST /cms/accounting/{type}
   // ─────────────────────────────────────────────
   static async store(req: Request, res: Response): Promise<void> {

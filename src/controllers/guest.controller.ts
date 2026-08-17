@@ -745,6 +745,46 @@ export class GuestController {
     } catch (err: any) { console.error('Guest folio list error:', err); error(res, 'Failed to list folios', 500); }
   }
 
+  // ==================== FOLIO STORE/DESTROY (GuestFolioController parity) ====================
+  static async folioStore(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty;
+      const { guest_profile_id, company_profile_id, room_type_id, rate_id, room_id, check_in_date, check_out_date, status_folio, folio, first_name, last_name } = req.body;
+      const data: any = {
+        property_id: pid,
+        guest_profile_id: guest_profile_id !== undefined ? BigInt(guest_profile_id) : undefined,
+        check_in_date: check_in_date ? new Date(check_in_date) : undefined,
+        check_out_date: check_out_date ? new Date(check_out_date) : undefined,
+        is_compliment_tour_leader: false,
+        type_reservation: 'fit',
+        folio_number: folio ?? undefined,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      if (first_name !== undefined) data.first_name = first_name;
+      if (last_name !== undefined) data.last_name = last_name;
+      if (data.guest_profile_id === undefined) { badRequest(res, 'guest_profile_id is required'); return; }
+      if (company_profile_id !== undefined) {
+        data.company_profile_id = BigInt(company_profile_id);
+      } else {
+        data.company_profile_id = (await prisma.company_profiles.findFirst({ where: { deleted_at: null }, orderBy: { id: 'asc' }, select: { id: true } }))?.id;
+      }
+      if (data.company_profile_id === undefined) { badRequest(res, 'company_profile_id is required'); return; }
+      const record = await prisma.folios.create({ data });
+      success(res, bigintToNumber(record), 'Folio created successfully', 201);
+    } catch (err: any) { console.error('Guest folio store error:', err); error(res, 'Failed to create folio', 500); }
+  }
+
+  static async folioDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const record = await prisma.folios.findUnique({ where: { id } });
+      if (!record) { notFound(res, 'Not Found'); return; }
+      await prisma.folios.update({ where: { id }, data: { deleted_at: new Date(), updated_at: new Date() } });
+      success(res, [], 'Folio deleted successfully');
+    } catch (err: any) { console.error('Guest folio destroy error:', err); error(res, 'Failed to delete folio', 500); }
+  }
+
   // ==================== DOCUMENT ====================
   static async documentList(req: Request, res: Response): Promise<void> {
     try {

@@ -66,6 +66,8 @@ router.delete('/profile/company-guest/:id', authMiddleware, CompanyController.gu
 
 // Company Folio
 router.get('/profile/company-folio', authMiddleware, CompanyController.folioList);
+router.post('/profile/company-folio', authMiddleware, CompanyController.folioStore);
+router.delete('/profile/company-folio/:id', authMiddleware, CompanyController.folioDestroy);
 
 // AR Transaction
 router.get('/profile/company-ar-transaction', authMiddleware, CompanyController.arTransactionList);
@@ -74,6 +76,8 @@ router.delete('/profile/company-ar-transaction/:id', authMiddleware, CompanyCont
 
 // Statistic
 router.get('/profile/company-statistic', authMiddleware, CompanyController.statisticIndex);
+router.post('/profile/company-statistic', authMiddleware, CompanyController.statisticStore);
+router.delete('/profile/company-statistic/:id', authMiddleware, CompanyController.statisticDestroy);
 
 // Company Profile Billing Setup
 router.get('/company-profile-billing-setup', authMiddleware, CompanyController.billingSetupList);

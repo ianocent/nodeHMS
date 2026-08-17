@@ -17,6 +17,7 @@ function bn(v: any): any {
   return v;
 }
 function idP(v: any): bigint { return BigInt(Array.isArray(v) ? v[0] : v); }
+function idParamBig(v: any): bigint { return BigInt(Array.isArray(v) ? v[0] : v); }
 
 export class CompanyController {
 
@@ -417,6 +418,73 @@ export class CompanyController {
       const data = await prisma.company_profile_statistics.findMany({ orderBy: { id: 'desc' }, take: 10 });
       success(res, bn(data), 'Success');
     } catch (err: any) { error(res, 'Failed', 500); }
+  }
+
+  // ── Company Folio store/destroy (CompanyProfileFolioController parity) ──
+  static async folioStore(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const { company_profile_id, check_in_date, check_out_date, name, booking_agent, folio, status } = req.body;
+      if (!company_profile_id) { badRequest(res, 'company_profile_id is required'); return; }
+      const d = await prisma.folios.create({ data: {
+        property_id: pid,
+        company_profile_id: BigInt(company_profile_id),
+        check_in_date: check_in_date ? new Date(check_in_date) : undefined,
+        check_out_date: check_out_date ? new Date(check_out_date) : undefined,
+        first_name: name ?? undefined,
+        booking_agent_id: booking_agent ? BigInt(booking_agent) : undefined,
+        folio_number: folio ?? undefined,
+        is_compliment_tour_leader: false,
+        type_reservation: 'fit',
+        status: status !== undefined ? Number(status) : 1,
+        created_at: new Date(),
+        updated_at: new Date(),
+        created_by: req.user?.id,
+      } });
+      success(res, bn(d), 'Folio created successfully', 201);
+    } catch (err: any) { console.error('Company folio store error:', err); error(res, 'Failed to create folio', 500); }
+  }
+
+  static async folioDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const record = await prisma.folios.findUnique({ where: { id } });
+      if (!record) { notFound(res, 'Not Found'); return; }
+      await prisma.folios.update({ where: { id }, data: { deleted_at: new Date(), updated_at: new Date() } });
+      success(res, [], 'Folio deleted successfully');
+    } catch (err: any) { console.error('Company folio destroy error:', err); error(res, 'Failed to delete folio', 500); }
+  }
+
+  // ── Statistic store/destroy (CompanyProfileStatisticController parity) ──
+  static async statisticStore(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const { company_id, month, room_night, room_revenue, other_revenue } = req.body;
+      if (!company_id) { badRequest(res, 'company_id is required'); return; }
+      const d = await prisma.company_profile_statistics.create({ data: {
+        property_id: pid,
+        company_profile_id: BigInt(company_id),
+        month: month ? new Date(month) : undefined,
+        room_night: room_night !== undefined ? Number(room_night) : 0,
+        room_revenue: room_revenue !== undefined ? Number(room_revenue) : 0,
+        other_revenue: other_revenue !== undefined ? Number(other_revenue) : 0,
+        status: 1,
+        created_at: new Date(),
+        updated_at: new Date(),
+        created_by: req.user?.id,
+      } });
+      success(res, bn(d), 'Statistic created successfully', 201);
+    } catch (err: any) { console.error('Statistic store error:', err); error(res, 'Failed to create statistic', 500); }
+  }
+
+  static async statisticDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const record = await prisma.company_profile_statistics.findUnique({ where: { id } });
+      if (!record) { notFound(res, 'Not Found'); return; }
+      await prisma.company_profile_statistics.update({ where: { id }, data: { deleted_at: new Date(), updated_at: new Date() } });
+      success(res, [], 'Statistic deleted successfully');
+    } catch (err: any) { console.error('Statistic destroy error:', err); error(res, 'Failed to delete statistic', 500); }
   }
 
   // ── AR Transaction ──
