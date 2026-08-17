@@ -18,6 +18,28 @@ router.get('/content/seo-home', authMiddleware, requirePermission(69, 'view'), (
 router.get('/content/room', authMiddleware, requirePermission(69, 'view'), (req, res) => { req.query.keyword = 'room'; ContentController.contentList(req, res); });
 router.get('/content/room/config-pax', authMiddleware, requirePermission(69, 'view'), (req, res) => { req.query.keyword = 'config-pax'; ContentController.contentList(req, res); });
 
+// ── Content keyword suffix routes (seo-home / room / config-pax) ──
+router.get('/content/seo-home/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
+router.get('/content/seo-home/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
+router.get('/content/seo-home/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.post('/content/seo-home', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
+router.put('/content/seo-home/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
+router.delete('/content/seo-home/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
+
+router.get('/content/room/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
+router.get('/content/room/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
+router.get('/content/room/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.post('/content/room', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
+router.put('/content/room/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
+router.delete('/content/room/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
+
+router.get('/content/room/config-pax/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
+router.get('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
+router.get('/content/room/config-pax/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.post('/content/room/config-pax', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
+router.put('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
+router.delete('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
+
 // ── Banner (content_banners model) ──
 router.get('/content/banner', authMiddleware, requirePermission(69, 'view'), ContentController.bannerList);
 router.get('/content/banner/create', authMiddleware, requirePermission(69, 'add'), ContentController.bannerForm);
