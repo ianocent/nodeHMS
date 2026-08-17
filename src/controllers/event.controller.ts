@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -68,7 +68,7 @@ export class EventController {
           { label: 'Status', key: 'status', type: 'select', valueOptions: STATUSES },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Venue list error:', err); error(res, 'Failed to list venues', 500); }
   }
@@ -146,7 +146,7 @@ export class EventController {
           { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }] },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Capacity list error:', err); error(res, 'Failed to list capacities', 500); }
   }
@@ -212,7 +212,7 @@ export class EventController {
           { label: 'Status', key: 'status', type: 'select', valueOptions: STATUSES },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Layout list error:', err); error(res, 'Failed to list layouts', 500); }
   }
@@ -276,7 +276,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
           { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }] },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Event list error:', err); error(res, 'Failed to list events', 500); }
   }
@@ -414,7 +414,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
           { label: 'Status', key: 'status', type: 'select', valueOptions: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }] },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Package list error:', err); error(res, 'Failed to list packages', 500); }
   }
@@ -489,7 +489,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
           { label: 'Description', key: 'description', type: 'text', is_search: true },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Inventory list error:', err); error(res, 'Failed to list inventory', 500); }
   }
@@ -580,7 +580,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       success(res, bigintToNumber(data), 'Success', 200, {
         table,
         permission: getPermissionFlags(req.user, 1133),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Item list error:', err); error(res, 'Failed to list items', 500); }
   }
@@ -729,8 +729,9 @@ static async eventList(req: Request, res: Response): Promise<void> {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Management list error:', err); error(res, 'Failed to list event managements', 500); }
   }
 }
+

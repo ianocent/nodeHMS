@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -171,7 +171,7 @@ export class ServiceSchedulerController {
     });
 
     success(res, bigintToNumber(mapped), 'Success', 200, {
-      pagging: paginate(totalData, limit, page),
+      pagination: paginate(totalData, limit, page),
     });
   }
 
@@ -183,7 +183,7 @@ export class ServiceSchedulerController {
       orderBy: { time_start: 'asc' },
     });
     success(res, bigintToNumber(data), 'Success', 200, {
-      pagging: paginate(data.length, data.length, 1),
+      pagination: paginate(data.length, data.length, 1),
     });
   }
 
@@ -219,3 +219,4 @@ export class ServiceSchedulerController {
     success(res, bigintToNumber(users), 'Success', 200);
   }
 }
+

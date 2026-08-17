@@ -1,12 +1,14 @@
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '@prisma/client';
 import { Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
-import { success, error, badRequest, notFound } from '../utils/response';
-import { AuthController } from './auth.controller';
 import { moneyFormat } from '../utils/cmsConfig';
+import { encrypt } from '../utils/encryption';
+import { badRequest, error, notFound, success } from '../utils/response';
+import { crudPermission, laravelPaging, postCodeBudgetTable, setupTable } from '../utils/tableMeta';
+import { AuthController } from './auth.controller';
 
 // Laravel storage/app/public parity — files served at /storage/{path}
 const STORAGE_DIR = path.join(process.cwd(), 'storage');
@@ -58,8 +60,6 @@ function num(v: any, fallback = 0): number {
   const n = Number(v);
   return isNaN(n) ? fallback : n;
 }
-import { encrypt } from '../utils/encryption';
-import { setupTable, postCodeBudgetTable, laravelPaging, crudPermission } from '../utils/tableMeta';
 
 const systemPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const systemAdapter = new PrismaPg(systemPool);
@@ -142,7 +142,7 @@ export function formatSystemBalanceData(rows: any[], type: string) {
   return {
     data: [...mapped, total],
     table: SYSTEM_BALANCE_TABLE,
-    pagging: {
+    pagination: {
       current_page: 1,
       last_page: 1,
       per_page: 99999,
@@ -178,7 +178,7 @@ export class SystemController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -271,7 +271,7 @@ export class SystemController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -389,7 +389,7 @@ export class SystemController {
         orderBy: { id: 'asc' },
       });
 
-      const payload = formatSystemBalanceData(
+const payload = formatSystemBalanceData(
         rows.map((row: any) => ({
           id: Number(row.code_id ?? 0),
           name: row.name ?? '',
@@ -401,7 +401,7 @@ export class SystemController {
 
       success(res, payload.data, 'Success', 200, {
         table: payload.table,
-        pagging: payload.pagging,
+        pagination: payload.pagination,
         permission: payload.permission,
       });
     } catch (err: any) {
@@ -465,7 +465,7 @@ export class SystemController {
       const payload = formatSystemBalanceData(mapped, mappedType || 'payment');
       success(res, payload.data, 'Success', 200, {
         table: payload.table,
-        pagging: payload.pagging,
+        pagination: payload.pagination,
         permission: payload.permission,
       });
     } catch (err: any) {
@@ -510,7 +510,7 @@ export class SystemController {
       success(res, formatted, 'Success', 200, {
         table: LOG_TABLE,
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -640,7 +640,7 @@ export class SystemController {
       const perms = crudPermission(req.user, 1125n);
       success(res, rows, 'Success', 200, {
         table,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: { view: true, add: perms.add, edit: perms.edit, delete: perms.delete },
       });
     } catch (err: any) {
@@ -884,7 +884,7 @@ export class SystemController {
           ];
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -937,7 +937,7 @@ export class SystemController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table,
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
       console.error('Night audit room change error:', err);
@@ -977,7 +977,7 @@ export class SystemController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table,
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
       console.error('Night audit no show error:', err);
@@ -1017,7 +1017,7 @@ export class SystemController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table,
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
       console.error('Night audit over stay error:', err);
@@ -1643,7 +1643,7 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Room change list error:', err); error(res, 'Failed to list room changes', 500); }
   }
@@ -1677,7 +1677,7 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Log audit list error:', err); error(res, 'Failed to list log audits', 500); }
   }
@@ -1722,7 +1722,7 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
       const perms = crudPermission(req.user, 1117n);
       success(res, data, 'Success', 200, {
         table: postCodeBudgetTable(year),
-        pagging: laravelPaging(totalData, limit, page),
+        pagination: laravelPaging(totalData, limit, page),
         permission: { view: true, add: perms.add, edit: perms.edit, delete: perms.delete },
       });
     } catch (err: any) {

@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -112,7 +112,7 @@ export class DynamicRateController {
         table,
         permission,
         search_data: searchData,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -600,7 +600,7 @@ export class DynamicRateController {
             }
           });
         } else {
-          // Need a rate_id to create — use first available rate for this property
+          // Need a rate_id to create â€” use first available rate for this property
           const firstRate = await prisma.rates.findFirst({
             where: { property_id: config.property_id, deleted_at: null },
             orderBy: { id: 'asc' }
@@ -905,7 +905,7 @@ export class DynamicRateController {
 
       success(res, { results: formatted, room_type_options: roomTypeOptions }, 'Success', 200, {
         table,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -966,7 +966,7 @@ export class DynamicRateController {
     }
   }
 
-  // ─── Private Helpers ────────────────────────────────────────────
+  // â”€â”€â”€ Private Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Calculate adjustment percent based on forecast method
@@ -1017,10 +1017,11 @@ export class DynamicRateController {
   }
 
   /**
-   * Calculate confidence score — higher for nearer dates
+   * Calculate confidence score â€” higher for nearer dates
    */
   private static calcConfidence(day: number, totalDays: number): number {
     const score = 100 - (day / totalDays) * 40;
     return Math.round(Math.max(20, Math.min(100, score)) * 100) / 100;
   }
 }
+

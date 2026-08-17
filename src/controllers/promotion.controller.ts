@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -117,7 +117,7 @@ export class PromotionController {
         table,
         permission,
         search_data: searchData,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -132,7 +132,7 @@ export class PromotionController {
     }
   }
 
-  // ── RateRelationController::promotion parity (/rate/promotion) ──
+  // â”€â”€ RateRelationController::promotion parity (/rate/promotion) â”€â”€
   static async ratePromotionList(req: Request, res: Response): Promise<void> {
     try {
       const rateId = String(req.query.rate_id ?? '');
@@ -502,3 +502,4 @@ export class PromotionController {
     }
   }
 }
+

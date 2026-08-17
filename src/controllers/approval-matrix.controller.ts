@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -47,7 +47,7 @@ const TABLE = [
 ];
 
 /**
- * Approval Matrix — custom module (frontend-only pages /approval-matrix).
+ * Approval Matrix â€” custom module (frontend-only pages /approval-matrix).
  * Not present in Laravel backend; provides list/create/update endpoints
  * the frontend already calls.
  */
@@ -93,7 +93,7 @@ export class ApprovalMatrixController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table: TABLE,
         permission: getPermissionFlags(req.user as any, 0),
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
       });
     } catch (err: any) {
       console.error('ApprovalMatrix list error:', err);
@@ -216,3 +216,4 @@ export class ApprovalMatrixController {
     }
   }
 }
+

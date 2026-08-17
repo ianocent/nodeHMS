@@ -3,7 +3,7 @@ import { encrypt } from './encryption';
 
 export interface ApiMeta {
   permission?: Record<string, boolean>;
-  pagging?: Record<string, number>;
+  pagination?: Record<string, number>;
   table?: any[];
   master?: any;
   search_data?: any[];
@@ -55,7 +55,7 @@ export function success(
     message,
     data,
     ...(meta?.permission ? { permission: meta.permission } : {}),
-    ...(meta?.pagging ? { pagging: meta.pagging } : {}),
+    ...(meta?.pagination ? { pagination: meta.pagination } : {}),
     ...(meta?.table ? { table: meta.table } : {}),
     ...(meta?.master ? { master: meta.master } : {}),
     ...(meta?.search_data ? { search_data: meta.search_data } : {}),

@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -191,7 +191,7 @@ export class MasterDataController {
       ];
       success(res, rows, 'Success', 200, {
         table,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
     } catch (err: any) {
@@ -446,7 +446,7 @@ export class MasterDataController {
 
       success(res, rows, 'Success', 200, {
         table,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
     } catch (err: any) {
@@ -574,7 +574,7 @@ export class MasterDataController {
       const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
       success(res, rows, 'Success', 200, {
         table: TABLES.codeBilling,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
     } catch (err: any) {
@@ -687,7 +687,7 @@ export class MasterDataController {
       const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
       success(res, rows, 'Success', 200, {
         table: TABLES.codeGl,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
     } catch (err: any) {
@@ -713,7 +713,7 @@ export class MasterDataController {
       });
       const mapped = data.map((c: any) => ({ id: Number(c.id), name: `${c.description ?? ''}(${c.name ?? ''})` }));
       success(res, mapped, 'Success', 200, {
-        pagging: { current_page: page, last_page: 1, per_page: limit, total: mapped.length, from: mapped.length ? 1 : 0, to: mapped.length },
+        pagination: { current_page: page, last_page: 1, per_page: limit, total: mapped.length, from: mapped.length ? 1 : 0, to: mapped.length },
       });
     } catch (err: any) {
       console.error('CodeGl get-gl error:', err);
@@ -816,9 +816,9 @@ export class MasterDataController {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  TYPE PAYMENT (type_payments)
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   private static async crudList(model: any, req: Request, res: Response, table?: any[]): Promise<void> {
     const pid = BigInt(req.user?.lastProperty ?? 0);
     const { page, limit, search } = parsePagination(req.query);
@@ -831,7 +831,7 @@ export class MasterDataController {
     const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
     success(res, rows, 'Success', 200, {
       table: table || [],
-      pagging: laravelPaging(total, limit, page),
+      pagination: laravelPaging(total, limit, page),
       permission: listPermission(req, { add: true, edit: true, delete: true }),
     } as any);
   }
@@ -878,7 +878,7 @@ export class MasterDataController {
 
       success(res, rows, 'Success', 200, {
         table,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       } as any);
     } catch (err: any) {
@@ -919,9 +919,9 @@ export class MasterDataController {
     try { const id = idParam(req.params.id); await prisma.type_payments.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  COUNTRY
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   static async countryList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -932,7 +932,7 @@ export class MasterDataController {
         prisma.countries.count({ where }),
       ]);
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -945,9 +945,9 @@ export class MasterDataController {
   }
   static async countryDestroy(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); await prisma.countries.update({ where: { id }, data: { status: false } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); } }
 
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  CITY
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   static async cityList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -957,7 +957,7 @@ export class MasterDataController {
         prisma.cities.findMany({ where, orderBy: { name: 'asc' }, skip: (page - 1) * limit, take: limit, include: { countries: { select: { id: true, name: true } } } }),
         prisma.cities.count({ where }),
       ]);
-      success(res, bigintToNumber(data), 'Success', 200, { pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) } });
+      success(res, bigintToNumber(data), 'Success', 200, { pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) } });
     } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async cityShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.cities.findUnique({ where: { id }, include: { countries: { select: { id: true, name: true } } } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }
@@ -969,9 +969,9 @@ export class MasterDataController {
   }
   static async cityDestroy(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); await prisma.cities.update({ where: { id }, data: { flag: false } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); } }
 
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  HOLIDAY
-  // ═══════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   static async holidayList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.holidays, req, res); }
   static async holidayShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.holidays.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }
   static async holidayStore(req: Request, res: Response): Promise<void> {
@@ -982,3 +982,4 @@ export class MasterDataController {
   }
   static async holidayDestroy(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); await prisma.holidays.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); } }
 }
+

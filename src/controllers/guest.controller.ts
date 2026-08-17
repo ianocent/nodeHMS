@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -180,7 +180,7 @@ export class GuestController {
       success(res, guests.map(g => GuestController.formatGuest(g, nationalityMap, typesMap, foliosMap)), 'Success', 200, {
         table: filteredTable,
         permission,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -611,7 +611,7 @@ export class GuestController {
 
       success(res, data, 'Success', 200, {
         table,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -733,14 +733,14 @@ export class GuestController {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const guestIdRaw = String(req.query.guest_id ?? req.query.guestId ?? '');
-      if (!/^\d+$/.test(guestIdRaw)) { success(res, [], 'Success', 200, { pagging: { current_page: 1, last_page: 1, per_page: limit, total: 0, from: 1, to: 0 } }); return; }
+      if (!/^\d+$/.test(guestIdRaw)) { success(res, [], 'Success', 200, { pagination: { current_page: 1, last_page: 1, per_page: limit, total: 0, from: 1, to: 0 } }); return; }
       const where: any = { guest_profile_id: BigInt(guestIdRaw) };
       const [data, total] = await Promise.all([
         prisma.folios.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
         prisma.folios.count({ where }),
       ]);
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Guest folio list error:', err); error(res, 'Failed to list folios', 500); }
   }
@@ -799,7 +799,7 @@ export class GuestController {
 
       success(res, bigintToNumber(data), 'Success', 200, {
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Document list error:', err); error(res, 'Failed to list documents', 500); }
   }
@@ -867,7 +867,7 @@ export class GuestController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('History list error:', err); error(res, 'Failed to list history', 500); }
   }
@@ -1054,7 +1054,7 @@ export class GuestController {
         table,
         permission: { view: true, edit: true, delete: true },
         search_data: [],
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
       console.error('Guest listing report error:', err);
@@ -1062,7 +1062,7 @@ export class GuestController {
     }
   }
 
-  // Merge Guest (menu 84) — Laravel GuestProfileController@mergeUpdate parity
+  // Merge Guest (menu 84) â€” Laravel GuestProfileController@mergeUpdate parity
   static async mergeUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
@@ -1104,7 +1104,7 @@ export class GuestController {
       if (!guestId) {
         success(res, [], 'No guest ID provided.', 200, {
           table: GuestController.notesTable(),
-          pagging: paggingFn(0, limit, page),
+          pagination: paggingFn(0, limit, page),
           permission: { view: true, delete: true },
           search_data: [],
         });
@@ -1118,7 +1118,7 @@ export class GuestController {
       ]);
       const permFlags = getPermissionFlags(req.user, 82);
       const permission = { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit };
-      success(res, bigintToNumber(data), 'Success', 200, { table: GuestController.notesTable(), pagging: paggingFn(total, limit, page), permission, search_data: [] });
+      success(res, bigintToNumber(data), 'Success', 200, { table: GuestController.notesTable(), pagination: paggingFn(total, limit, page), permission, search_data: [] });
     } catch (err: any) { console.error('Notes list error:', err); error(res, 'Failed to list notes', 500); }
   }
 
@@ -1185,7 +1185,7 @@ export class GuestController {
       if (!guestId) {
         success(res, [], 'No guest ID provided.', 200, {
           table: GuestController.familyMemberTable(),
-          pagging: paggingFn(0, limit, page),
+          pagination: paggingFn(0, limit, page),
           permission: { edit: true },
           search_data: [],
         });
@@ -1203,7 +1203,7 @@ export class GuestController {
       ]);
       const permFlags = getPermissionFlags(req.user, 82);
       const permission = { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete };
-      success(res, bigintToNumber(data), 'Success', 200, { table: GuestController.familyMemberTable(), pagging: paggingFn(total, limit, page), permission, search_data: [] });
+      success(res, bigintToNumber(data), 'Success', 200, { table: GuestController.familyMemberTable(), pagination: paggingFn(total, limit, page), permission, search_data: [] });
     } catch (err: any) { console.error('Family member list error:', err); error(res, 'Failed to list family members', 500); }
   }
 

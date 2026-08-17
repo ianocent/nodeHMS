@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -262,7 +262,7 @@ export class GenericController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -442,3 +442,4 @@ async update(req: Request, res: Response): Promise<void> {
 }
 
 export const genericController = new GenericController();
+

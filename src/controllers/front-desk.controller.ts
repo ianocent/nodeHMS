@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -290,7 +290,7 @@ export class FrontDeskController {
 
       success(res, formatted, 'Success', 200, {
         permission,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -403,7 +403,7 @@ export class FrontDeskController {
   }
 
   // ==================== TRANSACTION ====================
-  // Parity Laravel TransactionController@getData — GET /transaction?folio_id=&filter=
+  // Parity Laravel TransactionController@getData â€” GET /transaction?folio_id=&filter=
   static async transactionList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -434,7 +434,7 @@ export class FrontDeskController {
         { label: 'Balance', key: 'balance', type: 'text', is_search: false },
         { label: 'Status', key: 'status', type: 'text', is_search: false },
       ];
-      const pagging = { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 };
+      const pagination = { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 };
       const permission = {
         view: true,
         add: req.user?.superUser || true,
@@ -443,7 +443,7 @@ export class FrontDeskController {
 
       if (!folioId || !/^\d+$/.test(folioId)) {
         success(res, [], 'Folio Not Found', 200, {
-          table, pagging, permission,
+          table, pagination, permission,
           search_data: [],
           total_transaction: moneyFormat(0),
           folio: null,
@@ -460,7 +460,7 @@ export class FrontDeskController {
 
       if (!folio) {
         success(res, [], 'Folio Not Found', 200, {
-          table, pagging, permission,
+          table, pagination, permission,
           search_data: [],
           total_transaction: moneyFormat(0),
           folio: null,
@@ -571,7 +571,7 @@ export class FrontDeskController {
         },
         ledger_id: ledger ?? null,
         table,
-        pagging: { current_page: page, last_page: 1, per_page: limit, total: rows.length, from: rows.length ? 1 : 0, to: rows.length },
+        pagination: { current_page: page, last_page: 1, per_page: limit, total: rows.length, from: rows.length ? 1 : 0, to: rows.length },
         permission,
         search_data: [],
         total_transaction: moneyFormat(totalTransaction),
@@ -731,7 +731,7 @@ export class FrontDeskController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Batch posting list error:', err); error(res, 'Failed to list batch postings', 500); }
   }
@@ -769,7 +769,7 @@ export class FrontDeskController {
       ]);
 
       success(res, { payments: bigintToNumber(payments), events: bigintToNumber(events) }, 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil((totalPayments + totalEvents) / 2 / limit), per_page: limit, total: totalPayments + totalEvents, from: (page - 1) * limit + 1, to: Math.min(page * limit, totalPayments + totalEvents) },
+        pagination: { current_page: page, last_page: Math.ceil((totalPayments + totalEvents) / 2 / limit), per_page: limit, total: totalPayments + totalEvents, from: (page - 1) * limit + 1, to: Math.min(page * limit, totalPayments + totalEvents) },
       });
     } catch (err: any) { console.error('Deposit list error:', err); error(res, 'Failed to list deposits', 500); }
   }
@@ -787,7 +787,7 @@ export class FrontDeskController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Shift list error:', err); error(res, 'Failed to list shifts', 500); }
   }
@@ -846,7 +846,7 @@ export class FrontDeskController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Door lock list error:', err); error(res, 'Failed to list door locks', 500); }
   }
@@ -906,3 +906,4 @@ export class FrontDeskController {
     }
   }
 }
+

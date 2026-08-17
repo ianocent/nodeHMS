@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -21,7 +21,7 @@ function idParamBig(v: any): bigint { return BigInt(Array.isArray(v) ? v[0] : v)
 
 export class CompanyController {
 
-  // ── Company Profile ──
+  // â”€â”€ Company Profile â”€â”€
   static async list(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
@@ -36,7 +36,7 @@ export class CompanyController {
       const rows = bn(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * lim + i + 1 }));
       success(res, rows, 'Success', 200, {
         table: TABLES.company,
-        pagging: laravelPaging(total, lim, page),
+        pagination: laravelPaging(total, lim, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       });
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
@@ -160,7 +160,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profiles.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Client (Client menu = Laravel CompanyController, table `companies`) ──
+  // â”€â”€ Client (Client menu = Laravel CompanyController, table `companies`) â”€â”€
   static async clientFormat(d: any, props: string): Promise<any> {
     return {
       id: Number(d.id),
@@ -210,7 +210,7 @@ export class CompanyController {
       }));
       success(res, rows, 'Success', 200, {
         table: TABLES.company,
-        pagging: laravelPaging(total, lim, page),
+        pagination: laravelPaging(total, lim, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
       });
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
@@ -293,7 +293,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.companies.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Contact Person ──
+  // â”€â”€ Contact Person â”€â”€
   static async contactList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -326,7 +326,7 @@ export class CompanyController {
     } catch (err: any) { console.error('Contact person by company error:', err); error(res, 'Failed', 500); }
   }
 
-  // ── Department ──
+  // â”€â”€ Department â”€â”€
   static async deptList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_profile_departments.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -346,7 +346,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profile_departments.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Activity ──
+  // â”€â”€ Activity â”€â”€
   static async activityList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_profile_activities.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -365,7 +365,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profile_activities.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Document ──
+  // â”€â”€ Document â”€â”€
   static async documentList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_profile_documents.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -384,7 +384,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profile_documents.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Guest ──
+  // â”€â”€ Guest â”€â”€
   static async guestList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_guests.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -400,7 +400,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_guests.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Folio ──
+  // â”€â”€ Folio â”€â”€
   static async folioList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -412,7 +412,7 @@ export class CompanyController {
     } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Statistic ──
+  // â”€â”€ Statistic â”€â”€
   static async statisticIndex(req: Request, res: Response): Promise<void> {
     try {
       const data = await prisma.company_profile_statistics.findMany({ orderBy: { id: 'desc' }, take: 10 });
@@ -420,7 +420,7 @@ export class CompanyController {
     } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ── Company Folio store/destroy (CompanyProfileFolioController parity) ──
+  // â”€â”€ Company Folio store/destroy (CompanyProfileFolioController parity) â”€â”€
   static async folioStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -455,7 +455,7 @@ export class CompanyController {
     } catch (err: any) { console.error('Company folio destroy error:', err); error(res, 'Failed to delete folio', 500); }
   }
 
-  // ── Statistic store/destroy (CompanyProfileStatisticController parity) ──
+  // â”€â”€ Statistic store/destroy (CompanyProfileStatisticController parity) â”€â”€
   static async statisticStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -487,7 +487,7 @@ export class CompanyController {
     } catch (err: any) { console.error('Statistic destroy error:', err); error(res, 'Failed to delete statistic', 500); }
   }
 
-  // ── AR Transaction ──
+  // â”€â”€ AR Transaction â”€â”€
   static async arTransactionList(req: Request, res: Response): Promise<void> {
     try { const data = await prisma.company_profile_ar_transactions.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -500,7 +500,7 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profile_ar_transactions.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // ════════ Company Profile Billing Setup ════════
+  // â•â•â•â•â•â•â•â• Company Profile Billing Setup â•â•â•â•â•â•â•â•
   static async billingSetupList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
@@ -511,7 +511,7 @@ export class CompanyController {
         prisma.company_profile_billing_setups.findMany({ where, include: { company_profiles: { select: { id: true, name: true } }, code_billings: { select: { id: true, name: true } } }, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),
         prisma.company_profile_billing_setups.count({ where }),
       ]);
-      success(res, bn(data), 'Success', 200, { pagging: { current_page: page, last_page: Math.ceil(total / lim), per_page: lim, total, from: (page - 1) * lim + 1, to: Math.min(page * lim, total) } });
+      success(res, bn(data), 'Success', 200, { pagination: { current_page: page, last_page: Math.ceil(total / lim), per_page: lim, total, from: (page - 1) * lim + 1, to: Math.min(page * lim, total) } });
     } catch (err: any) { console.error('Billing setup list error:', err); error(res, 'Failed', 500); }
   }
   static async billingSetupStore(req: Request, res: Response): Promise<void> {
@@ -526,3 +526,4 @@ export class CompanyController {
     try { const id = idP(req.params.id); await prisma.company_profile_billing_setups.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 }
+

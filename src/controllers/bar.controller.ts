@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -59,7 +59,7 @@ async function getBusinessDate(propertyId: bigint | null | undefined): Promise<s
 
 export class BarController {
   /**
-   * GET /bar — list bars (rates where module='bar')
+   * GET /bar â€” list bars (rates where module='bar')
    * Mirrors Laravel BarController@index
    */
   static async list(req: Request, res: Response): Promise<void> {
@@ -183,7 +183,7 @@ export class BarController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -199,7 +199,7 @@ export class BarController {
   }
 
   /**
-   * GET /bar/create — bar create form master
+   * GET /bar/create â€” bar create form master
    */
   static async create(req: Request, res: Response): Promise<void> {
     try {
@@ -227,7 +227,7 @@ export class BarController {
   }
 
   /**
-   * POST /bar — create bar
+   * POST /bar â€” create bar
    */
   static async store(req: Request, res: Response): Promise<void> {
     try {
@@ -318,7 +318,7 @@ export class BarController {
   }
 
   /**
-   * GET /bar/:id — show bar
+   * GET /bar/:id â€” show bar
    */
   static async show(req: Request, res: Response): Promise<void> {
     try {
@@ -362,7 +362,7 @@ export class BarController {
   }
 
   /**
-   * GET /bar/:id/update — edit form (data + master)
+   * GET /bar/:id/update â€” edit form (data + master)
    */
   static async edit(req: Request, res: Response): Promise<void> {
     try {
@@ -421,7 +421,7 @@ export class BarController {
   }
 
   /**
-   * PUT /bar/:id — update bar
+   * PUT /bar/:id â€” update bar
    */
   static async update(req: Request, res: Response): Promise<void> {
     try {
@@ -486,7 +486,7 @@ export class BarController {
   }
 
   /**
-   * DELETE /bar/:id — soft delete
+   * DELETE /bar/:id â€” soft delete
    */
   static async destroy(req: Request, res: Response): Promise<void> {
     try {
@@ -508,7 +508,7 @@ export class BarController {
   }
 
   /**
-   * DELETE /bar/:id/delete — force delete
+   * DELETE /bar/:id/delete â€” force delete
    */
   static async forceDelete(req: Request, res: Response): Promise<void> {
     try {
@@ -549,7 +549,7 @@ export class BarController {
   }
 
   /**
-   * GET /bar/minimum-rate — room types with min rate
+   * GET /bar/minimum-rate â€” room types with min rate
    */
   static async getRoomType(req: Request, res: Response): Promise<void> {
     try {
@@ -589,7 +589,7 @@ export class BarController {
       success(res, data, 'Success', 200, {
         table,
         permission,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -605,7 +605,7 @@ export class BarController {
   }
 
   /**
-   * PUT /bar/minimum-rate/:id — update room type min rate
+   * PUT /bar/minimum-rate/:id â€” update room type min rate
    */
   static async updateRoomType(req: Request, res: Response): Promise<void> {
     try {
@@ -631,3 +631,4 @@ export class BarController {
     }
   }
 }
+

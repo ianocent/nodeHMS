@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -168,7 +168,7 @@ function parseReportParams(req: Request) {
   };
 }
 
-// ── Report data generators ──────────────────────────────────────────
+// â”€â”€ Report data generators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function getDailyStatistic(params: any): Promise<any[]> {
   const pid = params.propertyId;
@@ -2833,7 +2833,7 @@ async function getAsyncJobReport(name: string, params: any): Promise<any[]> {
   const mtdActualRevenue = await getBalance(monthStart, dayEnd);
   const diffActual = actualRevenue - variableCost / monthDays - fixedCost / monthDays;
   const diffMtd = mtdActualRevenue - variableCost - fixedCost;
-  const winLose = (v: number) => (v > 0 ? 'O' : v === 0 ? '△' : 'X');
+  const winLose = (v: number) => (v > 0 ? 'O' : v === 0 ? 'â–³' : 'X');
 
   const arr = todayRoomSold > 0 ? todayRevenue / todayRoomSold : 0;
   const lastYearARR = lastYearSold > 0 ? lastYearDailyRevenue / lastYearSold : 0;
@@ -4289,7 +4289,7 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/sales-marketing/room-occupancy-chart/view': getRoomOccupancyChart,
 };
 
-// ── Controller ──────────────────────────────────────────────────────
+// â”€â”€ Controller â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export class ReportController {
 
@@ -4314,7 +4314,7 @@ export class ReportController {
       const formatted = data.map((r: any) => bigintToNumber(r));
 
       success(res, formatted, 'Success', 200, {
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -4401,7 +4401,7 @@ export class ReportController {
       success(res, formatted, 'Success', 200, {
         table: REPORT_PERMISSION_TABLE,
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -4474,7 +4474,7 @@ export class ReportController {
           })), fileName);
         } else {
           success(res, data, 'Success', 200, {
-            pagging: {
+            pagination: {
               current_page: 1,
               last_page: 1,
               per_page: data.length,
@@ -4487,7 +4487,7 @@ export class ReportController {
       } else {
         const data = getGenericReport(path, params);
         success(res, data, 'Success', 200, {
-          pagging: {
+          pagination: {
             current_page: 1,
             last_page: 1,
             per_page: data.length,
@@ -4643,7 +4643,7 @@ export class ReportController {
         })), 'company-profiles');
       } else {
         success(res, rows, 'Success', 200, {
-          pagging: {
+          pagination: {
             current_page: 1,
             last_page: 1,
             per_page: rows.length,
@@ -4746,7 +4746,7 @@ export class ReportController {
         }));
 
         success(res, rows, 'Success', 200, {
-          pagging: {
+          pagination: {
             current_page: page,
             last_page: Math.ceil(total / limit),
             per_page: limit,
@@ -4801,7 +4801,7 @@ export class ReportController {
       }));
 
       success(res, rows, 'Success', 200, {
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -4880,3 +4880,4 @@ export class ReportController {
     }
   }
 }
+

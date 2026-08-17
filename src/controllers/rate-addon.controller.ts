@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -514,7 +514,7 @@ export class RateAddonController {
 
   /**
    * GET /api/bar-rates/:barId/links
-   * List linked rates for a bar rate — parity with Laravel BarRelationController::link
+   * List linked rates for a bar rate â€” parity with Laravel BarRelationController::link
    * (bar is model_has_rates.rate_id, linked rates are model_id)
    */
   static async barRelationLink(req: Request, res: Response): Promise<void> {
@@ -597,7 +597,7 @@ export class RateAddonController {
         permission,
         master,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -612,3 +612,4 @@ export class RateAddonController {
     }
   }
 }
+

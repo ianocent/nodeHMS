@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -107,7 +107,7 @@ export class UserController {
       success(res, bigintToNumber(formattedUsers), 'Success', 200, {
         table,
         permission,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -153,7 +153,7 @@ export class UserController {
         ]
       };
 
-      // Frontend reads dataoption?.master?.roles/companies/properties — master must be top-level meta
+      // Frontend reads dataoption?.master?.roles/companies/properties â€” master must be top-level meta
       success(res, {}, 'Success', 200, { master });
     } catch (err: any) {
       console.error('User create form error:', err);
@@ -568,7 +568,7 @@ export class UserController {
 
       success(res, onlineUsers, 'Success', 200, {
         table,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(onlineUsers.length / limit),
           per_page: limit,

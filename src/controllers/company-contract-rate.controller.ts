@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -215,7 +215,7 @@ export class CompanyContractRateController {
         table,
         permission,
         search_data: searchData,
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -546,3 +546,4 @@ export class CompanyContractRateController {
     }
   }
 }
+

@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -74,7 +74,7 @@ export class HousekeepingController {
 
       success(res, bigintToNumber(data), 'Success', 200, {
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Setup list error:', err); error(res, 'Failed to list setups', 500); }
   }
@@ -290,7 +290,7 @@ export class HousekeepingController {
           { label: 'Building', key: 'building', type: 'select', valueOptions: [] },
           { label: 'Room Type', key: 'room_type', type: 'select', valueOptions: [] },
         ],
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Room status error:', err); error(res, 'Failed to fetch room status', 500); }
   }
@@ -437,7 +437,7 @@ export class HousekeepingController {
           { label: 'Assign To', key: 'assign_to', type: 'select', valueOptions: [] },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Work order list error:', err); error(res, 'Failed to list work orders', 500); }
   }
@@ -567,7 +567,7 @@ export class HousekeepingController {
 
       success(res, bigintToNumber(data), 'Success', 200, {
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Stock list error:', err); error(res, 'Failed to list stocks', 500); }
   }
@@ -585,7 +585,7 @@ export class HousekeepingController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Roster list error:', err); error(res, 'Failed to list rosters', 500); }
   }
@@ -603,7 +603,7 @@ export class HousekeepingController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Checklist history error:', err); error(res, 'Failed to fetch checklist history', 500); }
   }
@@ -621,8 +621,9 @@ export class HousekeepingController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Housekeeper history error:', err); error(res, 'Failed to fetch housekeeper history', 500); }
   }
 }
+

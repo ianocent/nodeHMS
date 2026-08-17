@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+﻿import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -28,7 +28,7 @@ const router = Router();
 const prisma = new PrismaClient({ adapter });
 const generic = new GenericController();
 
-// ─── Phase 4.10 - Remaining module aliases (auth-only, kebab URLs) ───
+// â”€â”€â”€ Phase 4.10 - Remaining module aliases (auth-only, kebab URLs) â”€â”€â”€
 // Stop Sell Booking (StopSellController parity)
 router.get('/stop-sell-booking', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.list(req, res); });
 router.get('/stop-sell-booking/create', authMiddleware, (req, res) => { req.params.model = 'stop_sells'; generic.createForm(req, res); });
@@ -93,11 +93,11 @@ router.put('/allotment/room/:id', authMiddleware, (req, res) => { req.params.mod
 router.delete('/allotment/room/:id', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.destroy(req, res); });
 router.get('/allotment-room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.list(req, res); });
 
-// ═══════════════════════════════════════════════
-// Phase 4.9 — Remaining Modules
-// ═══════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Phase 4.9 â€” Remaining Modules
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// ── Allotment ──
+// â”€â”€ Allotment â”€â”€
 router.get('/allotment', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'allotment'; generic.list(req, res); });
 router.get('/allotment/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'allotment'; generic.createForm(req, res); });
 router.post('/allotment', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'allotment'; generic.create(req, res); });
@@ -116,7 +116,7 @@ router.put('/allotments/:id', authMiddleware, requirePermission(80, 'edit'), (re
 router.delete('/allotments/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'allotment'; generic.destroy(req, res); });
 router.post('/allotments/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'allotment'; generic.restore(req, res); });
 
-// ── Overbooking ──
+// â”€â”€ Overbooking â”€â”€
 router.get('/overbooking', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.list(req, res); });
 router.get('/overbooking/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
 router.post('/overbooking', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
@@ -135,7 +135,7 @@ router.put('/overbookings/:id', authMiddleware, requirePermission(80, 'edit'), (
 router.delete('/overbookings/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
 router.post('/overbookings/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
 
-// ── Yield ──
+// â”€â”€ Yield â”€â”€
 router.get('/yield', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'yield'; generic.list(req, res); });
 router.get('/yield/create', authMiddleware, requirePermission(80, 'add'), async (req: Request, res: Response) => {
   success(res, { fields: [], statuses: [] }, 'Success');
@@ -160,7 +160,7 @@ router.put('/yields/:id', authMiddleware, requirePermission(80, 'edit'), (req, r
 router.delete('/yields/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'yield'; generic.destroy(req, res); });
 router.post('/yields/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.restore(req, res); });
 
-// ── Hotel Competitor ──
+// â”€â”€ Hotel Competitor â”€â”€
 router.get('/hotel-competitor', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.list(req, res); });
 router.post('/hotel-competitor', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.create(req, res); });
 router.get('/hotel-competitor/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.show(req, res); });
@@ -175,7 +175,7 @@ router.put('/hotel-competitors/:id', authMiddleware, requirePermission(80, 'edit
 router.delete('/hotel-competitors/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'hotel_competitor'; generic.destroy(req, res); });
 router.post('/hotel-competitors/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.restore(req, res); });
 
-// ── Master Hotel Competitor ──
+// â”€â”€ Master Hotel Competitor â”€â”€
 router.get('/master-hotel-competitor', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.list(req, res); });
 router.post('/master-hotel-competitor', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.create(req, res); });
 router.get('/master-hotel-competitor/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.show(req, res); });
@@ -190,7 +190,7 @@ router.put('/master-hotel-competitors/:id', authMiddleware, requirePermission(80
 router.delete('/master-hotel-competitors/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.destroy(req, res); });
 router.post('/master-hotel-competitors/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.restore(req, res); });
 
-// ── Statistic Occupancy ──
+// â”€â”€ Statistic Occupancy â”€â”€
 router.get('/statistic/occupancy', authMiddleware, requirePermission(80, 'view'), async (req: Request, res: Response) => {
   try {
     const propertyId = req.user?.lastProperty;
@@ -237,16 +237,16 @@ router.get('/statistic/occupancy', authMiddleware, requirePermission(80, 'view')
         { label: 'Action', key: 'action', type: 'action', is_search: false },
       ],
       permission: { view: true, add: true, edit: true, delete: true },
-      pagging: { current_page: 1, last_page: 1, per_page: 10, total: 1, from: 1, to: 1 },
+      pagination: { current_page: 1, last_page: 1, per_page: 10, total: 1, from: 1, to: 1 },
     });
   } catch (err: any) {
     error(res, err.message || 'Failed to fetch occupancy', 500);
   }
 });
 
-// ── Country By Region (master data lookup) ──
+// â”€â”€ Country By Region (master data lookup) â”€â”€
 // Laravel parity (CountryController@getCountryByRegion): returns [{value, label}];
-// region 'all'/'undefined'/'null' → all countries; else countries filtered by region_id
+// region 'all'/'undefined'/'null' â†’ all countries; else countries filtered by region_id
 // Support both camelCase and lowercase for FE/BE contract standardization
 const countryByRegionHandler = async (req: Request, res: Response) => {
   try {
@@ -279,7 +279,7 @@ const countryByRegionHandler = async (req: Request, res: Response) => {
 router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
 router.get('/countrybyregion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
 
-// ── Assign Room (GET — fetch available rooms for assignment dropdown) ──
+// â”€â”€ Assign Room (GET â€” fetch available rooms for assignment dropdown) â”€â”€
 router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async (req: Request, res: Response) => {
   try {
     const propertyId = req.user?.lastProperty;
@@ -307,9 +307,9 @@ router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async 
   }
 });
 
-// ── POST Room Statistic (filtered grid — frontend posts filter body, parity Laravel RoomStatisticController@index) ──
+// â”€â”€ POST Room Statistic (filtered grid â€” frontend posts filter body, parity Laravel RoomStatisticController@index) â”€â”€
 router.post('/room-statistic', authMiddleware, requirePermission(1120, 'view'), RoomController.statistics);
-// ── Profile Guest (alias for GuestController) ──
+// â”€â”€ Profile Guest (alias for GuestController) â”€â”€
 // Lazy-import GuestController to avoid circular deps
 async function guestList(req: Request, res: Response): Promise<void> {
   const { GuestController } = await import('../controllers/guest.controller');
@@ -347,7 +347,7 @@ router.get('/profile/guest/:id/update', authMiddleware, requirePermission(82, 'e
 router.put('/profile/guest/:id', authMiddleware, requirePermission(82, 'edit'), guestUpdate);
 router.delete('/profile/guest/:id', authMiddleware, requirePermission(82, 'delete'), guestDelete);
 
-// ── Guest Requests (parity with Laravel GuestRequestController — Folio-based) ──
+// â”€â”€ Guest Requests (parity with Laravel GuestRequestController â€” Folio-based) â”€â”€
 const GR_STATUS_RESERVATION: Record<number, string> = {
   0: 'Check In', 1: 'Check Out', 2: 'Cancelled', 3: 'Reservation', 4: 'In House', 5: 'Pending',
 };
@@ -523,7 +523,7 @@ router.get('/guest-request', authMiddleware, requirePermission(82, 'view'), asyn
         { field: 'check_in_date', label: 'Check In' },
         { field: 'check_out_date', label: 'Check out' },
       ],
-      pagging: {
+      pagination: {
         current_page: page,
         last_page: Math.ceil(total / limit),
         per_page: limit,
@@ -537,12 +537,12 @@ router.get('/guest-request', authMiddleware, requirePermission(82, 'view'), asyn
   }
 });
 
-// ── Email Send Master (placeholder, model pending) ──
+// â”€â”€ Email Send Master (placeholder, model pending) â”€â”€
 router.post('/email/email-send/master', authMiddleware, requirePermission(69, 'view'), async (req: Request, res: Response) => {
   success(res, { message: 'Email endpoint registered (handler pending Prisma model)' }, 'Success');
 });
 
-// ── Approval Matrix (frontend-only custom module) ──
+// â”€â”€ Approval Matrix (frontend-only custom module) â”€â”€
 router.get('/approval/matrix', authMiddleware, ApprovalMatrixController.list);
 router.get('/approval/matrix/create', authMiddleware, ApprovalMatrixController.createForm);
 router.get('/approval/matrix/:id/update', authMiddleware, ApprovalMatrixController.editForm);
@@ -550,3 +550,4 @@ router.post('/approval/matrix', authMiddleware, ApprovalMatrixController.store);
 router.put('/approval/matrix/:id', authMiddleware, ApprovalMatrixController.update);
 
 export default router;
+

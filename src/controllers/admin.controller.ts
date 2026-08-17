@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -77,7 +77,7 @@ export class AdminController {
           view: true, add: req.user?.superUser || permFlags.add,
           edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete,
         },
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         master: {
           permissions: bigintToNumber(permissions).map((p: any) => ({ value: p.id, label: p.name })),
           statuses: STATUSES,
@@ -364,7 +364,7 @@ export class AdminController {
       if (name !== undefined) data.name = name;
       if (display_name !== undefined) data.display_name = display_name;
       if (guard_name !== undefined) data.guard_name = guard_name;
-      // Frontend sends status as {value,label} object (formattedRole parity) — coerce to int
+      // Frontend sends status as {value,label} object (formattedRole parity) â€” coerce to int
       if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : 0;
 
       await getPrisma().roles.update({ where: { id }, data });
@@ -445,7 +445,7 @@ export class AdminController {
         getPrisma().permissions.count({ where }),
       ]);
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { error(res, 'Failed to list permissions', 500); }
   }
@@ -739,7 +739,7 @@ export class AdminController {
         getPrisma().tasks.count({ where }),
       ]);
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { error(res, 'Failed to list tasks', 500); }
   }
@@ -760,7 +760,7 @@ export class AdminController {
     } catch (err: any) { error(res, 'Failed to create task', 500); }
   }
 
-  // Laravel TaskController@markAsRead (PUT /task/:id/read) — also routes hk_/insp_ prefix to markHkRead
+  // Laravel TaskController@markAsRead (PUT /task/:id/read) â€” also routes hk_/insp_ prefix to markHkRead
   static async taskMarkAsRead(req: Request, res: Response): Promise<void> {
     try {
       const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -978,7 +978,7 @@ export class AdminController {
       const rows = formatted.map((u, i) => ({ ...u, no: (page - 1) * limit + i + 1 }));
       success(res, rows, 'Success', 200, {
         table: TABLES.user,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: {
           view: true, add: req.user?.superUser || getPermissionFlags(req.user, 1116).add,
           edit: req.user?.superUser || getPermissionFlags(req.user, 1116).edit,
@@ -1003,7 +1003,7 @@ export class AdminController {
         getPrisma().logs.count({ where }),
       ]);
       success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { error(res, 'Failed to list logs', 500); }
   }
@@ -1055,7 +1055,7 @@ export class AdminController {
 
       success(res, mapped, 'Success', 200, {
         table: TABLES.property,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: {
           view: true, add: req.user?.superUser || getPermissionFlags(req.user, 1134).add,
           edit: req.user?.superUser || getPermissionFlags(req.user, 1134).edit,
@@ -1101,7 +1101,7 @@ export class AdminController {
       // Full login payload scoped to the new property
       const data = await AuthController.buildLoginData(user, roleIds, roleNames, plainTextToken, createdAt, id);
 
-      // Raw response — Laravel PropertyController@auth puts name/image/mandatory_check_in
+      // Raw response â€” Laravel PropertyController@auth puts name/image/mandatory_check_in
       // at the TOP LEVEL and the user payload inside `data` (Profile.tsx reads
       // datajsonp?.name + datajsonp?.data.* after choosing a property).
       res.status(200).json({
@@ -1287,7 +1287,7 @@ export class AdminController {
       const page = parseInt(String(req.query.page)) || 1;
       const limit = parseInt(String(req.query.limit)) || 99999;
       const totalPages = Math.max(1, Math.ceil(allMenus.length / limit));
-      const pagging = {
+      const pagination = {
         limit_data: limit,
         total_data: allMenus.length,
         start_paging: page,
@@ -1300,13 +1300,13 @@ export class AdminController {
 
       const perms = menuPermissions(1115n, req.user);
       success(res, data, 'Success', 200, {
-        // Laravel MenuController@index parity — table-drag renders data?.table?.map + row.status?.label
+        // Laravel MenuController@index parity â€” table-drag renders data?.table?.map + row.status?.label
         table: [
           { label: 'Status', key: 'status', type: 'none', is_search: false },
           { label: 'Name', key: 'name', type: 'none', is_search: true },
           { label: 'Url', key: 'url', type: 'none', is_search: false },
         ],
-        pagging,
+        pagination,
         permission: { view: perms.view, add: perms.edit, edit: perms.edit, delete: perms.edit },
         datas: allMenus.map(m => ({ ...bigintToNumber(m), name: parseJsonField(m.name, {}) })),
         isNotAdmin: false,
@@ -1474,3 +1474,4 @@ function buildMenuResources(
     .filter(m => m.parent_id && m.parent_id.toString() === parentId.toString() && !excluded.includes(m.id))
     .map(m => toMenuResource(m, allMenus, excluded, ischildren, depth, user));
 }
+

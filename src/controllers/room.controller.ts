@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -54,13 +54,13 @@ function parseBigIntArray(arr: string | string[] | undefined): bigint[] | undefi
   return items.filter(Boolean).map((s: string) => BigInt(s.trim()));
 }
 
-// ────────────────────────────────────────────────────────────
-// RoomController — room_types, rooms, images, inventories
-// ────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// RoomController â€” room_types, rooms, images, inventories
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export class RoomController {
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // ROOM TYPES
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   /**
    * GET /api/room-types
@@ -135,7 +135,7 @@ export class RoomController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -266,7 +266,7 @@ export class RoomController {
   }
 
   /**
-   * GET /api/room-type/get-configuration/:id — Laravel RoomTypeController@getRoomConfiguration parity
+   * GET /api/room-type/get-configuration/:id â€” Laravel RoomTypeController@getRoomConfiguration parity
    */
   static async getRoomConfiguration(req: Request, res: Response): Promise<void> {
     try {
@@ -293,7 +293,7 @@ export class RoomController {
   }
 
   /**
-   * GET /api/room-type/get-room/:id — Laravel RoomTypeController@getRoom parity (available rooms for room type)
+   * GET /api/room-type/get-room/:id â€” Laravel RoomTypeController@getRoom parity (available rooms for room type)
    */
   static async getRoom(req: Request, res: Response): Promise<void> {
     try {
@@ -301,7 +301,7 @@ export class RoomController {
       if (!idParam || !/^\d+$/.test(String(idParam))) {
         success(res, [], 'Success', 200, {
           table: TABLES.room,
-          pagging: laravelPaging(0, 9999, 1),
+          pagination: laravelPaging(0, 9999, 1),
           permission: listPermission(req, { add: true }),
           search_data: [],
         });
@@ -312,7 +312,7 @@ export class RoomController {
       if (!roomType || roomType.deleted_at) {
         success(res, [], 'Success', 200, {
           table: TABLES.room,
-          pagging: laravelPaging(0, 9999, 1),
+          pagination: laravelPaging(0, 9999, 1),
           permission: listPermission(req, { add: true }),
           search_data: [],
         });
@@ -405,7 +405,7 @@ export class RoomController {
 
       success(res, data, 'Success', 200, {
         table,
-        pagging: laravelPaging(data.length, limit, page),
+        pagination: laravelPaging(data.length, limit, page),
         permission: listPermission(req, { add: true }),
         search_data: [],
         folio_id: folioId ? Number(folioId) : 0,
@@ -418,7 +418,7 @@ export class RoomController {
   }
 
   /**
-   * GET /api/room-type/get-room-v2/:id — Laravel RoomTypeController@getRoomFormatSelect parity
+   * GET /api/room-type/get-room-v2/:id â€” Laravel RoomTypeController@getRoomFormatSelect parity
    */
   static async getRoomFormatSelect(req: Request, res: Response): Promise<void> {
     try {
@@ -627,9 +627,9 @@ export class RoomController {
     }
   }
 
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // ROOMS
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   /**
    * GET /api/rooms
@@ -726,7 +726,7 @@ export class RoomController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -1083,7 +1083,7 @@ export class RoomController {
       success(res, data, 'Success', 200, {
         master,
         building,
-        pagging: laravelPaging(data.length, limit, page),
+        pagination: laravelPaging(data.length, limit, page),
         permission: getPermissionFlags(req.user, MENU_ID),
         meta,
       } as any);
@@ -1148,7 +1148,7 @@ export class RoomController {
         buildings: buildings.map((b: any) => ({ value: Number(b.id), label: b.name })),
       };
 
-      // Frontend reads dataoption?.master?.* → master must be top-level meta (Laravel additional() parity)
+      // Frontend reads dataoption?.master?.* â†’ master must be top-level meta (Laravel additional() parity)
       success(res, {}, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Room create form error:', err);
@@ -1349,7 +1349,7 @@ export class RoomController {
       const floorType = mht.find((m) => m.types.group === 'floor');
       const buildingType = mht.find((m) => m.types.group === 'building');
 
-      // Laravel Room::formatData() parity — frontend room/form expects {value,label} shape
+      // Laravel Room::formatData() parity â€” frontend room/form expects {value,label} shape
       const data: any = {
         id: Number(room.id),
         name: room.name,
@@ -1592,9 +1592,9 @@ export class RoomController {
     }
   }
 
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // ROOM TYPE IMAGES
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   /**
    * GET /api/room-types/:roomTypeId/images
@@ -1640,7 +1640,7 @@ export class RoomController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -1802,9 +1802,9 @@ export class RoomController {
     }
   }
 
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // ROOM INVENTORIES
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   /**
    * GET /api/rooms/:roomId/inventories
@@ -1859,7 +1859,7 @@ export class RoomController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,
@@ -1974,9 +1974,9 @@ export class RoomController {
     }
   }
 
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // ROOM RESERVATIONS
-  // ════════════════════════════════════════════════════════════
+  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   /**
    * GET /api/rooms/:roomId/reservations
@@ -2070,7 +2070,7 @@ export class RoomController {
         table,
         permission,
         search_data: [],
-        pagging: {
+        pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
           per_page: limit,

@@ -17,7 +17,7 @@ describe('system balance parity', () => {
       expect.objectContaining({ key: 'debit' }),
       expect.objectContaining({ key: 'credit' }),
     ]));
-    expect(payload.pagging).toMatchObject({ per_page: 99999, current_page: 1 });
+    expect(payload.pagination).toMatchObject({ per_page: 99999, current_page: 1 });
   });
 
   test('accepts legacy camelCase frontend route aliases', () => {

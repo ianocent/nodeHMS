@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -54,7 +54,7 @@ export class ConciergeController {
 
       success(res, bigintToNumber(data), 'Success', 200, {
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Phone book group list error:', err); error(res, 'Failed to list groups', 500); }
   }
@@ -117,7 +117,7 @@ export class ConciergeController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Phone book list error:', err); error(res, 'Failed to list phone books', 500); }
   }
@@ -168,7 +168,7 @@ export class ConciergeController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Baggage list error:', err); error(res, 'Failed to list baggage', 500); }
   }
@@ -219,7 +219,7 @@ export class ConciergeController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Car park list error:', err); error(res, 'Failed to list car parks', 500); }
   }
@@ -270,7 +270,7 @@ export class ConciergeController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Lost & found list error:', err); error(res, 'Failed to list lost & found', 500); }
   }
@@ -388,3 +388,4 @@ function buildTree(items: any[], parentId: bigint | null = null): any[] {
     .filter((i: any) => i.parent_id === parentId)
     .map((i: any) => ({ ...i, children: buildTree(items, i.id) }));
 }
+

@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -53,7 +53,7 @@ function perm(req: Request) {
 
 export class ContentController {
 
-  // ═══════════ CONTENTS (content-list, seo-home, room, config-pax) ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• CONTENTS (content-list, seo-home, room, config-pax) â•â•â•â•â•â•â•â•â•â•â•
   static async contentList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -74,7 +74,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Content list error:', err); error(res, 'Failed to list contents', 500); }
   }
@@ -133,7 +133,7 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete content', 500); }
   }
 
-  // ═══════════ BANNERS (content/banner) ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• BANNERS (content/banner) â•â•â•â•â•â•â•â•â•â•â•
   static async bannerList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -152,7 +152,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Banner list error:', err); error(res, 'Failed to list banners', 500); }
   }
@@ -207,7 +207,7 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete banner', 500); }
   }
 
-  // ═══════════ CANCELATION RULES ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• CANCELATION RULES â•â•â•â•â•â•â•â•â•â•â•
   static async cancelationRuleList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -229,7 +229,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Cancelation rule list error:', err); error(res, 'Failed to list cancelation rules', 500); }
   }
@@ -289,7 +289,7 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete cancelation rule', 500); }
   }
 
-  // ═══════════ CANCELATION RULE DATES ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• CANCELATION RULE DATES â•â•â•â•â•â•â•â•â•â•â•
   static async cancelationRuleDateList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit } = parsePagination(req.query);
@@ -307,7 +307,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Cancelation rule date list error:', err); error(res, 'Failed to list cancelation rule dates', 500); }
   }
@@ -348,7 +348,7 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete cancelation rule date', 500); }
   }
 
-  // ═══════════ EMAIL BUILDER ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• EMAIL BUILDER â•â•â•â•â•â•â•â•â•â•â•
   static async emailBuilderList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -368,7 +368,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Email builder list error:', err); error(res, 'Failed to list email builders', 500); }
   }
@@ -422,7 +422,7 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete email builder', 500); }
   }
 
-  // ═══════════ EMAIL GROUP ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• EMAIL GROUP â•â•â•â•â•â•â•â•â•â•â•
   static async emailGroupList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -441,7 +441,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Email group list error:', err); error(res, 'Failed to list email groups', 500); }
   }
@@ -516,7 +516,7 @@ export class ContentController {
     } catch (err: any) { console.error('Email send master error:', err); error(res, 'Failed to load email master', 500); }
   }
 
-  // EmailGroupController@sendEmail parity — validates + reports counts; SMTP send not wired (no MAIL_* env in node)
+  // EmailGroupController@sendEmail parity â€” validates + reports counts; SMTP send not wired (no MAIL_* env in node)
   static async sendEmail(req: Request, res: Response): Promise<void> {
     try {
       const raw = (req as any).body ?? {};
@@ -538,7 +538,7 @@ export class ContentController {
     } catch (err: any) { console.error('Send email error:', err); error(res, 'Failed to send email', 500); }
   }
 
-  // ═══════════ OTHER GUESTS ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• OTHER GUESTS â•â•â•â•â•â•â•â•â•â•â•
   static async otherGuestList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
@@ -564,7 +564,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Other guest list error:', err); error(res, 'Failed to list other guests', 500); }
   }
@@ -620,7 +620,7 @@ export class ContentController {
     } catch (err: any) { error(res, 'Failed to delete other guest', 500); }
   }
 
-  // ═══════════ ROOM INVENTORY / ROOM RESERVATION lists ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• ROOM INVENTORY / ROOM RESERVATION lists â•â•â•â•â•â•â•â•â•â•â•
   static async roomInventoryList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit } = parsePagination(req.query);
@@ -639,7 +639,7 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Room inventory list error:', err); error(res, 'Failed to list room inventories', 500); }
   }
@@ -667,12 +667,12 @@ export class ContentController {
           { label: 'Action', key: 'action', type: 'action', is_search: false },
         ],
         permission: perm(req),
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Room reservation list error:', err); error(res, 'Failed to list room reservations', 500); }
   }
 
-  // ═══════════ EMAIL SEND PER TEMPLATE (parity EmailGroupController@sendEmailPerTemplate) ═══════════
+  // â•â•â•â•â•â•â•â•â•â•â• EMAIL SEND PER TEMPLATE (parity EmailGroupController@sendEmailPerTemplate) â•â•â•â•â•â•â•â•â•â•â•
   static async sendMailTemplate(req: Request, res: Response): Promise<void> {
     try {
       const folioId = req.query.folio_id as string;
@@ -738,7 +738,7 @@ export class ContentController {
       let body = emailTemplate.body || '';
       body = body.replace(/\[\[([a-zA-Z0-9]+)\]\]/g, (_m: string, key: string) => sortcode[key] ?? '');
 
-      // No SMTP transport in node stack yet — email is built + logged instead of sent.
+      // No SMTP transport in node stack yet â€” email is built + logged instead of sent.
       console.log(`[email][send-mail-template/${templateName}] to=${folio.email} subject=${emailTemplate.subject} body.length=${body.length}`);
 
       success(res, null, 'Email sending process completed.');
@@ -748,3 +748,4 @@ export class ContentController {
     }
   }
 }
+

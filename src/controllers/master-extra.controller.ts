@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -13,7 +13,7 @@ function getPrisma() {
   return prisma;
 }
 
-// Laravel config('cms.time_day_use') parity — id in minutes
+// Laravel config('cms.time_day_use') parity â€” id in minutes
 const TIME_DAY_USE = [
   { value: 30, label: '0.5 Hour' },
   { value: 60, label: '1 Hour' },
@@ -36,7 +36,7 @@ const DAY_USE_RATE_TABLE = [
   { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
 ];
 
-// Laravel ReportPermission::formatTable() parity — role_id/master_report options injected per-request
+// Laravel ReportPermission::formatTable() parity â€” role_id/master_report options injected per-request
 const REPORT_PERMISSION_TABLE = [
   { label: 'No', key: 'no', type: 'none', is_search: false },
   { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: false },
@@ -44,7 +44,7 @@ const REPORT_PERMISSION_TABLE = [
   { label: 'Role', key: 'role_id', type: 'select', is_search: false },
 ];
 
-// Laravel data_search() parity — search_field/search_value + remaining query params
+// Laravel data_search() parity â€” search_field/search_value + remaining query params
 function dataSearch(req: Request, table: any[]): Record<string, any> {
   const meta: Record<string, any> = {};
   const fields = String(req.query.search_field || '').split(';').filter((f: string) => f.trim() !== '');
@@ -64,7 +64,7 @@ function dataSearch(req: Request, table: any[]): Record<string, any> {
   return meta;
 }
 
-// Laravel DayUseRate::formatData() parity — status cast boolean (DayUseRate model casts status)
+// Laravel DayUseRate::formatData() parity â€” status cast boolean (DayUseRate model casts status)
 function formatDayUseRate(row: any, index: number, page: number, limit: number) {
   const status = !!row.status;
   return {
@@ -79,7 +79,7 @@ function formatDayUseRate(row: any, index: number, page: number, limit: number) 
   };
 }
 
-// Laravel ReportPermission::formatData() parity — master_report links + role object + int status
+// Laravel ReportPermission::formatData() parity â€” master_report links + role object + int status
 function formatReportPermission(row: any, links: any[], roleMap: Map<string, string>) {
   return {
     id: Number(row.id),
@@ -95,7 +95,7 @@ function formatReportPermission(row: any, links: any[], roleMap: Map<string, str
 
 // ==================== DAY USE RATE (DayUseRateController parity) ====================
 export class DayUseRateController {
-  // DayUseRateController@index — rate_id filter, search name, permission menu 86
+  // DayUseRateController@index â€” rate_id filter, search name, permission menu 86
   static async index(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(String(req.query.page || '1'), 10);
@@ -121,7 +121,7 @@ export class DayUseRateController {
       const perms = crudPermission(req.user, 86n);
       success(res, rows, 'Success', 200, {
         table: DAY_USE_RATE_TABLE,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: { view: true, add: perms.add, edit: perms.edit, delete: perms.delete },
         search_data: dataSearch(req, DAY_USE_RATE_TABLE) as any,
       });
@@ -131,7 +131,7 @@ export class DayUseRateController {
     }
   }
 
-  // DayUseRateController@store — name+time required; property_id from user
+  // DayUseRateController@store â€” name+time required; property_id from user
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const body = (req as any).body ?? {};
@@ -214,7 +214,7 @@ export class DayUseRateController {
 
 // ==================== REPORT PERMISSION (ReportPermissionController parity) ====================
 export class ReportPermissionController {
-  // ReportPermissionController@index — roles + master-report options injected; permission menu 1126
+  // ReportPermissionController@index â€” roles + master-report options injected; permission menu 1126
   static async index(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(String(req.query.page || '1'), 10);
@@ -286,7 +286,7 @@ export class ReportPermissionController {
       const perms = crudPermission(req.user, 1126n);
       success(res, rows, 'Success', 200, {
         table,
-        pagging: laravelPaging(total, limit, page),
+        pagination: laravelPaging(total, limit, page),
         permission: { view: true, add: perms.add, edit: perms.edit, delete: false },
         search_data: dataSearch(req, table) as any,
       });
@@ -296,14 +296,14 @@ export class ReportPermissionController {
     }
   }
 
-  // ReportPermissionController@create — master statuses
+  // ReportPermissionController@create â€” master statuses
   static async create(req: Request, res: Response): Promise<void> {
     success(res, [], 'Success', 200, {
       master: { statuses: STATUS_OPTIONS },
     });
   }
 
-  // ReportPermissionController@store — role_id required; sync master_report links
+  // ReportPermissionController@store â€” role_id required; sync master_report links
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const body = (req as any).body ?? {};
@@ -351,7 +351,7 @@ export class ReportPermissionController {
     }
   }
 
-  // ReportPermissionController@edit — data + master statuses
+  // ReportPermissionController@edit â€” data + master statuses
   static async edit(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
@@ -373,7 +373,7 @@ export class ReportPermissionController {
     }
   }
 
-  // ReportPermissionController@update — role_id required; sync master_report links
+  // ReportPermissionController@update â€” role_id required; sync master_report links
   static async update(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
@@ -402,7 +402,7 @@ export class ReportPermissionController {
     }
   }
 
-  // ReportPermissionController@destroy — model has no SoftDeletes → hard delete
+  // ReportPermissionController@destroy â€” model has no SoftDeletes â†’ hard delete
   static async destroy(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
@@ -414,7 +414,7 @@ export class ReportPermissionController {
     }
   }
 
-  // ReportPermissionController@getPermission — user role → master-report perms (batch report builder)
+  // ReportPermissionController@getPermission â€” user role â†’ master-report perms (batch report builder)
   static async getPermission(req: Request, res: Response): Promise<void> {
     try {
       const userId = req.user?.id;
@@ -429,7 +429,7 @@ export class ReportPermissionController {
         success(res, [], 'Success');
         return;
       }
-      // Laravel: withOutGlobalScope('property') — no property filter
+      // Laravel: withOutGlobalScope('property') â€” no property filter
       const rp = await getPrisma().report_permissions.findFirst({
         where: { role_id: userRole.role_id },
       });
@@ -443,7 +443,7 @@ export class ReportPermissionController {
         success(res, [], 'Success');
         return;
       }
-      // Nested links per master-report type (group-report + action-report) via model_has_types (Type↔Type)
+      // Nested links per master-report type (group-report + action-report) via model_has_types (Typeâ†”Type)
       const nested = await getPrisma().model_has_types.findMany({
         where: { model_type: 'App\\Models\\Type', model_id: { in: masterItems.map((m: any) => BigInt(m.value)) } },
       });
@@ -491,7 +491,7 @@ function coerceBool(val: any): boolean {
   return v === true || v === 1 || v === '1' || v === 'true';
 }
 
-// model_has_types links for report_permissions row — Type rows joined
+// model_has_types links for report_permissions row â€” Type rows joined
 async function loadLinks(modelId: bigint): Promise<any[]> {
   const links = await getPrisma().model_has_types.findMany({
     where: { model_type: 'App\\Models\\ReportPermission', model_id: modelId },
@@ -505,7 +505,7 @@ async function loadLinks(modelId: bigint): Promise<any[]> {
   });
 }
 
-// Laravel ReportPermissionController store/update — Type::whereIn(values)->sync()
+// Laravel ReportPermissionController store/update â€” Type::whereIn(values)->sync()
 async function syncReportLinks(modelId: bigint, masterReport: any): Promise<void> {
   const raw = Array.isArray(masterReport) ? masterReport : [];
   const values = raw
@@ -530,3 +530,4 @@ async function syncReportLinks(modelId: bigint, masterReport: any): Promise<void
     });
   }
 }
+

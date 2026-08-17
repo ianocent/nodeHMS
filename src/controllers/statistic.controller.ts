@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+﻿import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -381,7 +381,7 @@ export class StatisticController {
 
       success(res, data, 'Data has been loaded', 200, {
         table,
-        pagging: laravelPaging(data.length, 9999, 1),
+        pagination: laravelPaging(data.length, 9999, 1),
         permission: getPermissionFlags(req.user, 1141),
         master,
       } as any);
@@ -410,7 +410,7 @@ export class StatisticController {
         days.push(d.toISOString().split('T')[0]);
       }
 
-      // ── Table (Laravel statisticsRoomType parity) ──
+      // â”€â”€ Table (Laravel statisticsRoomType parity) â”€â”€
       const doubleClick = [
         {
           id: 0, type: 'form', key: 'daily_rate_code', label: 'Daily Rate Code',
@@ -440,7 +440,7 @@ export class StatisticController {
         });
       }
 
-      // ── Data sources ──
+      // â”€â”€ Data sources â”€â”€
       const [roomTypes, messages, rateCodes, overbookingRows, availRows, workOrderRows, reservationRows] = await Promise.all([
         prisma.room_types.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { sort: 'asc' } }),
         prisma.statistic_messages.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
@@ -493,7 +493,7 @@ export class StatisticController {
         soldByDate.set(key, c);
       }
 
-      // ── Rows ──
+      // â”€â”€ Rows â”€â”€
       const data: any[] = [];
       const push = (row: any) => data.push({ id: 0, name: '', total: '', ...row });
 
@@ -551,7 +551,7 @@ export class StatisticController {
       success(res, bigintToNumber(data), 'Success', 200, {
         table,
         permission: getPermissionFlags(req.user, 1141),
-        pagging: laravelPaging(data.length, 9999, 1),
+        pagination: laravelPaging(data.length, 9999, 1),
       } as any);
     } catch (err: any) { console.error('Statistic by room type error:', err); error(res, 'Failed to load statistic', 500); }
   }
@@ -659,9 +659,10 @@ export class StatisticController {
           { label: 'Status', key: 'room_status', type: 'badge', is_search: false },
         ],
         permission: { view: true, add: true, edit: true, delete: true },
-        pagging: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       };
       success(res, null, 'Success', 200, meta);
     } catch (err: any) { console.error('Room statistic grid error:', err); error(res, 'Failed to load room statistic', 500); }
   }
 }
+
