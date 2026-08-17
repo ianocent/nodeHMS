@@ -122,6 +122,12 @@ export class GenericController {
   }
 
   private toPlural(name: string): string {
+    // If caller already supplied a plural/DB-style name, return as-is
+    // Protect against names like "payment_matrices" or "stocks" which
+    // are already the Prisma delegate keys.
+    if (!name) return name;
+    if (name.includes('_') || name.endsWith('s')) return name;
+
     const kebabOverrides: Record<string, string> = {
       'stop-sell-booking': 'stop_sells',
       'stop-sell': 'stop_sells',

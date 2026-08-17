@@ -59,6 +59,15 @@ router.get('/reservation/masterInclusive', authMiddleware, requirePermission(80,
 router.get('/reservation/master', authMiddleware, requirePermission(80, 'view'), ReservationController.getMaster);
 router.get('/reservation/subfolio/:id', authMiddleware, requirePermission(80, 'view'), ReservationController.subfolioList);
 
+// ── Helper endpoints (Laravel getRate/getRateByCompany/getPackageByRateId/getCharge/getAvailableRoomType/getRoomGit/updateRoomParentGIT) ──
+router.get('/reservation/rate', authMiddleware, requirePermission(80, 'view'), ReservationController.rateListHelper);
+router.get('/reservation/rate-by-company-id', authMiddleware, requirePermission(80, 'view'), ReservationController.rateByCompany);
+router.get('/reservation/package-by-rate-id', authMiddleware, requirePermission(80, 'view'), ReservationController.packageByRateId);
+router.post('/reservation/charge', authMiddleware, requirePermission(80, 'view'), ReservationController.getCharge);
+router.get('/reservation/available-room', authMiddleware, requirePermission(80, 'view'), ReservationController.availableRoomType);
+router.get('/reservation/room-git', authMiddleware, requirePermission(80, 'view'), ReservationController.roomGit);
+router.put('/reservation/update-room-parent-git', authMiddleware, requirePermission(80, 'edit'), ReservationController.updateRoomParentGIT);
+
 // ── Singular param routes ──
 router.get('/reservation/:id', authMiddleware, requirePermission(80, 'view'), ReservationController.show);
 router.get('/reservation/:id/edit', authMiddleware, requirePermission(80, 'edit'), ReservationController.edit);

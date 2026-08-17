@@ -4,7 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { moneyFormat } from '../utils/cmsConfig';
+import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -43,6 +43,197 @@ function reservationBn(val: any): any {
   if (Array.isArray(val)) return val.map(reservationBn);
   if (val && typeof val === 'object') { const o: any = {}; for (const [k, v] of Object.entries(val)) o[k] = reservationBn(v); return o; }
   return val;
+}
+
+// ── Helper-endpoint parity helpers (Laravel ReservationController) ──
+function fmtDateOnly(d: any): string | null {
+  if (!d) return null;
+  if (d instanceof Date) return d.toISOString().substring(0, 10);
+  return String(d).substring(0, 10);
+}
+
+function dataSearchLocal(req: Request, table: any[]): Record<string, any> {
+  const meta: Record<string, any> = {};
+  const fields = String(req.query.search_field || '').split(';').filter((f: string) => f.trim() !== '');
+  const values = String(req.query.search_value || '').split(';').filter((v: string) => v.trim() !== '');
+  fields.forEach((field: string, i: number) => {
+    const col = table.find((c: any) => c.key === field);
+    const raw = values[i] ?? '';
+    meta[field] =
+      col && ['select', 'checkbox', 'select_multiple'].includes(col.type)
+        ? { label: col.options?.find((o: any) => String(o.value) === String(raw))?.label ?? null, value: raw }
+        : String(raw);
+  });
+  for (const [k, v] of Object.entries(req.query)) {
+    if (['search_field', 'search_value', 'page', 'limit', 'search', 'sort', 'group'].includes(k)) continue;
+    meta[k] = String(v);
+  }
+  return meta;
+}
+
+function paggingMetaLocal(total: number, limit: number, page: number) {
+  const lastPage = limit > 0 ? Math.max(1, Math.ceil(total / limit)) : 1;
+  const from = total === 0 ? 0 : (page - 1) * limit + 1;
+  return {
+    current_page: page,
+    last_page: lastPage,
+    per_page: limit,
+    total,
+    from,
+    to: Math.min(total, page * limit),
+  };
+}
+
+function rateTableColumns(codePostOptions: any[], withStatus: boolean): any[] {
+  const cols: any[] = [];
+  if (withStatus) {
+    cols.push({ label: 'Status', key: 'status', type: 'checkbox', options: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }], is_search: true });
+  }
+  cols.push(
+    { label: 'Rate Code', key: 'code', type: 'text', is_link: true, uri: '/rate-management/rate', is_search: true },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Description', key: 'description', type: 'text', is_search: true },
+    { label: 'Start Date', key: 'start_date', type: 'date', is_search: true },
+    { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
+    { label: 'Post Code', key: 'code_post_id', type: 'select', options: codePostOptions, is_search: true },
+    { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
+  );
+  return cols;
+}
+
+function rateRowData(r: any, codePostById: Map<any, any>): any {
+  return {
+    id: Number(r.id),
+    name: r.module == 'rate' ? r.name : 'BAR',
+    description: r.description,
+    rate_type: r.rate_type,
+    online: r.online === 1,
+    staah: r.staah === true,
+    staah_ori: r.staah === true,
+    print_rate: r.print_rate === 1,
+    is_day_use: r.is_day_use === true,
+    min_advance_booking: r.min_advance_booking,
+    max_advance_booking: r.max_advance_booking,
+    code: r.code,
+    contract_rate: { value: Number(r.id), label: r.code },
+    code_color: [{ value: r.code, label: r.code }],
+    is_color: true,
+    sort_by_company: r.module == 'rate' ? 2 : 3,
+    color: r.module == 'rate' ? 'bg-primary' : 'bg-secondary',
+    start_date: fmtDateOnly(r.start_date),
+    end_date: fmtDateOnly(r.end_date),
+    term_condition: r.term_condition,
+    cancellation_policy: r.cancellation_policy,
+    notes: r.notes,
+    code_post_id: { value: r.code_post_id ? Number(r.code_post_id) : null, label: codePostById.get(r.code_post_id) || '' },
+    code_post_extra_bed_id: { value: r.code_post_extra_bed_id ? Number(r.code_post_extra_bed_id) : null, label: codePostById.get(r.code_post_extra_bed_id) || '' },
+    sort: r.sort,
+    status: r.status,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+}
+
+function barRowData(b: any, codePostById: Map<any, any>): any {
+  return {
+    id: Number(b.id),
+    name: 'BAR',
+    description: 'BAR',
+    rate_type: 'BAR',
+    code: 'BAR',
+    contract_rate: { value: Number(b.id), label: 'BAR' },
+    code_color: [{ value: 'BAR', label: 'BAR' }],
+    is_color: true,
+    sort_by_company: 3,
+    color: 'bg-secondary',
+    start_date: fmtDateOnly(b.start_date),
+    end_date: fmtDateOnly(b.end_date),
+    code_post_id: { value: Number(b.code_post_id), label: codePostById.get(b.code_post_id) || '' },
+    code_post_extra_bed_id: { value: null, label: '' },
+    sort: b.sort,
+    status: b.status,
+  };
+}
+
+// Laravel RoomType::onlyAvailable parity — returns available room ids for [dateStart, dateEnd)
+async function onlyAvailableRoomIds(propertyId: bigint | number, dateStart: string, dateEnd: string): Promise<Set<number>> {
+  const pId = BigInt(Number(propertyId));
+  const start = new Date(dateStart);
+  const end = new Date(dateEnd);
+  const [rooms, availability, workOrders, reservations] = await Promise.all([
+    prisma.rooms.findMany({
+      where: { deleted_at: null, status: 1, property_id: pId, room_status: { not: ROOM_STATUSES.out_of_order.id } },
+      select: { id: true },
+    }),
+    prisma.room_availabilities.findMany({
+      where: { deleted_at: null, property_id: Number(propertyId), date: { gte: start, lt: end } },
+      select: { room_id: true },
+    }),
+    prisma.work_orders.findMany({
+      where: { deleted_at: null, status: 1, room_id: { not: null }, date: { gte: start }, end_date: { lt: end } },
+      select: { room_id: true },
+    }),
+    prisma.reservations.findMany({
+      where: { date: { gte: start, lte: end }, status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] } },
+      select: { room_id: true, room_id_next: true, room_status_name: true },
+    }),
+  ]);
+  const blocked = new Set<number>();
+  for (const a of availability) blocked.add(Number(a.room_id));
+  for (const w of workOrders) blocked.add(Number(w.room_id));
+  for (const r of reservations) {
+    if (r.room_status_name !== ROOM_STATUSES.due_out.name) {
+      if (r.room_id != null) blocked.add(Number(r.room_id));
+      if (r.room_id_next != null) blocked.add(Number(r.room_id_next));
+    }
+  }
+  const available = new Set<number>();
+  for (const room of rooms) if (!blocked.has(Number(room.id))) available.add(Number(room.id));
+  return available;
+}
+
+// Laravel Folio::getRevenueCharge parity
+async function getRevenueCharge(rows: any[]): Promise<any> {
+  const byDate = new Map<string, number>();
+  const chargeRoom = new Map<string, number>();
+  const chargePb1 = new Map<string, number>();
+  const chargeService = new Map<string, number>();
+  const chargeTotal = new Map<string, number>();
+  for (const row of rows) {
+    const d = fmtDateOnly(row.date);
+    if (!d) continue;
+    const qty = Number(row.quantity ?? 1);
+    const amount = Number(row.amountt ?? 0) * qty;
+    const pb1 = Number(row.pb1 ?? 0) * qty;
+    const service = Number(row.service_charge ?? 0) * qty;
+    byDate.set(d, (byDate.get(d) ?? 0) + amount);
+    chargeRoom.set(d, (chargeRoom.get(d) ?? 0) + amount + pb1);
+    chargePb1.set(d, (chargePb1.get(d) ?? 0) + pb1);
+    chargeService.set(d, (chargeService.get(d) ?? 0) + service);
+    chargeTotal.set(d, (chargeTotal.get(d) ?? 0) + amount + pb1 + service);
+  }
+  const sum = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
+  return {
+    date: [...byDate.entries()].map(([date, charge]) => ({ date, charge: moneyFormat(charge) })),
+    charge: [
+      { label: 'Room Charge', value: moneyFormat(sum(chargeRoom)) },
+      { label: 'PB1', value: moneyFormat(sum(chargePb1)) },
+      { label: 'Service Charge', value: moneyFormat(sum(chargeService)) },
+      { label: 'Total Room Charge', value: moneyFormat(sum(chargeTotal)) },
+    ],
+  };
+}
+
+async function fetchCodePostOptions(): Promise<{ options: any[]; byId: Map<any, any> }> {
+  const allCodePosts = await prisma.code_posts.findMany({
+    where: { deleted_at: null, status: STATUS_ACTIVE, type: 'DEFAULT' },
+    select: { id: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+  return {
+    options: allCodePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name })),
+    byId: new Map(allCodePosts.map((cp: any) => [cp.id, cp.name])),
+  };
 }
 
 export class ReservationController {
@@ -2312,5 +2503,636 @@ export class ReservationController {
       const subs = await prisma.folios.findMany({ where: { parent: parentId }, select: { id: true, folio_number: true }, orderBy: { id: 'asc' } });
       success(res, { data: subs.map(s => ({ value: Number(s.id), label: s.folio_number })) }, 'Success');
     } catch (err: any) { console.error('Subfolio list error:', err); error(res, 'Failed to list subfolios', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/rate (Laravel getRate)
+  // ─────────────────────────────────────────────
+  static async rateListHelper(req: Request, res: Response): Promise<void> {
+    try {
+      const ci = req.query.check_in_date as string;
+      const co = req.query.check_out_date as string;
+      const roomTypeId = req.query.room_type_id as string;
+      if (!ci || !co || !roomTypeId) { badRequest(res, 'The check in date field is required.'); return; }
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const propertyId = req.user?.lastProperty;
+      const rtId = BigInt(roomTypeId);
+
+      const where: any = { deleted_at: null, module: 'rate' };
+      where.rate_rates = { some: { room_type_id: rtId, property_id: propertyId ? BigInt(propertyId) : undefined } };
+      const ciD = new Date(ci);
+      const coD = new Date(co);
+      where.start_date = { lte: ciD };
+      where.end_date = { gte: coD };
+      const search = req.query.search as string;
+      if (search) where.OR = [{ name: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } }];
+      const searchField = req.query.search_field as string;
+      if (searchField && !search) {
+        const searchValue = String(req.query.search_value ?? '');
+        if (searchValue) where[searchField] = { contains: searchValue, mode: 'insensitive' };
+      }
+
+      const [rates, total, codePost] = await Promise.all([
+        prisma.rates.findMany({ where, orderBy: { sort: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.rates.count({ where }),
+        fetchCodePostOptions(),
+      ]);
+      const formatted = rates.map((r: any) => rateRowData(r, codePost.byId));
+      const table = rateTableColumns(codePost.options, true);
+      const permFlags = getPermissionFlags(req.user, MENU_ID);
+      const permission = { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete };
+      success(res, formatted, 'Success', 200, { table, permission, pagging: paggingMetaLocal(total, limit, page), search_data: dataSearchLocal(req, table) as any });
+    } catch (err: any) { console.error('Reservation rate list error:', err); error(res, 'Failed to fetch rates', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/rate-by-company-id (Laravel getRateByCompany)
+  // ─────────────────────────────────────────────
+  static async rateByCompany(req: Request, res: Response): Promise<void> {
+    try {
+      const companyId = String(req.query.company_profile_id ?? '0');
+      const ci = req.query.check_in_date as string;
+      const co = req.query.check_out_date as string;
+      const dayUse = req.query.day_use as string;
+      const typeRsv = req.query.type_rsv as string;
+      if (!ci || !co) { badRequest(res, 'The check in date field is required.'); return; }
+      const propertyId = req.user?.lastProperty;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+      const searchField = req.query.search_field as string;
+      const searchValue = String(req.query.search_value ?? '');
+      const ciD = new Date(ci);
+      const coD = new Date(co);
+      const company = companyId !== '0' ? BigInt(companyId) : null;
+
+      const baseWhere: any = { deleted_at: null, status: 1, module: 'rate' };
+      if (propertyId) baseWhere.property_id = propertyId;
+      baseWhere.start_date = { lte: ciD };
+      baseWhere.end_date = { gte: coD };
+      if (dayUse === '1') baseWhere.is_day_use = true;
+      const searchConds: any[] = [];
+      if (search) searchConds.push({ name: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } });
+      if (searchField && searchValue && searchConds.length === 0) searchConds.push({ [searchField]: { contains: searchValue, mode: 'insensitive' } });
+
+      let rateWhere: any = { ...baseWhere };
+      if (company) {
+        rateWhere.OR = [{ company_profiles: { some: { id: company } } }, { company_profiles: { none: {} } }, ...searchConds];
+      } else if (searchConds.length > 0) {
+        rateWhere.OR = searchConds;
+      }
+
+      let rates = await prisma.rates.findMany({ where: rateWhere, orderBy: { module: 'desc' } });
+      let totalData = rates.length;
+      if (rates.length === 0 && dayUse !== '1') {
+        const fallbackWhere: any = { ...baseWhere, company_profiles: { none: {} } };
+        if (searchConds.length > 0) fallbackWhere.OR = searchConds;
+        rates = await prisma.rates.findMany({ where: fallbackWhere, orderBy: { module: 'desc' } });
+        totalData = rates.length;
+      }
+
+      const codePost = await fetchCodePostOptions();
+      let data = rates.map((r: any) => rateRowData(r, codePost.byId));
+
+      if (dayUse !== '1') {
+        const barWhere: any = { deleted_at: null, status: 1 };
+        if (propertyId) barWhere.property_id = propertyId;
+        barWhere.start_date = { lte: ciD };
+        barWhere.end_date = { gte: coD };
+        const bars = await prisma.bars.findMany({ where: barWhere });
+        if (bars.length > 0) {
+          data.push(barRowData(bars[0], codePost.byId));
+        }
+      }
+
+      data.sort((a: any, b: any) => (a.sort_by_company - b.sort_by_company) || (a.id - b.id));
+      if (typeRsv) {
+        const needle = typeRsv === 'is_walk_in' ? 'walk in' : typeRsv === 'is_house_use' ? 'house use' : 'complimentary';
+        const matched = data.filter((d: any) => d.name && String(d.name).toLowerCase().includes(needle));
+        if (matched.length > 0) {
+          const seen = new Set<number>();
+          data = [...matched, ...data].filter((d: any) => (seen.has(d.id) ? false : (seen.add(d.id), true)));
+        }
+      }
+
+      totalData = totalData + 1;
+      const table = rateTableColumns(codePost.options, false).map((col: any) => {
+        if (col.key === 'code') return { ...col, key: 'code_color' };
+        return col;
+      });
+      const permission = { view: true, add: true, edit: true, delete: true };
+      success(res, data, 'Success', 200, { table, permission, pagging: paggingMetaLocal(totalData, limit, page), search_data: dataSearchLocal(req, table) as any });
+    } catch (err: any) { console.error('Reservation rate by company error:', err); error(res, 'Failed to fetch rates', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/package-by-rate-id/:id (Laravel getPackageByRateId)
+  // ─────────────────────────────────────────────
+  static async packageByRateId(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { badRequest(res, 'The rate id field is required.'); return; }
+      const rateId = BigInt(raw);
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const where: any = { rate_id: rateId, deleted_at: null };
+      const search = req.query.search as string;
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+      const searchField = req.query.search_field as string;
+      if (searchField && !search) {
+        const searchValue = String(req.query.search_value ?? '');
+        if (searchValue) where[searchField] = { contains: searchValue, mode: 'insensitive' };
+      }
+
+      const [dayUses, total] = await Promise.all([
+        prisma.rate_day_uses.findMany({ where, orderBy: { sort: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.rate_day_uses.count({ where }),
+      ]);
+      const timeOptions = [30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360].map((v) => ({ value: v, label: `${v / 60} Hour${v > 60 ? 's' : ''}` }));
+      const table = [
+        { label: 'Rate Name', key: 'name', type: 'text', is_search: true },
+        { label: 'Time', key: 'time', type: 'select', options: timeOptions, is_search: true },
+        { label: 'Status', key: 'status', type: 'checkbox', options: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }], is_search: true },
+      ];
+      const data = dayUses.map((d: any) => ({ id: Number(d.id), name: d.name, time: d.time, status: !!d.status }));
+      const permFlags = getPermissionFlags(req.user, MENU_ID);
+      const permission = { view: true, add: req.user?.superUser || permFlags.add, edit: req.user?.superUser || permFlags.edit, delete: req.user?.superUser || permFlags.delete };
+      success(res, data, 'Success', 200, { table, permission, pagging: paggingMetaLocal(total, limit, page), search_data: dataSearchLocal(req, table) as any });
+    } catch (err: any) { console.error('Reservation package by rate error:', err); error(res, 'Failed to fetch packages', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // POST /cms/reservation/charge (Laravel getCharge)
+  // ─────────────────────────────────────────────
+  static async getCharge(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty;
+      if (!propertyId) { badRequest(res, 'Property not found'); return; }
+      const pId = BigInt(propertyId);
+      const body = req.body || {};
+      const reservationList: any[] = Array.isArray(body.reservation_list) ? body.reservation_list : [];
+      if (reservationList.length === 0) { badRequest(res, 'The reservation list field is required.'); return; }
+      for (const item of reservationList) {
+        if (!item.check_in_date || !item.check_out_date) { badRequest(res, 'Check In Date Required'); return; }
+        if (item.rate_id && !/^\d+$/.test(String(item.rate_id))) { badRequest(res, 'Rate Not Found'); return; }
+      }
+
+      let ci = String(body.check_in_date || '');
+      let co = String(body.check_out_date || '');
+      if (!ci || !co) {
+        ci = String(reservationList.reduce((min: string, i: any) => (!min || i.check_in_date < min ? i.check_in_date : min), ''));
+        co = String(reservationList.reduce((max: string, i: any) => (!max || i.check_out_date > max ? i.check_out_date : max), ''));
+      }
+      if (body.type_reservation === 'day-use') {
+        const d = new Date(ci);
+        d.setDate(d.getDate() + 1);
+        co = d.toISOString().substring(0, 10);
+      }
+      const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / (1000 * 60 * 60 * 24)));
+
+      const property = await prisma.properties.findUnique({ where: { id: pId } });
+      const codePost = await prisma.code_posts.findFirst({ where: { deleted_at: null, status: STATUS_ACTIVE } });
+      if (!codePost) { badRequest(res, 'Code post not found'); return; }
+      const isTax = property?.is_tax === 1;
+
+      const rateIds: bigint[] = [];
+      const rateById = new Map<number, any>();
+      const itemByRate: any[] = [];
+      for (const item of reservationList) {
+        if (item.rate_id) {
+          const rid = BigInt(item.rate_id);
+          if (!rateById.has(Number(rid))) {
+            rateIds.push(rid);
+            const rate = await prisma.rates.findUnique({ where: { id: rid } });
+            rateById.set(Number(rid), rate);
+          }
+          itemByRate.push(item);
+        }
+      }
+
+      let promoCode = String(body.promo_code ?? '');
+      const appliedPromo: any[] = [];
+      const discountByRate = new Map<number, number>();
+      let linkByPromo = new Map<number, number>();
+      if (promoCode) {
+        let linkedPromotions: any[] = [];
+        if (rateIds.length > 0) {
+          const links = await prisma.model_has_promotions.findMany({ where: { model_type: 'App\\Models\\Rate', model_id: { in: rateIds } }, select: { promotion_id: true, model_id: true } });
+          links.forEach((l: any) => linkByPromo.set(Number(l.promotion_id), Number(l.model_id)));
+          if (linkByPromo.size > 0) {
+            linkedPromotions = await prisma.promotions.findMany({
+              where: {
+                id: { in: [...linkByPromo.keys()] },
+                status: 1,
+                deleted_at: null,
+                promotion_code: promoCode,
+                from_validity_date: { lte: new Date() },
+                to_validity_date: { gte: new Date() },
+                from_stay_date: { lte: new Date(ci) },
+                to_stay_date: { gte: new Date(co) },
+                min_night: { lte: nights },
+              },
+            });
+          }
+        }
+        if (linkedPromotions.length === 0) {
+          res.status(400).json({ code: 400, message: 'Promo code not found' });
+          return;
+        }
+        for (const promo of linkedPromotions) {
+          const rateIdLinked = linkByPromo.get(Number(promo.id));
+          const rate = rateById.get(Number(rateIdLinked));
+          const amount = Number(rate?.amount ?? 0);
+          const discount = promo.promotion_type === 'percentage' ? (amount * Number(promo.discount_percentage ?? 0)) / 100 : Number(promo.discount_flat ?? 0);
+          discountByRate.set(Number(rateIdLinked), (discountByRate.get(Number(rateIdLinked)) ?? 0) + discount);
+          appliedPromo.push({ rate_id: Number(rateIdLinked), promo_id: Number(promo.id), promo_code: promo.promotion_code, discount });
+        }
+      } else if (Array.isArray(body.applied_promo) && body.applied_promo.length > 0) {
+        for (const ap of body.applied_promo) {
+          discountByRate.set(Number(ap.rate_id), Number(ap.discount ?? ap.amount ?? 0));
+          appliedPromo.push(ap);
+        }
+      }
+
+      const rows: any[] = [];
+      for (const item of itemByRate) {
+        const rate = rateById.get(Number(item.rate_id));
+        if (!rate) continue;
+        const discount = discountByRate.get(Number(item.rate_id)) ?? 0;
+        const calc = calculateCodePost(codePost as any, Number(rate.amount) - discount, isTax);
+        const itemCi = new Date(String(item.check_in_date));
+        const itemCo = new Date(String(item.check_out_date));
+        const nightsThis = Math.max(1, Math.ceil((itemCo.getTime() - itemCi.getTime()) / (1000 * 60 * 60 * 24)));
+        for (let i = 0; i < nightsThis; i++) {
+          const nightDate = new Date(itemCi);
+          nightDate.setDate(nightDate.getDate() + i);
+          rows.push({
+            date: nightDate,
+            amountt: Number(rate.amount) - discount,
+            pb1: calc.pb1,
+            service_charge: calc.service,
+            quantity: 1,
+          });
+        }
+      }
+      const charge = await getRevenueCharge(rows);
+      res.json({ code: 200, message: 'Success', data: charge });
+    } catch (err: any) { console.error('Reservation get charge error:', err); error(res, 'Failed to get charge', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/available-room (Laravel getAvailableRoomType)
+  // ─────────────────────────────────────────────
+  static async availableRoomType(req: Request, res: Response): Promise<void> {
+    try {
+      const ci = req.query.check_in_date as string;
+      const co = req.query.check_out_date as string;
+      if (!ci || !co) { badRequest(res, 'The check in date field is required.'); return; }
+      const days: string[] = [];
+      const ciD = new Date(ci);
+      const coD = new Date(co);
+      for (let i = 0; i < Math.ceil((coD.getTime() - ciD.getTime()) / (1000 * 60 * 60 * 24)); i++) {
+        const d = new Date(ciD);
+        d.setDate(d.getDate() + i);
+        days.push(d.toISOString().substring(0, 10));
+      }
+
+      const propertyId = req.user?.lastProperty;
+      const [overbookings, rooms, workOrders] = await Promise.all([
+        prisma.overbookings.findMany({ where: { date: { gte: new Date(ci), lte: new Date(co) } } }),
+        prisma.rooms.findMany({ where: { deleted_at: null, status: 1, property_id: propertyId ? BigInt(propertyId) : undefined }, select: { id: true, room_type_id: true, room_status: true } }),
+        prisma.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: { not: null }, date: { lte: new Date(ci) }, OR: [{ end_date: { gte: new Date(ci) } }, { end_date: null }] } }),
+      ]);
+
+      const roomTypes = await prisma.room_types.findMany({ where: { deleted_at: null, status: 1, property_id: propertyId ? BigInt(propertyId) : undefined } });
+      const typeIds = roomTypes.map((t: any) => Number(t.id));
+      const reservations = await prisma.reservations.findMany({
+        where: { room_type_id: { in: typeIds }, date: { gte: new Date(ci), lte: new Date(co) } },
+        include: { folios: { select: { status_reservation: true } } },
+      });
+
+      const overbookingByType = new Map<number, Map<string, number>>();
+      for (const ob of overbookings) {
+        const key = Number(ob.room_type_id);
+        if (!overbookingByType.has(key)) overbookingByType.set(key, new Map());
+        const m = overbookingByType.get(key)!;
+        const d = fmtDateOnly(ob.date)!;
+        m.set(d, (m.get(d) ?? 0) + Number(ob.overbooking));
+      }
+
+      const data: any[] = [];
+      for (const rt of roomTypes) {
+        const tid = Number(rt.id);
+        const typeRooms = rooms.filter((r: any) => Number(r.room_type_id) === tid);
+        const totalRoom = typeRooms.length;
+        const blocked = typeRooms.filter((r: any) => r.room_status === ROOM_STATUSES.block.id).length;
+        const roomIds = new Set(typeRooms.map((r: any) => Number(r.id)));
+        const row: any = { id: tid, name: rt.name };
+        for (const day of days) {
+          const dayD = new Date(day);
+          const outOfOrder = workOrders.filter((w: any) => roomIds.has(Number(w.room_id)) && ((w.date && w.date <= dayD && (w.end_date == null || w.end_date > dayD)))).length;
+          const overbooking = overbookingByType.get(tid)?.get(day) ?? 0;
+          const roomSold = reservations.filter((r: any) => {
+            const fStatus = r.folios?.status_reservation;
+            return fmtDateOnly(r.date) === day && Number(r.room_type_id) === tid && fStatus != null && fStatus !== STATUS_RESERVATION.pending.id && fStatus !== STATUS_RESERVATION.cancel_reservation.id;
+          }).length;
+          row[day.replace(/-/g, '-')] = totalRoom + overbooking - roomSold - blocked - outOfOrder;
+        }
+        data.push(row);
+      }
+
+      const table = [
+        { label: 'Name', key: 'name', type: 'none', is_search: false },
+        ...days.map((day) => ({ label: day, key: day, type: 'none', is_search: false })),
+      ];
+      const total = data.length;
+      res.json({ data, code: 200, message: 'Success', table, pagging: paggingMetaLocal(total, 99999, parseInt(req.query.page as string) || 1), permission: { view: true, add: true, edit: true, delete: true } });
+    } catch (err: any) { console.error('Reservation available room error:', err); error(res, 'Failed to get available room', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // GET /cms/reservation/room-git (Laravel getRoomGit)
+  // ─────────────────────────────────────────────
+  static async roomGit(req: Request, res: Response): Promise<void> {
+    try {
+      let arr: any[] = [];
+      let ci = req.query.check_in_date as string;
+      let co = req.query.check_out_date as string;
+      let rateId: bigint | null = null;
+      const hasFolio = req.query.folio_id && /^\d+$/.test(String(req.query.folio_id));
+      if (hasFolio) {
+        const folio = await prisma.folios.findUnique({ where: { id: BigInt(String(req.query.folio_id)) } });
+        if (folio) {
+          ci = fmtDateOnly(folio.check_in_date) || ci;
+          co = fmtDateOnly(folio.check_out_date) || co;
+          const childFolios = await prisma.folios.findMany({
+            where: { parent: folio.id, status_reservation: { not: STATUS_RESERVATION.cancel_reservation.id } },
+            include: { reservations: true },
+          });
+          for (const child of childFolios) {
+            if (child.reservations.length > 0) {
+              const r = child.reservations[0];
+              arr.push({
+                room_type_id: Number(r.room_type_id ?? 0),
+                adult: Number(r.adult ?? 2),
+                child: Number(r.child ?? 0),
+              });
+              if (!rateId && r.rate_id) rateId = r.rate_id;
+            }
+          }
+        }
+      }
+      if (!ci || !co) { badRequest(res, 'The check in date field is required.'); return; }
+      if (!rateId && req.query.rate_id && /^\d+$/.test(String(req.query.rate_id))) rateId = BigInt(String(req.query.rate_id));
+
+      const table = [
+        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+        { label: 'Description', key: 'description', type: 'none', is_search: false },
+        { label: 'Qty Room Available', key: 'available', type: 'none', is_search: false },
+        { label: 'Qty', key: 'qty', type: 'number', is_search: false },
+      ];
+      if (!hasFolio) {
+        table.push(
+          { label: 'Adult', key: 'adult', type: 'number', is_search: false },
+          { label: 'Child', key: 'child', type: 'number', is_search: false },
+        );
+      }
+
+      const [overbookings, availableIds] = await Promise.all([
+        prisma.overbookings.findMany({ where: { date: { gte: new Date(ci), lte: new Date(co) } } }),
+        req.user?.lastProperty ? onlyAvailableRoomIds(req.user.lastProperty, ci, co) : Promise.resolve(new Set<number>()),
+      ]);
+
+      const configValues: number[] = [];
+      for (const [k, v] of Object.entries(req.query)) {
+        if (k.startsWith('idx_') && v != null && /^\d+$/.test(String(v))) configValues.push(Number(v));
+      }
+      let configRoomIds: Set<number> | null = null;
+      if (configValues.length > 0) {
+        const links = await prisma.model_has_types.findMany({ where: { model_type: 'App\\Models\\Room', type_id: { in: configValues } }, select: { model_id: true, type_id: true } });
+        const byType = new Map<number, Set<number>>();
+        for (const l of links) {
+          const tid = Number(l.type_id);
+          if (!byType.has(tid)) byType.set(tid, new Set<number>());
+          byType.get(tid)!.add(Number(l.model_id));
+        }
+        let accIds: number[] | null = null;
+        for (const val of configValues) {
+          const ids = [...(byType.get(val) ?? new Set<number>())];
+          accIds = accIds === null ? ids : ids.filter((x) => accIds!.includes(x));
+        }
+        configRoomIds = accIds ? new Set<number>(accIds) : null;
+      }
+
+      const whereRT: any = { deleted_at: null, status: 1 };
+      if (rateId) whereRT.rate_rates = { some: { rate_id: rateId } };
+      const roomTypes = await prisma.room_types.findMany({ where: whereRT, include: { rooms: { select: { id: true } } } });
+
+      const overbookingMinByType = new Map<number, number>();
+      for (const ob of overbookings) {
+        const tid = Number(ob.room_type_id);
+        const v = Number(ob.overbooking);
+        overbookingMinByType.set(tid, Math.min(overbookingMinByType.get(tid) ?? Infinity, v));
+      }
+
+      const data: any[] = [];
+      for (const rt of roomTypes) {
+        const tid = Number(rt.id);
+        let availRooms = rt.rooms.filter((r: any) => availableIds.has(Number(r.id))).length;
+        if (configRoomIds !== null) {
+          availRooms = rt.rooms.filter((r: any) => availableIds.has(Number(r.id)) && configRoomIds.has(Number(r.id))).length;
+        }
+        const min = overbookingMinByType.get(tid) ?? 0;
+        const available = availRooms + (Number.isFinite(min) ? min : 0);
+        const arrForType = arr.filter((a: any) => a.room_type_id === tid);
+        data.push({
+          id: tid,
+          room_type: rt.name,
+          available,
+          description: rt.description,
+          qty: arrForType.length,
+          adult: arrForType.length > 0 ? (arrForType[0].adult ?? 2) : 2,
+          child: arrForType.length > 0 ? (arrForType[0].child ?? 0) : 0,
+          item: bigintToNumber(rt),
+        });
+      }
+      const filtered = data.filter((d: any) => d.available > 0);
+      const totalData = filtered.length;
+      res.json({ data: filtered, code: 200, message: 'Success', table, pagging: paggingMetaLocal(totalData, 9999, 1), permission: { view: true, add: true, edit: true, delete: true } });
+    } catch (err: any) { console.error('Reservation room git error:', err); error(res, 'Failed to get room git', 500); }
+  }
+
+  // ─────────────────────────────────────────────
+  // PUT /cms/reservation/update-room-parent-git/:id (Laravel updateRoomParentGIT)
+  // ─────────────────────────────────────────────
+  static async updateRoomParentGIT(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const body = req.body || {};
+      const reservationList: any[] = Array.isArray(body.reservation_list) ? body.reservation_list : [];
+      if (!raw || !/^\d+$/.test(raw)) { badRequest(res, 'The folio id field is required.'); return; }
+      if (reservationList.length === 0) { badRequest(res, 'The reservation list field is required.'); return; }
+      const folioId = BigInt(raw);
+
+      const folio = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+      const children = await prisma.folios.findMany({
+        where: { parent: folioId, status_reservation: { not: STATUS_RESERVATION.cancel_reservation.id } },
+        include: { reservations: true },
+      });
+      const arr: any[] = [];
+      let rateId: bigint | null = null;
+      for (const child of children) {
+        if (child.reservations.length > 0) {
+          const r = child.reservations[0];
+          arr.push({ folio_id: Number(child.id), room_type_id: Number(r.room_type_id ?? 0) });
+          if (!rateId && r.rate_id) rateId = r.rate_id;
+        }
+      }
+      const ci = fmtDateOnly(folio.check_in_date) || '';
+      const co = fmtDateOnly(folio.check_out_date) || '';
+      if (!ci || !co) { badRequest(res, 'Check in date required'); return; }
+
+      const [overbookings, availableIds] = await Promise.all([
+        prisma.overbookings.findMany({ where: { date: { gte: new Date(ci), lte: new Date(co) } } }),
+        folio.property_id ? onlyAvailableRoomIds(folio.property_id, ci, co) : Promise.resolve(new Set<number>()),
+      ]);
+
+      const whereRT: any = { deleted_at: null, status: 1 };
+      if (rateId) whereRT.rate_rates = { some: { rate_id: rateId } };
+      const roomTypes = await prisma.room_types.findMany({ where: whereRT, include: { rooms: { select: { id: true } } } });
+
+      const overbookingMinByType = new Map<number, number>();
+      for (const ob of overbookings) {
+        const tid = Number(ob.room_type_id);
+        const v = Number(ob.overbooking);
+        overbookingMinByType.set(tid, Math.min(overbookingMinByType.get(tid) ?? Infinity, v));
+      }
+
+      const data: any[] = [];
+      for (const rt of roomTypes) {
+        const tid = Number(rt.id);
+        const availRooms = rt.rooms.filter((r: any) => availableIds.has(Number(r.id))).length;
+        const min = overbookingMinByType.get(tid) ?? 0;
+        const arrForType = arr.filter((a: any) => a.room_type_id === tid);
+        data.push({
+          id: tid,
+          room_type: rt.name,
+          available: availRooms + (Number.isFinite(min) ? min : 0),
+          description: rt.description,
+          qty: arrForType.length,
+          folio_id: arrForType.map((a: any) => a.folio_id),
+        });
+      }
+
+      const arrTemp: any[] = [];
+      for (const value of data) {
+        const checkQty = reservationList.find((rl: any) => String(rl.id) === String(value.id));
+        const newQty = checkQty ? Number(checkQty.qty) - value.qty : 0 - value.qty;
+        if (value.available < newQty) {
+          res.status(400).json({ code: 400, newQty, available: value.available, message: `Room Type ${value.room_type} is not available` });
+          return;
+        }
+        arrTemp.push({ room_type_id: value.id, qty: newQty, folio_id: value.folio_id });
+      }
+
+      const businessDate = (await import('../controllers/auth.controller')).AuthController.getBusinessDate(folio.property_id);
+      const numberIndexRaw = children.length > 0 ? Math.max(...children.map((c: any) => {
+        const last = String(c.folio_number ?? '').split('/').pop();
+        const n = parseInt(last ?? '0', 10);
+        return Number.isNaN(n) ? 0 : n;
+      })) + 1 : 1;
+      let numberIndex = Number.isFinite(numberIndexRaw) ? numberIndexRaw : 1;
+
+      for (const value of arrTemp) {
+        if (value.qty > 0) {
+          for (let i = 0; i < value.qty; i++) {
+            let sourceChild: any;
+            if (!value.folio_id || value.folio_id.length === 0) {
+              sourceChild = children[children.length - 1];
+            } else {
+              sourceChild = children.find((c: any) => value.folio_id.includes(Number(c.id)));
+            }
+            if (!sourceChild) continue;
+            const { id: _srcId, folio_number: _srcNum, created_at: _ca, updated_at: _ua, ...copyFields } = sourceChild;
+            let newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
+            let exists = await prisma.folios.findFirst({ where: { folio_number: newFolioNumber } });
+            while (exists) {
+              numberIndex++;
+              newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
+              exists = await prisma.folios.findFirst({ where: { folio_number: newFolioNumber } });
+            }
+            const bd = await businessDate;
+            const replicated = await prisma.folios.create({
+              data: {
+                ...copyFields,
+                parent: folioId,
+                folio_number: newFolioNumber,
+                type_reservation: folio.type_reservation,
+                check_in_date: folio.check_in_date && folio.check_in_date < new Date(bd) ? new Date(bd) : folio.check_in_date,
+                check_out_date: folio.check_out_date,
+                status_reservation: STATUS_RESERVATION.reservation.id,
+                created_at: new Date(),
+                updated_at: new Date(),
+              },
+            });
+            numberIndex++;
+            const sourceReservation = sourceChild.reservations?.[0];
+            if (sourceReservation) {
+              const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / (1000 * 60 * 60 * 24)));
+              for (let n = 0; n < nights; n++) {
+                const nightDate = new Date(ci);
+                nightDate.setDate(nightDate.getDate() + n);
+                await prisma.reservations.create({
+                  data: {
+                    property_id: sourceReservation.property_id,
+                    folio_id: replicated.id,
+                    rate_id: sourceReservation.rate_id,
+                    eta: sourceReservation.eta,
+                    etd: sourceReservation.etd,
+                    room_type_id: BigInt(value.room_type_id),
+                    room_id: null,
+                    check_in_date: new Date(ci),
+                    check_out_date: new Date(co),
+                    adult: sourceReservation.adult,
+                    child: sourceReservation.child,
+                    add_bed: sourceReservation.add_bed,
+                    date: nightDate,
+                    status_reservation: STATUS_RESERVATION.reservation.id,
+                    status: STATUS_ACTIVE,
+                    night: nights,
+                    amount: 0,
+                    amountt: 0,
+                    total: 0,
+                    service_charge: 0,
+                    pb1: 0,
+                    tax3: 0,
+                    created_by: req.user?.id,
+                  },
+                });
+              }
+            }
+          }
+        } else if (value.qty < 0) {
+          for (let i = 0; i < Math.abs(value.qty); i++) {
+            const cancelTargets = value.folio_id.length > 0 ? children.filter((c: any) => value.folio_id.includes(Number(c.id))) : [];
+            const cancelTarget = cancelTargets[cancelTargets.length - 1];
+            if (!cancelTarget) continue;
+            if (cancelTarget.status_reservation === STATUS_RESERVATION.check_in.id || cancelTarget.status_reservation === STATUS_RESERVATION.check_out.id) continue;
+            await prisma.folios.update({
+              where: { id: cancelTarget.id },
+              data: {
+                status_reservation: STATUS_RESERVATION.cancel_reservation.id,
+                parent: 0,
+                remark: `Deleted from Parent GIT => ${folio.folio_number}`,
+              },
+            });
+          }
+        }
+      }
+
+      res.json({ code: 200, message: 'Success', data: arrTemp });
+    } catch (err: any) { console.error('Reservation update room parent git error:', err); error(res, 'Failed to update room parent git', 500); }
   }
 }
