@@ -99,6 +99,27 @@ function toNumber(value: any, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+export function normalizeSystemBalanceType(rawType?: string): string {
+  const normalized = String(rawType ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[-_\s]+/g, '');
+
+  const aliases: Record<string, string> = {
+    advance: 'deposit',
+    advancedepositmovement: 'deposit',
+    guest: 'ledger',
+    guestledgermovement: 'ledger',
+    payment: 'payment',
+    posting: 'posting',
+    tax: 'tax',
+    deposit: 'deposit',
+    ledger: 'ledger',
+  };
+
+  return aliases[normalized] ?? normalized;
+}
+
 export function formatSystemBalanceData(rows: any[], type: string) {
   const mapped = rows.map((item: any) => ({
     id: type === 'payment' ? Number(item.code_id ?? item.id ?? 0) : 0,
@@ -325,15 +346,15 @@ export class SystemController {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
       const rawType = Array.isArray(req.params.type) ? req.params.type[0] : (req.params.type ?? '');
-      const type = rawType.toLowerCase();
+      const mappedType = normalizeSystemBalanceType(rawType);
       const date = req.query.date as string;
 
-      if (!['payment', 'posting', 'tax', 'deposit', 'ledger'].includes(type)) {
+      if (!['payment', 'posting', 'tax', 'deposit', 'ledger'].includes(mappedType)) {
         badRequest(res, 'Invalid system balance type');
         return;
       }
 
-      const where: any = { property_id: propertyId, type };
+      const where: any = { property_id: propertyId };
       if (date) {
         const dateObj = new Date(date);
         if (Number.isNaN(dateObj.getTime())) {
@@ -347,6 +368,22 @@ export class SystemController {
         where.date = { gte: start, lt: end };
       }
 
+      // Cumulative logic (Laravel SystemBalanceController parity):
+      // posting = sum(posting) + sum(payment)
+      // tax = sum(tax) + sum(posting + payment)
+      // deposit = sum(deposit) + sum(payment + posting + tax)
+      // ledger = sum(ledger) + sum(payment + posting + tax + deposit)
+      const cumulativeTypes: Record<string, string[]> = {
+        payment: ['payment'],
+        posting: ['posting', 'payment'],
+        tax: ['tax', 'posting', 'payment'],
+        deposit: ['deposit', 'tax', 'posting', 'payment'],
+        ledger: ['ledger', 'deposit', 'tax', 'posting', 'payment'],
+      };
+
+      const typesToQuery = cumulativeTypes[mappedType] ?? [mappedType];
+      where.type = { in: typesToQuery };
+
       const rows = await getPrisma().system_balances.findMany({
         where,
         orderBy: { id: 'asc' },
@@ -359,7 +396,7 @@ export class SystemController {
           debit: row.debit ?? 0,
           credit: row.credit ?? 0,
         })),
-        type
+        mappedType
       );
 
       success(res, payload.data, 'Success', 200, {
@@ -377,7 +414,7 @@ export class SystemController {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
       const rawType = Array.isArray(req.params.type) ? req.params.type[0] : (req.params.type ?? req.query.type ?? '');
-      const type = String(rawType).toLowerCase();
+      const mappedType = normalizeSystemBalanceType(rawType);
       const id = (req.params.id ?? req.query.id as string ?? '').toString();
       const date = req.query.date as string;
 
@@ -407,7 +444,7 @@ export class SystemController {
         date: { gte: start, lt: end },
       };
 
-      if (type === 'payment') {
+      if (mappedType === 'payment') {
         where.type_payment_id = BigInt(id);
       } else {
         where.code = String(id);
@@ -425,7 +462,7 @@ export class SystemController {
         credit: row.type_amount === 'PLUS' ? toNumber(row.amount) : 0,
       }));
 
-      const payload = formatSystemBalanceData(mapped, type || 'payment');
+      const payload = formatSystemBalanceData(mapped, mappedType || 'payment');
       success(res, payload.data, 'Success', 200, {
         table: payload.table,
         pagging: payload.pagging,

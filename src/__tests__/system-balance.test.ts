@@ -1,4 +1,4 @@
-import { formatSystemBalanceData } from '../controllers/system.controller';
+import { formatSystemBalanceData, normalizeSystemBalanceType } from '../controllers/system.controller';
 
 describe('system balance parity', () => {
   test('maps rows to Laravel payment payload with total row and table metadata', () => {
@@ -18,5 +18,12 @@ describe('system balance parity', () => {
       expect.objectContaining({ key: 'credit' }),
     ]));
     expect(payload.pagging).toMatchObject({ per_page: 99999, current_page: 1 });
+  });
+
+  test('accepts legacy camelCase frontend route aliases', () => {
+    expect(normalizeSystemBalanceType('advanceDepositMovement')).toBe('deposit');
+    expect(normalizeSystemBalanceType('guestLedgerMovement')).toBe('ledger');
+    expect(normalizeSystemBalanceType('deposit')).toBe('deposit');
+    expect(normalizeSystemBalanceType('ledger')).toBe('ledger');
   });
 });
