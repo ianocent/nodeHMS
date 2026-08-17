@@ -93,6 +93,11 @@ router.post('/setting', authMiddleware, AdminController.settingStore);
 // Singular aliases for tasks
 router.get('/task', authMiddleware, AdminController.taskList);
 router.post('/task', authMiddleware, AdminController.taskStore);
+router.post('/task/mark-hk-read', authMiddleware, AdminController.taskMarkHkRead);
+router.put('/task/:id/read', authMiddleware, AdminController.taskMarkAsRead);
+router.put('/task/:id', authMiddleware, AdminController.taskUpdate);
+router.post('/task/:id/reply', authMiddleware, AdminController.taskReply);
+router.get('/task/:id/thread', authMiddleware, AdminController.taskThread);
 
 // Generic CRUD routes (Phase 5.2)
 router.get('/generic/:model', authMiddleware, genericController.list);

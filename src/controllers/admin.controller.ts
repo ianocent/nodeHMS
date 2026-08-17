@@ -17,6 +17,9 @@ function getPrisma() {
   return adminPrisma;
 }
 
+// In-memory stand-in for Laravel Cache (hk notification read keys)
+const taskHkReadCache = new Map<string, any>();
+
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
@@ -755,6 +758,146 @@ export class AdminController {
       });
       success(res, bigintToNumber(task), 'Task created');
     } catch (err: any) { error(res, 'Failed to create task', 500); }
+  }
+
+  // Laravel TaskController@markAsRead (PUT /task/:id/read) — also routes hk_/insp_ prefix to markHkRead
+  static async taskMarkAsRead(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const user = req.user!;
+      if (!raw) { badRequest(res, 'Task not found'); return; }
+
+      if (String(raw).startsWith('hk_') || String(raw).startsWith('insp_')) {
+        const roomId = String(raw).replace(/^(hk_|insp_)/, '');
+        const type = String(raw).startsWith('insp_') ? 'inspection_required' : 'housekeeper_assignment';
+        const body = req.body || {};
+        const hk = await AdminController.taskMarkHkReadInner(user, type, roomId, body.date);
+        res.json(hk);
+        return;
+      }
+
+      const task = await getPrisma().tasks.findUnique({ where: { id: BigInt(raw) } });
+      if (!task) { notFound(res, 'Task not found'); return; }
+      await getPrisma().task_reads.upsert({
+        where: { task_id_user_id: { task_id: task.id, user_id: user.id } },
+        create: { task_id: task.id, user_id: user.id, read_at: new Date() },
+        update: { read_at: new Date() },
+      });
+      res.json({ code: 200, message: 'Task marked as read' });
+    } catch (err: any) { console.error('Task mark as read error:', err); error(res, 'Failed to mark task as read', 500); }
+  }
+
+  // Laravel TaskController@markHkRead (POST /task/mark-hk-read)
+  static async taskMarkHkRead(req: Request, res: Response): Promise<void> {
+    try {
+      const body = req.body || {};
+      const hk = await AdminController.taskMarkHkReadInner(req.user!, body.type, body.room_id, body.date);
+      res.json(hk);
+    } catch (err: any) { console.error('Task mark hk read error:', err); error(res, 'Failed to mark notification as read', 500); }
+  }
+
+  private static async taskMarkHkReadInner(user: any, type: string, roomId: string, date: string): Promise<any> {
+    if (!roomId) return { code: 400, message: 'Room ID is required' };
+    const day = date || new Date().toISOString().substring(0, 10);
+    taskHkReadCache.set(`hk_notification_read_${user.id}_${type}_${roomId}_${day}`, true);
+    taskHkReadCache.set(`${`hk_notification_read_${user.id}_${type}_${roomId}_${day}`}_time`, new Date().toISOString());
+    return {
+      code: 200,
+      message: 'Notification marked as read',
+      is_read: true,
+      id: `${type === 'inspection_required' ? 'insp_' : 'hk_'}${roomId}`,
+    };
+  }
+
+  // Laravel TaskController@update (PUT /task/:id)
+  static async taskUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Task not found'); return; }
+      const status = String(req.body?.status ?? '');
+      if (!['Open', 'In Progress', 'Closed'].includes(status)) { badRequest(res, 'The selected status is invalid.'); return; }
+      const task = await getPrisma().tasks.update({
+        where: { id: BigInt(raw) },
+        data: { status: status as any, updated_at: new Date() },
+      });
+      res.json({ code: 200, message: 'Task status updated successfully', data: bigintToNumber(task) });
+    } catch (err: any) { console.error('Task update error:', err); error(res, 'Failed to update task', 500); }
+  }
+
+  // Laravel TaskController@reply (POST /task/:id/reply)
+  static async taskReply(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Task not found'); return; }
+      const message = String(req.body?.message ?? '');
+      if (!message) { badRequest(res, 'The message field is required.'); return; }
+      const parent = await getPrisma().tasks.findUnique({ where: { id: BigInt(raw) } });
+      if (!parent) { notFound(res, 'Task not found'); return; }
+      const reply = await getPrisma().tasks.create({
+        data: {
+          created_by: req.user!.id,
+          parent_id: parent.id,
+          message,
+          type: 'Reply',
+          status: 'Open',
+          created_on: new Date(),
+          room_number: parent.room_number,
+          to_user_id: parent.created_by,
+          to_role_id: null,
+          created_at: new Date(),
+          updated_at: new Date(),
+        },
+      });
+      res.json({ code: 200, message: 'Reply sent successfully', data: bigintToNumber(reply) });
+    } catch (err: any) { console.error('Task reply error:', err); error(res, 'Failed to send reply', 500); }
+  }
+
+  // Laravel TaskController@thread (GET /task/:id/thread)
+  static async taskThread(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!raw || !/^\d+$/.test(raw)) { notFound(res, 'Task not found'); return; }
+      const user = req.user!;
+      const task = await getPrisma().tasks.findUnique({
+        where: { id: BigInt(raw) },
+        include: { users_tasks_created_byTousers: { select: { id: true, name: true, username: true } } },
+      });
+      if (!task) { notFound(res, 'Task not found'); return; }
+      const replies = await getPrisma().tasks.findMany({
+        where: { parent_id: task.id },
+        include: { users_tasks_created_byTousers: { select: { id: true, name: true, username: true } } },
+        orderBy: { created_at: 'asc' },
+      });
+      const myReads = await getPrisma().task_reads.findMany({ where: { user_id: user.id, task_id: { in: [task.id, ...replies.map(r => r.id)] } }, select: { task_id: true } });
+      const readIds = new Set(myReads.map(r => r.task_id.toString()));
+      const fmt = (d: any) => (d instanceof Date ? d.toISOString().substring(0, 16).replace('T', ' ') : String(d ?? '').substring(0, 16));
+      const fromName = (createdBy: bigint, creator: any) => creator?.name || creator?.username || `User #${createdBy}`;
+      const taskFrom = task.created_by === user.id ? 'You' : fromName(task.created_by, task.users_tasks_created_byTousers);
+      res.json({
+        code: 200,
+        data: {
+          task: {
+            id: Number(task.id),
+            message: task.message,
+            type: task.type,
+            status: task.status,
+            created_at: fmt(task.created_at),
+            room_number: task.room_number,
+            from: taskFrom,
+            isMe: task.created_by === user.id,
+            is_read: readIds.has(task.id.toString()),
+          },
+          replies: replies.map(r => ({
+            id: Number(r.id),
+            message: r.message,
+            created_at: fmt(r.created_at),
+            from: r.created_by === user.id ? 'You' : fromName(r.created_by, r.users_tasks_created_byTousers),
+            isMe: r.created_by === user.id,
+            is_read: readIds.has(r.id.toString()),
+          })),
+        },
+      });
+    } catch (err: any) { console.error('Task thread error:', err); error(res, 'Failed to load thread', 500); }
   }
 
   // ================================================================
