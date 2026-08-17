@@ -27,6 +27,7 @@ import genericRoutes from './routes/generic.routes';
 import extraRoutes from './routes/extra.routes';
 import contentRoutes from './routes/content.routes';
 import { firebaseRoutes } from './controllers/firebase.controller';
+import { bookingRoutes } from './routes/booking.routes';
 import { initQueue } from './config/queue';
 
 const app: Express = express();
@@ -179,6 +180,9 @@ mountLegacyCmsAlias(contentRoutes);
 app.use('/api', firebaseRoutes);
 app.use('/cms', firebaseRoutes);
 mountLegacyCmsAlias(firebaseRoutes);
+
+// Mobile booking engine (Laravel web.php parity, public)
+app.use('/booking', bookingRoutes);
 
 // ============================================================
 // 404 Catch-all
