@@ -1125,7 +1125,7 @@ prisma.room_types.findMany({
       const endDateStr = req.query.end_date as string;
 
       if (!rateIdParam || !/^\d+$/.test(rateIdParam)) {
-        this.emptyGrid(res);
+        RateController.emptyGrid(res);
         return;
       }
 

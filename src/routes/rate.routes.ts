@@ -131,6 +131,15 @@ router.get('/bar-rate/create', authMiddleware, requirePermission(87, 'add'), Rat
 router.post('/bar-rate', authMiddleware, requirePermission(87, 'add'), RateController.barRateStore);
 router.put('/bar-rate', authMiddleware, requirePermission(87, 'edit'), RateController.barRateUpdate);
 
+// ── /bar/rate parity aliases (Laravel BarRateController: index/create/store/update) ──
+router.get('/bar/rate', authMiddleware, requirePermission(87, 'view'), RateController.barRateIndex);
+router.post('/bar/rate', authMiddleware, requirePermission(87, 'view'), RateController.barRateIndex);
+router.get('/bar/rate/create', authMiddleware, requirePermission(87, 'add'), RateController.barRateCreate);
+router.post('/bar/rate/store', authMiddleware, requirePermission(87, 'add'), RateController.barRateStore);
+router.put('/bar/rate/:id', authMiddleware, requirePermission(87, 'edit'), RateController.barRateUpdate);
+// /bar/rate-link-listing parity (Laravel BarRelationController::link)
+router.get('/bar/rate-link-listing', authMiddleware, requirePermission(87, 'view'), RateController.rateLinkListing);
+
 // Short alias: /rate/:id/update — frontend form edit URL
 router.get('/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.edit);
 
