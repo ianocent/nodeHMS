@@ -5,6 +5,8 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { AuthController } from './auth.controller';
+import { moneyFormat } from '../utils/cmsConfig';
 
 // Laravel storage/app/public parity — files served at /storage/{path}
 const STORAGE_DIR = path.join(process.cwd(), 'storage');
@@ -84,6 +86,51 @@ function bigintToNumber(val: any): any {
 function idParam(val: any): bigint {
   if (Array.isArray(val)) return BigInt(val[0]);
   return BigInt(val);
+}
+
+const SYSTEM_BALANCE_TABLE = [
+  { label: '', key: 'name', type: 'none', is_html: true, is_search: false },
+  { label: 'Debit', key: 'debit', type: 'none', is_html: true, is_search: false },
+  { label: 'Credit', key: 'credit', type: 'none', is_html: true, is_search: false },
+];
+
+function toNumber(value: any, fallback = 0): number {
+  const num = Number(value ?? fallback);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+export function formatSystemBalanceData(rows: any[], type: string) {
+  const mapped = rows.map((item: any) => ({
+    id: type === 'payment' ? Number(item.code_id ?? item.id ?? 0) : 0,
+    name: item.name ?? '',
+    debit: toNumber(item.debit),
+    credit: toNumber(item.credit),
+  }));
+
+  const debitTotal = mapped.reduce((sum, row) => sum + row.debit, 0);
+  const creditTotal = mapped.reduce((sum, row) => sum + row.credit, 0);
+
+  const total = {
+    id: 0,
+    name: '<b>Total</b>',
+    is_total: true,
+    debit: '<b>' + moneyFormat(debitTotal < 0 ? debitTotal * -1 : debitTotal) + '</b>',
+    credit: '<b>' + moneyFormat(creditTotal < 0 ? creditTotal * -1 : creditTotal) + '</b>',
+  };
+
+  return {
+    data: [...mapped, total],
+    table: SYSTEM_BALANCE_TABLE,
+    pagging: {
+      current_page: 1,
+      last_page: 1,
+      per_page: 99999,
+      total: mapped.length + 1,
+      from: 1,
+      to: mapped.length + 1,
+    },
+    permission: { view: true, add: false, edit: false, delete: false },
+  };
 }
 
 export class SystemController {
@@ -276,49 +323,117 @@ export class SystemController {
 
   static async systemBalance(req: Request, res: Response): Promise<void> {
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 10;
       const propertyId = req.user?.lastProperty ?? 0n;
-      const type = req.params.type as string;
+      const rawType = Array.isArray(req.params.type) ? req.params.type[0] : (req.params.type ?? '');
+      const type = rawType.toLowerCase();
       const date = req.query.date as string;
 
-      const where: any = { property_id: propertyId };
-
-      if (type) {
-        where.type = type;
+      if (!['payment', 'posting', 'tax', 'deposit', 'ledger'].includes(type)) {
+        badRequest(res, 'Invalid system balance type');
+        return;
       }
 
+      const where: any = { property_id: propertyId, type };
       if (date) {
         const dateObj = new Date(date);
-        dateObj.setHours(0, 0, 0, 0);
-        const nextDay = new Date(dateObj);
-        nextDay.setDate(nextDay.getDate() + 1);
-        where.date = { gte: dateObj, lt: nextDay };
+        if (Number.isNaN(dateObj.getTime())) {
+          badRequest(res, 'date must be a valid date');
+          return;
+        }
+        const start = new Date(dateObj);
+        start.setHours(0, 0, 0, 0);
+        const end = new Date(start);
+        end.setDate(end.getDate() + 1);
+        where.date = { gte: start, lt: end };
       }
 
-      const [data, total] = await Promise.all([
-        getPrisma().system_balances.findMany({
-          where,
-          orderBy: { id: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
-        getPrisma().system_balances.count({ where }),
-      ]);
+      const rows = await getPrisma().system_balances.findMany({
+        where,
+        orderBy: { id: 'asc' },
+      });
 
-      success(res, bigintToNumber(data), 'Success', 200, {
-        pagging: {
-          current_page: page,
-          last_page: Math.ceil(total / limit),
-          per_page: limit,
-          total,
-          from: (page - 1) * limit + 1,
-          to: Math.min(page * limit, total),
-        },
+      const payload = formatSystemBalanceData(
+        rows.map((row: any) => ({
+          id: Number(row.code_id ?? 0),
+          name: row.name ?? '',
+          debit: row.debit ?? 0,
+          credit: row.credit ?? 0,
+        })),
+        type
+      );
+
+      success(res, payload.data, 'Success', 200, {
+        table: payload.table,
+        pagging: payload.pagging,
+        permission: payload.permission,
       });
     } catch (err: any) {
       console.error('System balance error:', err);
       error(res, 'Failed to fetch system balance', 500);
+    }
+  }
+
+  static async getListByIdPost(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const rawType = Array.isArray(req.params.type) ? req.params.type[0] : (req.params.type ?? req.query.type ?? '');
+      const type = String(rawType).toLowerCase();
+      const id = (req.params.id ?? req.query.id as string ?? '').toString();
+      const date = req.query.date as string;
+
+      if (!id) {
+        badRequest(res, 'id is required');
+        return;
+      }
+
+      if (!date) {
+        badRequest(res, 'date is required');
+        return;
+      }
+
+      const dateObj = new Date(date);
+      if (Number.isNaN(dateObj.getTime())) {
+        badRequest(res, 'date must be a valid date');
+        return;
+      }
+
+      const start = new Date(dateObj);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+
+      const where: any = {
+        property_id: propertyId,
+        date: { gte: start, lt: end },
+      };
+
+      if (type === 'payment') {
+        where.type_payment_id = BigInt(id);
+      } else {
+        where.code = String(id);
+      }
+
+      const rows = await getPrisma().transaction_breakdowns.findMany({
+        where,
+        orderBy: { created_at: 'desc' },
+      });
+
+      const mapped = rows.map((row: any) => ({
+        id: Number(row.id ?? 0),
+        name: `${row.folios?.folio_number ?? ''} ( ${String(row.type ?? '').replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())} )${row.is_transfer === 1 || row.is_transfer === 2 ? ` (${row.remark ?? ''})` : ''}`.trim(),
+        debit: row.type_amount === 'MINUS' ? toNumber(row.amount) : 0,
+        credit: row.type_amount === 'PLUS' ? toNumber(row.amount) : 0,
+      }));
+
+      const payload = formatSystemBalanceData(mapped, type || 'payment');
+      success(res, payload.data, 'Success', 200, {
+        table: payload.table,
+        pagging: payload.pagging,
+        permission: payload.permission,
+      });
+    } catch (err: any) {
+      console.error('System balance detail error:', err);
+      error(res, 'Failed to fetch system balance detail', 500);
     }
   }
 
@@ -914,42 +1029,39 @@ export class SystemController {
   // ==================== DASHBOARD ====================
   static async getDashboard(req: Request, res: Response): Promise<void> {
     try {
-      const startDate = req.query.start_date as string;
-      const endDate = req.query.end_date as string;
       const propertyId = req.user?.lastProperty ?? 0n;
+      const roleIds: bigint[] = (req.user as any)?.roleIds ?? [];
+
+      // Laravel DashboardController@index: role = user's first role (developer/anyaman bypass global property scope — node has no such scope)
+      const role = await getPrisma().roles.findFirst({
+        where: roleIds.length ? { id: roleIds[0] } : undefined,
+        select: { list_dashboard: true },
+      });
+
+      if (!role?.list_dashboard) {
+        const payload = { data: [], code: 200, message: 'Role not found' };
+        res.status(400).type('text/plain').send(encrypt(JSON.stringify(payload)));
+        return;
+      }
+
+      const listDashboard = Array.isArray(role.list_dashboard)
+        ? role.list_dashboard
+        : typeof role.list_dashboard === 'string'
+          ? role.list_dashboard.split(',').filter(Boolean)
+          : [];
+
+      const businessDate = await AuthController.getBusinessDate(propertyId);
+      const sd = (req.query.start_date as string) || businessDate;
+      const ed = (req.query.end_date as string) || new Date(new Date(businessDate + 'T00:00:00Z').getTime() + 7 * 86400000).toISOString().substring(0, 10);
+      const dateLog = (req.query.dateLog as string) || businessDate;
 
       const property = await getPrisma().properties.findUnique({
         where: { id: propertyId },
         select: { id: true, name: true, alias: true, logo: true, image: true, address: true, email: true, telp: true },
       });
 
-      const today = new Date().toISOString().split('T')[0];
-
-      const [totalRooms, occupiedRooms, arrivalsCount, departuresCount, inHouseCount, revenueResult] = await Promise.all([
-        getPrisma().rooms.count({ where: { property_id: propertyId, deleted_at: null } }),
-        getPrisma().rooms.count({ where: { property_id: propertyId, deleted_at: null, room_status: 1 } }),
-        getPrisma().folios.count({ where: { property_id: propertyId, deleted_at: null, check_in_date: { gte: new Date(today), lt: new Date(new Date(today).getTime() + 86400000) }, status_reservation: { in: [1, 2] } } }),
-        getPrisma().folios.count({ where: { property_id: propertyId, deleted_at: null, check_out_date: { gte: new Date(today), lt: new Date(new Date(today).getTime() + 86400000) }, status_reservation: { in: [1, 2, 3] } } }),
-        getPrisma().folios.count({ where: { property_id: propertyId, deleted_at: null, status_reservation: 2, is_pos_trx: false } }),
-        getPrisma().transactions.aggregate({ where: { property_id: propertyId, deleted_at: null, is_void: 0, date: { gte: new Date(today), lt: new Date(new Date(today).getTime() + 86400000) } }, _sum: { total: true } }),
-      ]);
-
-      const occupancyPct = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 100) : 0;
-      const revenueTotal = Number(revenueResult._sum?.total ?? 0);
-
-      const widgets = [
-        { type: 'total_rooms', label: 'Total Rooms', value: totalRooms, header: 'Total Rooms', svg: 'home', link: '/room', is_total: true },
-        { type: 'occupancy', label: 'Occupancy', value: `${occupancyPct}%`, header: 'Occupancy Rate', svg: 'chart-bar', link: '/statistic/occupancy', is_total: true },
-        { type: 'arrivals', label: 'Arrivals Today', value: arrivalsCount, header: 'Arrivals', svg: 'login', link: '/front-desk?type=check_in', is_total: true },
-        { type: 'departures', label: 'Departures Today', value: departuresCount, header: 'Departures', svg: 'logout', link: '/front-desk?type=check_out', is_total: true },
-        { type: 'in_house', label: 'In House', value: inHouseCount, header: 'In House Guests', svg: 'users', link: '/front-desk?type=in_house', is_total: true },
-        { type: 'revenue', label: 'Revenue Today', value: `Rp ${revenueTotal.toLocaleString('id-ID')}`, header: 'Revenue', svg: 'currency', link: '/report/daily', is_total: true },
-      ];
-
       const responsePayload = {
-        code: '200',
-        message: 'Data has been loaded',
-        data: widgets,
+        data: listDashboard,
         property: property ? {
           id: Number(property.id),
           name: property.name,
@@ -960,9 +1072,11 @@ export class SystemController {
           email: property.email,
           phone: property.telp ? Number(property.telp) : null,
         } : null,
-        dateLog: today,
-        start_date: startDate || today,
-        end_date: endDate || today,
+        dateLog,
+        start_date: sd,
+        end_date: ed,
+        code: 200,
+        message: 'Data has been loaded',
       };
       res.status(200).type('text/plain').send(encrypt(JSON.stringify(responsePayload)));
     } catch (err: any) {
@@ -986,128 +1100,361 @@ export class SystemController {
 
       let list: any[] = [];
       let detail: any = null;
+      const prisma = getPrisma();
+      const dateRangeOf = (d: string) => {
+        const s = new Date(d + 'T00:00:00Z');
+        return { s, e: new Date(s.getTime() + 86400000) };
+      };
+      const fmtDMY = (d: string) => {
+        const [y, m, dd] = d.split('-');
+        return `${dd}/${m}/${y}`;
+      };
+      const ROOM_STATUSES = ['Vacant', 'Occupied', 'Due Out', 'Blocked', 'Out of Order'];
+      const MAID_STATUSES = ['Clean', 'Dirty', 'Maid in Room', 'Inspection Required'];
+      const STATUS = { check_in: 0, check_out: 1, cancel: 2, reservation: 3, in_house: 4, pending: 5 };
 
-      switch (code) {
-        case 'total_rooms': {
-          const roomsByType = await getPrisma().rooms.groupBy({
-            by: ['room_type_id'],
-            where: { property_id: propertyId, deleted_at: null },
-            _count: { id: true },
+      // ==== Room.getListAndMaidStatusRoom parity (total_room / chart_room) ====
+      const computeRoomData = async () => {
+        const rooms = await prisma.rooms.findMany({
+          where: { property_id: propertyId, deleted_at: null, is_physical: true },
+          select: { room_status: true, maid_status: true },
+        });
+        const roomRows = [
+          { name: 'Total Rooms', data: rooms.length },
+          { name: 'OOO', data: rooms.filter(r => r.room_status === 4).length },
+          { name: 'Blocked Rooms', data: 0 },
+          { name: 'Saleable Room', data: rooms.filter(r => [0, 1, 2].includes(r.room_status)).length },
+        ];
+        const maidAll = MAID_STATUSES.map((alias, i) => ({ name: alias, data: rooms.filter(r => r.maid_status === i).length }));
+        return { roomRows, maidAll };
+      };
+
+      // ==== Reservation.getTransactionRevenueOnly + getRoomSoldPerDate parity (forecast charts) ====
+      const computeRevenueForecast = async () => {
+        const s = new Date(sd + 'T00:00:00Z');
+        const e = new Date(new Date(ed + 'T00:00:00Z').getTime() + 86400000);
+        const reservations = await prisma.reservations.findMany({
+          where: { property_id: propertyId, date: { gte: s, lt: e }, folios: { status_reservation: { not: STATUS.cancel } } },
+          select: { date: true, total: true, room_id: true, folios: { select: { status_reservation: true } } },
+        });
+        const totalRooms = await prisma.rooms.count({ where: { property_id: propertyId, deleted_at: null, is_physical: true } });
+        const TotalroomAvailable = totalRooms > 0 ? totalRooms : 1;
+
+        const byDate = new Map<string, { rev: number; sold: number }>();
+        for (const r of reservations) {
+          const key = r.date.toISOString().substring(0, 10);
+          const cur = byDate.get(key) || { rev: 0, sold: 0 };
+          cur.rev += Number(r.total ?? 0);
+          if (r.room_id != null && (r.folios?.status_reservation === STATUS.check_in || r.folios?.status_reservation === STATUS.reservation)) cur.sold += 1;
+          byDate.set(key, cur);
+        }
+
+        const totalSeries: any[] = [];
+        const revenueSeries: any[] = [];
+        const roomAvailableSeries: any[] = [];
+        const occupancySeries: any[] = [];
+        const statusSeries: any[][] = ROOM_STATUSES.map(() => []);
+        const formatDate: string[] = [];
+        let grandRev = 0;
+        let grandSold = 0;
+
+        for (let d = new Date(s); d < e; d.setUTCDate(d.getUTCDate() + 1)) {
+          const key = d.toISOString().substring(0, 10);
+          const v = byDate.get(key) || { rev: 0, sold: 0 };
+          const dateLabel = fmtDMY(key);
+          formatDate.push(dateLabel);
+          totalSeries.push({ name: dateLabel, data: v.rev, room_sold: v.sold });
+          revenueSeries.push({ name: dateLabel, data: moneyFormat(v.rev) });
+          roomAvailableSeries.push({ name: dateLabel, data: TotalroomAvailable });
+          const roomSold = v.sold > 0 ? v.sold : 1;
+          occupancySeries.push({ name: dateLabel, data: moneyFormat((roomSold / TotalroomAvailable) * 100) });
+          ROOM_STATUSES.forEach((_, idx) => {
+            const count = idx === 1 ? v.sold : idx === 0 ? Math.max(0, TotalroomAvailable - v.sold) : 0;
+            statusSeries[idx].push({ name: dateLabel, data: count });
           });
-          const roomTypes = await getPrisma().room_types.findMany({
-            where: { property_id: propertyId, deleted_at: null, status: 1 },
-            select: { id: true, name: true },
-          });
-          const typeMap = new Map(roomTypes.map(rt => [Number(rt.id), rt.name]));
-          for (const r of roomsByType) {
-            const typeId = Number(r.room_type_id);
-            const name = typeMap.get(typeId) || `Type #${typeId}`;
-            const total = r._count.id;
-            const occupied = await getPrisma().rooms.count({ where: { property_id: propertyId, deleted_at: null, room_type_id: BigInt(typeId), room_status: 1 } });
-            list.push({ name, Room: total, room: total - occupied });
-          }
-          if (list.length === 0) { list.push({ name: 'No Data', Room: 0, room: 0 }); }
-          detail = { type: 'number', label: 'Total Rooms', header: ['Room Type', 'Total', 'Available'], list, span: 4, link: '/room', is_total: true };
+          grandRev += v.rev;
+          grandSold += v.sold;
+        }
+        totalSeries.push({ name: 'Total', data: grandRev, room_sold: grandSold });
+
+        const chartAnalysis = [
+          { name: 'Room Available', data: roomAvailableSeries },
+          { name: 'Occupancy', data: occupancySeries },
+          ...ROOM_STATUSES.map((name, idx) => ({ name, data: statusSeries[idx] })),
+        ];
+
+        return {
+          total: totalSeries,
+          revenue: { data: revenueSeries },
+          chart: { data: chartAnalysis, date: formatDate },
+        };
+      };
+
+      // ==== Folio.getDeparture / getArrival parity ====
+      const getArrival = async () => {
+        const { s, e } = dateRangeOf(dateLog || sd);
+        const folios = await prisma.folios.findMany({
+          where: { property_id: propertyId, deleted_at: null, check_in_date: { gte: s, lt: e }, status_reservation: { in: [STATUS.check_in, STATUS.reservation] } },
+          select: { id: true, parent: true, type_reservation: true, status_reservation: true, company_profile_id: true, company_profiles_folios_company_profile_idTocompany_profiles: { select: { name: true } } },
+        });
+        const fit = (f: any) => (f.type_reservation || '').toLowerCase() === 'fit';
+        const git = (f: any) => (f.type_reservation || '').toLowerCase() === 'git' && Number(f.parent) !== 0;
+        const gitAll = (f: any) => (f.type_reservation || '').toLowerCase() === 'git';
+        const exp = (f: any) => fit(f) || git(f);
+        const act = (f: any) => f.status_reservation === STATUS.check_in && (fit(f) || git(f));
+        const fitExpected = folios.filter(fit).length;
+        const fitActual = folios.filter(f => f.status_reservation === STATUS.check_in && fit(f)).length;
+        const gitExpected = folios.filter(git).length;
+        const gitActual = folios.filter(f => f.status_reservation === STATUS.check_in && git(f)).length;
+        const groups = new Map<number, any[]>();
+        for (const f of folios.filter(gitAll)) {
+          const k = Number(f.company_profile_id);
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k)!.push(f);
+        }
+        return {
+          all: { expected: folios.filter(exp).length, actual: folios.filter(act).length, due_to_arrival: folios.filter(exp).length - folios.filter(act).length },
+          fit: { expected: fitExpected, actual: fitActual, due_to_arrival: fitExpected - fitActual },
+          git: { total_git: groups.size, expected: gitExpected, actual: gitActual, due_to_arrival: gitExpected - gitActual, groups },
+        };
+      };
+      const getDeparture = async () => {
+        const { s, e } = dateRangeOf(dateLog || sd);
+        const folios = await prisma.folios.findMany({
+          where: { property_id: propertyId, deleted_at: null, check_out_date: { gte: s, lt: e }, status_reservation: { in: [STATUS.check_in, STATUS.check_out] } },
+          select: { id: true, parent: true, type_reservation: true, status_reservation: true, company_profile_id: true, company_profiles_folios_company_profile_idTocompany_profiles: { select: { name: true } } },
+        });
+        const fit = (f: any) => (f.type_reservation || '').toLowerCase() === 'fit';
+        const git = (f: any) => (f.type_reservation || '').toLowerCase() === 'git' && Number(f.parent) !== 0;
+        const exp = (f: any) => fit(f) || git(f);
+        const act = (f: any) => f.status_reservation === STATUS.check_out && (fit(f) || git(f));
+        const fitExpected = folios.filter(fit).length;
+        const fitActual = folios.filter(f => f.status_reservation === STATUS.check_out && fit(f)).length;
+        const gitExpected = folios.filter(git).length;
+        const gitActual = folios.filter(f => f.status_reservation === STATUS.check_out && git(f)).length;
+        const groups = new Map<number, any[]>();
+        for (const f of folios.filter(git)) {
+          const k = Number(f.company_profile_id);
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k)!.push(f);
+        }
+        return {
+          all: { expected: folios.filter(exp).length, actual: folios.filter(act).length, due_to_departure: folios.filter(exp).length - folios.filter(act).length },
+          fit: { expected: fitExpected, actual: fitActual, due_to_departure: fitExpected - fitActual },
+          git: { total_git: groups.size, expected: gitExpected, actual: gitActual, due_to_departure: gitExpected - gitActual, groups },
+        };
+      };
+
+      // ==== Transaction.getRevenueDTD/MTD/YTD parity (today_revenue) ====
+      const revenueRange = async (from: Date, to: Date) => {
+        const defaultItems = await prisma.code_items.findMany({ where: { code_posts: { type: 'DEFAULT' } }, select: { id: true } });
+        const rows = await prisma.transactions.findMany({
+          where: {
+            property_id: propertyId, deleted_at: null, is_void: 0, date: { gte: from, lte: to },
+            folios: { status_reservation: { not: STATUS.cancel } },
+            code_item_id: { in: defaultItems.map(i => i.id) },
+          },
+          select: { amount: true, type_amount: true },
+        });
+        return rows.reduce((sum, t) => sum + (t.type_amount === 'MINUS' ? -1 : 1) * Number(t.amount), 0);
+      };
+
+      // ==== Reservation.getHouseUseComplimentary parity (house_use_complimentary) ====
+      const getHouseUseComplimentary = async () => {
+        const s = new Date(sd + 'T00:00:00Z');
+        const e = new Date(new Date(ed + 'T00:00:00Z').getTime() + 86400000);
+        const folios = await prisma.folios.findMany({
+          where: {
+            property_id: propertyId, deleted_at: null, status_reservation: { not: STATUS.cancel },
+            AND: [
+              { OR: [{ check_in_date: { gte: s, lte: e } }, { check_out_date: { gte: s, lte: e } }] },
+              { OR: [{ is_house_use: true }, { complimentary: true }] },
+            ],
+          },
+          select: { id: true, is_house_use: true, complimentary: true, type_reservation: true, first_name: true, last_name: true, reservations: { orderBy: { date: 'desc' }, take: 1, select: { room_name: true, rate_name: true } } },
+        });
+        const notGit = (f: any) => (f.type_reservation || '').toLowerCase() !== 'git';
+        const rows: any[] = [];
+        const houseuse = folios.filter(f => f.is_house_use && notGit(f));
+        rows.push({ name: 'House Use', data: `${houseuse.length} Room(s)` });
+        houseuse.forEach((f, i) => {
+          const r = f.reservations?.[0];
+          rows.push({ name: '', data: `${i + 1}. ${f.first_name || ''} ${f.last_name || ''}`.trim() + ` - ${r?.room_name || '-'} - ${r?.rate_name || '-'}` });
+        });
+        const comp = folios.filter(f => f.complimentary && notGit(f));
+        rows.push({ name: 'Complimentary', data: `${comp.length} Room(s)` });
+        comp.forEach((f, i) => {
+          const r = f.reservations?.[0];
+          rows.push({ name: '', data: `${i + 1}. ${f.first_name || ''} ${f.last_name || ''}`.trim() + ` - ${r?.room_name || '-'} - ${r?.rate_name || '-'}` });
+        });
+        return rows;
+      };
+
+      const normalizeDashboardCode = (rawCode?: string | string[]) => {
+        const codeKey = String(Array.isArray(rawCode) ? (rawCode[0] ?? '') : (rawCode ?? '')).trim();
+        const aliases: Record<string, string> = {
+          total_rooms: 'total_room',
+          occupancy: 'chart_room',
+          arrivals: 'arrival_git',
+          departures: 'departure',
+          in_house: 'total_arrival_git_fit',
+          revenue: 'today_revenue',
+          notification: 'notifications',
+          notifications_list: 'notifications',
+          guest_request: 'guest_requests',
+          guest_requests_list: 'guest_requests',
+        };
+        return aliases[codeKey] || codeKey;
+      };
+
+      const resolvedCode = normalizeDashboardCode(code);
+
+      switch (resolvedCode) {
+        case 'total_room': {
+          const { roomRows, maidAll } = await computeRoomData();
+          list = [...maidAll, ...roomRows];
+          detail = { type: 'number', span: '3', label: 'Total Room', header: ['Room', 'Amount'], list, link: '/room-statistic?parent=54&module=statistic', is_total: true };
           break;
         }
-        case 'occupancy': {
-          const roomsByType = await getPrisma().rooms.groupBy({
-            by: ['room_type_id'],
-            where: { property_id: propertyId, deleted_at: null },
-            _count: { id: true },
-          });
-          const roomTypes = await getPrisma().room_types.findMany({
-            where: { property_id: propertyId, deleted_at: null, status: 1 },
-            select: { id: true, name: true },
-          });
-          const typeMap = new Map(roomTypes.map(rt => [Number(rt.id), rt.name]));
-          for (const r of roomsByType) {
-            const typeId = Number(r.room_type_id);
-            const name = typeMap.get(typeId) || `Type #${typeId}`;
-            const total = r._count.id;
-            const occupied = await getPrisma().rooms.count({ where: { property_id: propertyId, deleted_at: null, room_type_id: BigInt(typeId), room_status: 1 } });
-            const rate = total > 0 ? `${Math.round((occupied / total) * 100)}%` : '0%';
-            list.push({ name, Room: occupied, room: rate });
-          }
-          if (list.length === 0) { list.push({ name: 'No Data', Room: 0, room: '0%' }); }
-          detail = { type: 'number', label: 'Occupancy', header: ['Room Type', 'Occupied', 'Rate'], list, span: 4, link: '/statistic/occupancy', is_total: true };
+        case 'chart_room': {
+          const { roomRows, maidAll } = await computeRoomData();
+          detail = { type: 'chart-bar', span: '3', label: 'Chart Room', list: [...maidAll, ...roomRows].filter((r: any) => r.name !== 'Total'), link: '/room-statistic?parent=54&module=statistic' };
           break;
         }
-        case 'arrivals': {
-          const todayStart = new Date(today);
-          const todayEnd = new Date(todayStart.getTime() + 86400000);
-          const arrivals = await getPrisma().folios.findMany({
-            where: { property_id: propertyId, deleted_at: null, check_in_date: { gte: todayStart, lt: todayEnd }, status_reservation: { in: [1, 2] } },
-            select: { id: true, first_name: true, last_name: true, folio_number: true, status_reservation: true },
-            orderBy: { check_in_date: 'asc' },
-            take: 20,
-          });
-          for (const f of arrivals) {
-            const name = `${f.first_name || ''} ${f.last_name || ''}`.trim() || f.folio_number || 'Guest';
-            const statusMap: Record<number, string> = { 0: 'Pending', 1: 'Reservation', 2: 'Check In', 3: 'Check Out', 4: 'Cancelled' };
-            list.push({ name, Room: f.folio_number || '-', room: statusMap[f.status_reservation ?? 0] || 'Unknown' });
-          }
-          if (list.length === 0) { list.push({ name: 'No arrivals today', Room: '-', room: '-' }); }
-          detail = { type: 'number', label: 'Arrivals Today', header: ['Name', 'Folio', 'Status'], list, span: 4, link: '/front-desk?type=check_in', is_total: true };
+        case 'daily_room_revenue_forecast': {
+          const fc = await computeRevenueForecast();
+          detail = { type: 'number', span: '3', label: 'Daily Room Revenue Forecast', header: ['Date', 'Revenue', 'Room Sold'], list: fc.total, link: '', is_total: true };
           break;
         }
-        case 'departures': {
-          const todayStart = new Date(today);
-          const todayEnd = new Date(todayStart.getTime() + 86400000);
-          const departures = await getPrisma().folios.findMany({
-            where: { property_id: propertyId, deleted_at: null, check_out_date: { gte: todayStart, lt: todayEnd }, status_reservation: { in: [1, 2, 3] } },
-            select: { id: true, first_name: true, last_name: true, folio_number: true, status_reservation: true },
-            orderBy: { check_out_date: 'asc' },
-            take: 20,
-          });
-          for (const f of departures) {
-            const name = `${f.first_name || ''} ${f.last_name || ''}`.trim() || f.folio_number || 'Guest';
-            const statusMap: Record<number, string> = { 0: 'Pending', 1: 'Reservation', 2: 'Check In', 3: 'Check Out', 4: 'Cancelled' };
-            list.push({ name, Room: f.folio_number || '-', room: statusMap[f.status_reservation ?? 0] || 'Unknown' });
-          }
-          if (list.length === 0) { list.push({ name: 'No departures today', Room: '-', room: '-' }); }
-          detail = { type: 'number', label: 'Departures Today', header: ['Name', 'Folio', 'Status'], list, span: 4, link: '/front-desk?type=check_out', is_total: true };
+        case 'chart_analysis_history_forecast': {
+          const fc = await computeRevenueForecast();
+          detail = { type: 'chart', span: '12', label: 'Chart Analysis History & Forecast', list: fc.chart, is_active: true };
           break;
         }
-        case 'in_house': {
-          const inHouse = await getPrisma().folios.findMany({
-            where: { property_id: propertyId, deleted_at: null, status_reservation: 2, is_pos_trx: false },
-            select: { id: true, first_name: true, last_name: true, folio_number: true, check_in_date: true },
-            orderBy: { check_in_date: 'desc' },
-            take: 20,
-          });
-          for (const f of inHouse) {
-            const name = `${f.first_name || ''} ${f.last_name || ''}`.trim() || f.folio_number || 'Guest';
-            const checkIn = f.check_in_date ? f.check_in_date.toISOString().split('T')[0] : '-';
-            list.push({ name, Room: f.folio_number || '-', room: checkIn });
-          }
-          if (list.length === 0) { list.push({ name: 'No in-house guests', Room: '-', room: '-' }); }
-          detail = { type: 'number', label: 'In House', header: ['Name', 'Folio', 'Check In'], list, span: 4, link: '/front-desk?type=in_house', is_total: true };
+        case 'forecast':
+        case 'total_room_revenue': {
+          const fc = await computeRevenueForecast();
+          detail = { type: 'chart', span: '12', label: resolvedCode === 'forecast' ? 'Forecast' : 'Total Room Revenue', list: fc.revenue, is_active: true };
           break;
         }
-        case 'revenue': {
-          const todayStart = new Date(today);
-          const todayEnd = new Date(todayStart.getTime() + 86400000);
-          const transactions = await getPrisma().transactions.groupBy({
-            by: ['code_name'],
-            where: { property_id: propertyId, deleted_at: null, is_void: 0, date: { gte: todayStart, lt: todayEnd } },
-            _sum: { total: true },
-            orderBy: { _sum: { total: 'desc' } },
+        case 'today_revenue': {
+          const dLog = dateLog || sd;
+          const dtd = await revenueRange(new Date(dLog + 'T00:00:00Z'), new Date(new Date(dLog + 'T00:00:00Z').getTime() + 86400000));
+          const mtdStart = new Date(dLog.substring(0, 8) + '01T00:00:00Z');
+          const mtd = await revenueRange(mtdStart, new Date(dLog + 'T00:00:00Z'));
+          const ytd = await revenueRange(new Date(dLog.substring(0, 4) + '-01-01T00:00:00Z'), new Date(dLog + 'T00:00:00Z'));
+          detail = { type: 'number-only', span: '3', label: ['Manual Posting Revenue', 'MTD Revenue', 'YTD Revenue'], data: [moneyFormat(dtd), moneyFormat(mtd), moneyFormat(ytd)], url: ['/cms/dashboard/today-revenue', '/cms/dashboard/mtd-revenue', '/cms/dashboard/ytd-revenue'], ispopup: true, svg: 'money' };
+          break;
+        }
+        case 'departure': {
+          const d = await getDeparture();
+          const dep: any[] = [
+            { name: 'Expected', data: d.all.expected },
+            { name: 'Actual', data: d.all.actual },
+            { name: 'Due to Depart', data: d.all.due_to_departure },
+            { name: 'Group Departure Today', data: `${d.git.groups.size} Group(s)` },
+          ];
+          d.git.groups.forEach((g: any[]) => {
+            dep.push({ name: '', data: `${g[0]?.company_profiles_folios_company_profile_idTocompany_profiles?.name || '-'} (${g.length} Room(s))` });
+          });
+          detail = { type: 'number', span: '3', label: 'Departure', header: ['Name', 'Amount'], list: dep, link: '', is_total: false };
+          break;
+        }
+        case 'arrival_git': {
+          const a = await getArrival();
+          const arr: any[] = [
+            { name: 'Total Room group', data: a.git.total_git },
+            { name: 'Expected', data: a.git.expected },
+            { name: 'Actual', data: a.git.actual },
+            { name: 'Due to Arrival', data: a.git.due_to_arrival },
+            { name: 'Group Arrival Today', data: `${a.git.groups.size} Group(s)` },
+          ];
+          a.git.groups.forEach((g: any[]) => {
+            arr.push({ name: '', data: `${g[0]?.company_profiles_folios_company_profile_idTocompany_profiles?.name || '-'} (${g.length} Room(s))` });
+          });
+          detail = { type: 'number', span: '3', label: 'Arrival GIT', header: ['Name', 'Amount'], list: arr, link: '', is_total: false };
+          break;
+        }
+        case 'arrival_fit': {
+          const a = await getArrival();
+          const arr: any[] = [
+            { name: 'Expected', data: a.fit.expected },
+            { name: 'Actual', data: a.fit.actual },
+            { name: 'Due to Arrival', data: a.fit.due_to_arrival },
+          ];
+          detail = { type: 'number', span: '3', label: 'Arrival FIT', header: ['Name', 'Amount'], list: arr, link: '', is_total: false };
+          break;
+        }
+        case 'total_arrival_git_fit': {
+          const a = await getArrival();
+          const arr: any[] = [
+            { name: 'Expected', data: a.fit.expected + a.git.expected },
+            { name: 'Actual', data: a.fit.actual + a.git.actual },
+            { name: 'Due to Arrival', data: a.fit.due_to_arrival + a.git.due_to_arrival },
+          ];
+          detail = { type: 'number', span: '3', label: 'Total Arrival GIT & FIT', header: ['Name', 'Amount'], list: arr, link: '', is_total: false };
+          break;
+        }
+        case 'house_use_complimentary': {
+          list = await getHouseUseComplimentary();
+          detail = { type: 'number', span: '3', label: 'HOUSE USE & COMPLIMENTARY', header: ['TITLE', '#'], list, link: '', is_total: false };
+          break;
+        }
+        case 'hotel_competitor': {
+          detail = { type: 'table', label: 'Hotel Competitor', url: '/cms/hotel-competitor-dashboard' };
+          break;
+        }
+        case 'maps': {
+          detail = { type: 'maps', span: '12', label: 'Hotel Competitor Surounding' };
+          break;
+        }
+        case 'notifications': {
+          const taskList = await prisma.tasks.findMany({
+            where: {
+              to_user_id: req.user?.id ?? 0n,
+              deleted_at: null,
+              status: { in: ['Open', 'In_Progress'] },
+            },
+            orderBy: { created_at: 'desc' },
             take: 10,
+            select: { id: true, message: true, room_number: true, priority: true, created_at: true },
           });
-          let grandTotal = 0;
-          for (const t of transactions) {
-            const amount = Number(t._sum.total ?? 0);
-            grandTotal += amount;
-            list.push({ name: t.code_name || 'Other', Room: `Rp ${amount.toLocaleString('id-ID')}`, room: amount });
-          }
-          if (list.length > 0) { list.push({ name: 'Total', Room: `Rp ${grandTotal.toLocaleString('id-ID')}`, room: grandTotal }); }
-          else { list.push({ name: 'No revenue today', Room: 'Rp 0', room: 0 }); }
-          detail = { type: 'number', label: 'Revenue Today', header: ['Category', 'Amount', 'Raw'], list, span: 4, link: '/report/daily', is_total: true };
+          const items = taskList.map((t: any) => ({
+            id: Number(t.id),
+            title: t.message || 'Task',
+            message: t.message || 'Task',
+            room_number: t.room_number,
+            priority: t.priority || 'Medium',
+            created_at: t.created_at?.toISOString?.() || new Date().toISOString(),
+          }));
+          detail = { type: 'notification-list', label: 'Notifications', span: 4, count: items.length, items, url: '/cms/task' };
+          break;
+        }
+        case 'guest_requests': {
+          detail = { type: 'guest-request-list', label: 'Guest Requests', span: 4, count: 0, items: [], url: '/cms/guest-request' };
+          break;
+        }
+        case 'market_segment_1':
+        case 'market_segment_2':
+        case 'market_segment_3':
+        case 'market_segment_4':
+        case 'mtd_actual_vs_budget':
+        case 'room_sold_per_segment':
+        case 'forecast_per_room_sold':
+        case 'room_sold_rbv_vs_ro': {
+          detail = {
+            type: 'number',
+            span: '3',
+            label: resolvedCode.replace(/_/g, ' ').replace(/\b\w/g, (x: string) => x.toUpperCase()),
+            header: ['Name', 'Amount'],
+            list: [{ name: 'No Data', data: 0 }],
+            link: '',
+            is_total: false,
+          };
           break;
         }
         default: {
-          detail = { type: 'number', label: 'Widget', header: ['Data'], list: [{ name: 'Unknown widget', Room: '-', room: '-' }], span: 4, link: '', is_total: false };
+          detail = null;
         }
       }
 

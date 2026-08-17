@@ -129,6 +129,7 @@ router.get('/check-value', authMiddleware, requirePermission(69, 'view'), System
 // ═════════════════════════════════════════════════════════
 
 router.get('/system-balance/:type', authMiddleware, requirePermission(69, 'view'), SystemController.systemBalance);
+router.get('/system-balance/:type/:id', authMiddleware, requirePermission(69, 'view'), SystemController.getListByIdPost);
 
 // ══════════════════════════════════════════════════════════
 // System — Logs, Setup, Post Code Budget
