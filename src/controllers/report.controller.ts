@@ -5205,29 +5205,205 @@ async function getRoomOccupancyChart(params: any): Promise<any[]> {
   }];
 }
 
-async function getRoomTypeRevenueReport(params: any): Promise<any[]> {
+async function getRoomTypeRevenueReport(params: any): Promise<any> {
   const pid = params.propertyId;
-  const start = params.startDate || params.date;
+  const start = params.startDate || params.date || formatDate(new Date());
   const end = params.endDate || start;
-  const reservations = await prisma.reservations.findMany({
-    where: { property_id: pid, deleted_at: null, date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) } },
-    include: { room_types: { select: { name: true } } },
+
+  const rows: any = await prisma.$queryRaw`
+    WITH dates AS (
+      SELECT generate_series(${start}::date, ${end}::date, '1 day')::date AS report_date
+    ),
+    room_stats AS (
+      SELECT
+        r.date::date AS report_date,
+        SUM(CASE WHEN (f.folio_number NOT LIKE 'D%' OR f.check_in_date <> f.check_out_date)
+            AND EXISTS (SELECT 1 FROM model_has_types nht JOIN types t ON nht.type_id = t.id WHERE nht.model_id = rt.id AND t.name ILIKE '%SUITE%')
+            THEN 1 ELSE 0 END)::float8 AS total_suite,
+        SUM(CASE WHEN (f.folio_number NOT LIKE 'D%' OR f.check_in_date <> f.check_out_date)
+            AND EXISTS (SELECT 1 FROM model_has_types nht JOIN types t ON nht.type_id = t.id WHERE nht.model_id = rt.id AND t.name ILIKE '%DELUXE%')
+            THEN 1 ELSE 0 END)::float8 AS total_deluxe,
+        SUM(CASE WHEN f.folio_number LIKE 'D%' OR f.check_in_date = f.check_out_date THEN 1 ELSE 0 END)::float8 AS short_time,
+        SUM(CASE WHEN (f.folio_number NOT LIKE 'D%' OR f.check_in_date <> f.check_out_date) AND EXISTS (SELECT 1 FROM model_has_types nht JOIN types t ON nht.type_id = t.id WHERE nht.model_id = rt.id AND (t.name ILIKE '%SUITE%' OR t.name ILIKE '%DELUXE%'))
+            OR (f.folio_number LIKE 'D%' OR f.check_in_date = f.check_out_date) THEN 1 ELSE 0 END)::float8 AS total_room
+      FROM reservations r
+      JOIN folios f ON r.folio_id = f.id
+      JOIN room_types rt ON r.room_type_id = rt.id
+      WHERE f.property_id = ${pid}
+        AND r.date >= ${start}::date AND r.date < (${end}::date + INTERVAL '1 day')
+        AND f.status_reservation NOT IN (2, 5)
+      GROUP BY r.date::date
+    ),
+    revenue AS (
+      SELECT
+        tb.date::date AS report_date,
+        ROUND(SUM(CASE WHEN b.name ILIKE '%ROOM REVENUE%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.amount ELSE tb.amount END ELSE 0 END)::numeric, 4)::float8 AS total_income_hotel,
+        ROUND(SUM(CASE WHEN b.name ILIKE '%RESTAURANT REVENUE%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.amount ELSE tb.amount END ELSE 0 END)::numeric, 4)::float8 AS total_income_fnb,
+        COUNT(DISTINCT CASE WHEN b.name ILIKE '%RESTAURANT REVENUE%' THEN tb.id END)::float8 AS total_transaction_fnb,
+        ROUND(SUM(CASE WHEN b.name ILIKE '%OTHERS REVENUE%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.amount ELSE tb.amount END ELSE 0 END)::numeric, 4)::float8 AS others_misc,
+        ROUND(SUM(CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.amount ELSE tb.amount END)::numeric, 4)::float8 AS sub_total_revenue,
+        ROUND(SUM(CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.pb1 ELSE tb.pb1 END)::numeric, 4)::float8 AS total_pb1,
+        ROUND(SUM(CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.svr_chrg ELSE tb.svr_chrg END)::numeric, 4)::float8 AS total_service_charge,
+        ROUND(SUM(CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END)::numeric, 4)::float8 AS total_revenue
+      FROM transaction_breakdowns tb
+      JOIN folios f ON tb.folio_id = f.id
+      JOIN code_posts p ON tb.code = p.id::text
+      JOIN code_billings b ON p.code_billing_id = b.id
+      WHERE f.property_id = ${pid}
+        AND tb.date >= ${start}::date AND tb.date < (${end}::date + INTERVAL '1 day')
+        AND p.type = 'DEFAULT'
+      GROUP BY tb.date::date
+    ),
+    payments AS (
+      SELECT
+        tb.date::date AS report_date,
+        ROUND(-SUM(CASE WHEN p.name ILIKE '%cash%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS cash,
+        ROUND(-SUM(CASE WHEN p.name ILIKE 'db%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS debit,
+        ROUND(-SUM(CASE WHEN p.name ILIKE 'cc%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS credit,
+        ROUND(-SUM(CASE WHEN p.name ILIKE '%qris%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS qris,
+        ROUND(-SUM(CASE WHEN p.name ILIKE '%bank transfer%' THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS transfer,
+        ROUND(-SUM(CASE WHEN p.name ILIKE '%cityledger%' AND f.company_profile_id IS NOT NULL
+            AND EXISTS (SELECT 1 FROM model_has_types mht JOIN types t ON t.id = mht.type_id WHERE mht.model_id = f.company_profile_id AND mht.model_type = 'App\\Models\\CompanyProfile' AND t.group = 'company-type' AND t.name = 'CL')
+            THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS cl,
+        ROUND(-SUM(CASE WHEN p.name ILIKE '%cityledger%' AND f.company_profile_id IS NOT NULL
+            AND EXISTS (SELECT 1 FROM model_has_types mht JOIN types t ON t.id = mht.type_id WHERE mht.model_id = f.company_profile_id AND mht.model_type = 'App\\Models\\CompanyProfile' AND t.group = 'company-type' AND t.name = 'OTA')
+            THEN CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END ELSE 0 END)::numeric, 4)::float8 AS ota,
+        ROUND(-SUM(CASE WHEN LOWER(tb.type_amount) = 'minus' THEN -tb.total ELSE tb.total END)::numeric, 4)::float8 AS total_payment
+      FROM transaction_breakdowns tb
+      JOIN folios f ON tb.folio_id = f.id
+      JOIN code_posts p ON tb.code = p.id::text
+      WHERE f.property_id = ${pid}
+        AND tb.date >= ${start}::date AND tb.date < (${end}::date + INTERVAL '1 day')
+        AND p.type = 'IS_PAYMENT'
+      GROUP BY tb.date::date
+    )
+    SELECT
+      d.report_date::date AS "date",
+      COALESCE(rs.total_suite, 0) AS "Total Suite",
+      COALESCE(rs.total_deluxe, 0) AS "Total Deluxe",
+      COALESCE(rs.short_time, 0) AS "Short Time",
+      COALESCE(rs.total_room, 0) AS "Total Room",
+      COALESCE(r.total_income_hotel, 0) AS "TOTAL INCOME HOTEL",
+      COALESCE(r.total_transaction_fnb, 0) AS "TOTAL FNB",
+      COALESCE(r.total_income_fnb, 0) AS "TOTAL INCOME FNB",
+      COALESCE(r.others_misc, 0) AS "OTHERS MISCELLANEOUS",
+      COALESCE(r.sub_total_revenue, 0) AS "SUB TOTAL REVENUE",
+      COALESCE(r.total_pb1, 0) AS "TOTAL PB1",
+      COALESCE(r.total_service_charge, 0) AS "TOTAL SERVICE CHARGE",
+      COALESCE(r.total_revenue, 0) AS "TOTAL REVENUE",
+      COALESCE(p.cash, 0) AS cash,
+      COALESCE(p.debit, 0) AS debit,
+      COALESCE(p.credit, 0) AS credit,
+      COALESCE(p.qris, 0) AS qris,
+      COALESCE(p.cl, 0) AS cl,
+      COALESCE(p.ota, 0) AS ota,
+      COALESCE(p.transfer, 0) AS transfer,
+      COALESCE(p.total_payment, 0) AS total_payment,
+      COALESCE(r.total_revenue, 0) - COALESCE(p.total_payment, 0) AS "Balance"
+    FROM dates d
+    LEFT JOIN room_stats rs ON d.report_date = rs.report_date
+    LEFT JOIN revenue r ON d.report_date = r.report_date
+    LEFT JOIN payments p ON d.report_date = p.report_date
+    ORDER BY d.report_date`;
+
+  const MONTHS_ID = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+  const DAYS_ID = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
+  const rowsOut = rows.map((r: any, i: number) => {
+    const dt = new Date(r.date);
+    const tanggal = `${DAYS_ID[dt.getUTCDay()]}, ${String(dt.getUTCDate()).padStart(2, '0')} ${MONTHS_ID[dt.getUTCMonth()]} ${dt.getUTCFullYear()}`;
+    return { no: i + 1, tanggal, ...r, date: tanggal };
   });
-  const byType: Record<string, { revenue: number; nights: number; count: number }> = {};
-  for (const r of reservations) {
-    const name = r.room_types?.name || r.room_type_name || 'Unknown';
-    if (!byType[name]) byType[name] = { revenue: 0, nights: 0, count: 0 };
-    byType[name].revenue += Number(r.amount);
-    byType[name].nights += r.night || 0;
-    byType[name].count += 1;
+
+  const sumK = (k: string) => rows.reduce((s: number, r: any) => s + Number(r[k] || 0), 0);
+  const grandTotals = {
+    total_suite: sumK('Total Suite'),
+    total_deluxe: sumK('Total Deluxe'),
+    short_time: sumK('Short Time'),
+    total_room: sumK('Total Room'),
+    total_income_hotel: sumK('TOTAL INCOME HOTEL'),
+    total_fnb: sumK('TOTAL FNB'),
+    total_income_fnb: sumK('TOTAL INCOME FNB'),
+    others_misc: sumK('OTHERS MISCELLANEOUS'),
+    sub_total_revenue: sumK('SUB TOTAL REVENUE'),
+    total_pb1: sumK('TOTAL PB1'),
+    total_service_charge: sumK('TOTAL SERVICE CHARGE'),
+    total_revenue: sumK('TOTAL REVENUE'),
+    cash: sumK('cash'),
+    debit: sumK('debit'),
+    credit: sumK('credit'),
+    qris: sumK('qris'),
+    cl: sumK('cl'),
+    ota: sumK('ota'),
+    transfer: sumK('transfer'),
+    total_payment: sumK('total_payment'),
+    balance: sumK('Balance'),
+  };
+
+  return {
+    reportTitle: 'Room Type Revenue Report',
+    startDate: start,
+    endDate: end,
+    rows: rowsOut,
+    grandTotals,
+  };
+}
+
+async function generateRoomTypeRevenueExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Type Revenue');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const nf = (v: any) => 'Rp ' + Number(v || 0).toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const nfn = (v: any) => Number(v || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
+  const C = 23;
+
+  ws.mergeCells(1, 1, 1, C);
+  const title = ws.getCell(1, 1);
+  title.value = String(data.reportTitle || 'Room Type Revenue Report').toUpperCase();
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  for (let i = 1; i <= C; i++) ws.getColumn(i).width = i === 2 ? 26 : 12;
+
+  const r1 = ws.getRow(3);
+  r1.values = ['No', 'Date', 'Room Only', '', '', 'Short Time', 'Total Room', 'Total Income Hotel', 'Total FnB', 'Total Income FnB', 'Others/Miscellaneous', 'PB1', 'Service Charge', 'Total Revenue', 'Cash', 'Debit', 'Credit', 'QRIS', 'CL', 'OTA', 'Transfer', 'Total Payment', 'Balance'];
+  ws.mergeCells(3, 3, 3, 5);
+  ws.mergeCells(3, 8, 3, 8);
+  r1.font = { bold: true };
+  r1.alignment = { horizontal: 'center' };
+  r1.eachCell((c: any) => { c.border = border; });
+  const r2 = ws.getRow(4);
+  r2.values = ['', '', 'Suite', 'Deluxe', 'Total', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''];
+  r2.font = { bold: true };
+  r2.alignment = { horizontal: 'center' };
+  r2.eachCell((c: any) => { c.border = border; });
+
+  let rn = 5;
+  for (const r of data.rows || []) {
+    ws.getRow(rn).values = [r.no, r.tanggal, nfn(r['Total Suite']), nfn(r['Total Deluxe']), nfn(Number(r['Total Suite']) + Number(r['Total Deluxe'])), nfn(r['Short Time']), nfn(r['Total Room']), nf(r['TOTAL INCOME HOTEL']), nfn(r['TOTAL FNB']), nf(r['TOTAL INCOME FNB']), nf(r['OTHERS MISCELLANEOUS']), nf(r['TOTAL PB1']), nf(r['TOTAL SERVICE CHARGE']), nf(r['TOTAL REVENUE']), r.cash ? nf(r.cash) : '', r.debit ? nf(r.debit) : '', r.credit ? nf(r.credit) : '', r.qris ? nf(r.qris) : '', r.cl ? nf(r.cl) : '', r.ota ? nf(r.ota) : '', r.transfer ? nf(r.transfer) : '', r.total_payment ? nf(r.total_payment) : '', Number(r.Balance || 0) !== 0 ? nf(r.Balance) : ''];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
   }
-  return Object.entries(byType).map(([room_type, v]) => ({
-    room_type,
-    room_nights: v.nights,
-    reservations: v.count,
-    revenue: v.revenue,
-    avg_rate: v.nights > 0 ? v.revenue / v.nights : 0,
-  }));
+  const g = data.grandTotals || {};
+  ws.getRow(rn).values = ['', 'TOTAL', nfn(g.total_suite), nfn(g.total_deluxe), nfn(Number(g.total_suite) + Number(g.total_deluxe)), nfn(g.short_time), nfn(g.total_room), nf(g.total_income_hotel), nfn(g.total_fnb), nf(g.total_income_fnb), nf(g.others_misc), nf(g.total_pb1), nf(g.total_service_charge), nf(g.total_revenue), g.cash ? nf(g.cash) : '', g.debit ? nf(g.debit) : '', g.credit ? nf(g.credit) : '', g.qris ? nf(g.qris) : '', g.cl ? nf(g.cl) : '', g.ota ? nf(g.ota) : '', g.transfer ? nf(g.transfer) : '', g.total_payment ? nf(g.total_payment) : '', nf(g.balance)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn += 2;
+  ws.getRow(rn).values = ['TOTAL INCOME', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''];
+  ws.getRow(rn).font = { bold: true };
+  rn++;
+  ws.getRow(rn).values = ['Hotel', nf(g.total_income_hotel)];
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+  ws.getRow(rn).values = ['FnB', g.total_income_fnb ? nf(g.total_income_fnb) : ''];
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+  ws.getRow(rn).values = ['Others', g.others_misc ? nf(g.others_misc) : ''];
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-type-revenue-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
 }
 
 async function getOwiRevenueReport(params: any): Promise<any[]> {
@@ -5593,6 +5769,10 @@ export class ReportController {
               header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
               key: k,
             })), fileName);
+            return;
+          }
+          if (reportKey === 'account/room-type-revenue-report/view') {
+            await generateRoomTypeRevenueExcel(res, data);
             return;
           }
           if (reportKey === 'account/cash-summary/view') {
