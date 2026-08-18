@@ -196,6 +196,10 @@ router.get('/night-audit/over-stay', authMiddleware, SystemController.nightAudit
 // Dashboard data
 router.get('/get-dashboard', authMiddleware, SystemController.getDashboard);
 router.get('/get-dashboard/:code', authMiddleware, SystemController.getDashboardDetail);
+router.get('/dashboard/today-revenue', authMiddleware, SystemController.todayRevenue);
+router.get('/dashboard/mtd-revenue', authMiddleware, SystemController.mtdRevenue);
+router.get('/dashboard/ytd-revenue', authMiddleware, SystemController.ytdRevenue);
+router.get('/hotel-competitor-dashboard', authMiddleware, SystemController.hotelCompetitorDashboard);
 
 // Helper endpoints
 router.get('/helper/task-notification', authMiddleware, SystemController.helperTaskNotification);

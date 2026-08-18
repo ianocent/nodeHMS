@@ -275,6 +275,24 @@ const SYSTEM_BALANCE_TABLE = [
   { label: 'Credit', key: 'credit', type: 'none', is_html: true, is_search: false },
 ];
 
+// Laravel HotelCompetitor@formatTable parity (dashboard widget table)
+const COMPETITOR_TABLE = [
+  { label: 'Name', key: 'master_hotel_competitor_id', type: 'none', options: [], rowspan: 2, is_search: false },
+  { label: 'Room Available', key: 'room_available', type: 'number', rowspan: 2, is_search: false },
+  { label: 'Room Sold', key: 'room_sold', type: 'number', rowspan: 2, is_search: false },
+  { label: 'ROOM OCC(%)', key: 'room_occupancy', type: 'none', rowspan: 2, is_search: false },
+  { label: 'ARR', key: 'arr', type: 'number', rowspan: 2, is_search: false },
+  { label: 'Room Revenue', key: 'room_revenue', type: 'none', rowspan: 2, is_search: false },
+  { label: 'Total Revenue', key: 'total_revenue', type: 'number', rowspan: 2, is_search: false },
+  { label: 'RevPAR', key: 'revpar', type: 'none', rowspan: 2, is_search: false },
+  { label: 'TRevPAR', key: 'trevpar', type: 'none', rowspan: 2, is_search: false },
+  { label: 'SALES CO', key: 'sales_cost', type: 'none', rowspan: 2, is_search: false },
+  { label: 'INDEX', type: 'none', colspan: 3, row: 1, is_search: false },
+  { label: 'MPI', key: 'mpi', type: 'none', is_search: false, row: 2 },
+  { label: 'ARI', key: 'ari', type: 'none', is_search: false, row: 2 },
+  { label: 'RGI', key: 'rgi', type: 'none', is_search: false, row: 2 },
+];
+
 function toNumber(value: any, fallback = 0): number {
   const num = Number(value ?? fallback);
   return Number.isFinite(num) ? num : fallback;
@@ -1879,6 +1897,67 @@ const payload = formatSystemBalanceData(
       const MAID_STATUSES = ['Clean', 'Dirty', 'Maid in Room', 'Inspection Required'];
       const STATUS = { check_in: 0, check_out: 1, cancel: 2, reservation: 3, in_house: 4, pending: 5 };
 
+      const property = await prisma.properties.findUnique({
+        where: { id: propertyId },
+        select: { market_segment_1: true, market_segment_2: true, market_segment_3: true, market_segment_4: true },
+      });
+
+      // ==== Folio market segment donut parity (DashboardController@marketSegment) ====
+      const computeMarketSegment = async (group: string, enabled: boolean) => {
+        if (!enabled) return null;
+        const s = new Date(sd + 'T00:00:00Z');
+        const e = new Date(new Date(ed + 'T00:00:00Z').getTime() + 86400000);
+        const typeRows = await prisma.types.findMany({
+          where: { property_id: propertyId, group, status: 1, deleted_at: null },
+          select: { id: true, name: true },
+        });
+        const typeIds = typeRows.map(t => t.id);
+        const folios = await prisma.folios.findMany({
+          where: { property_id: propertyId, deleted_at: null, status_reservation: { not: STATUS.cancel }, reservations: { some: { date: { gte: s, lt: e } } } },
+          select: { id: true },
+        });
+        const folioIdSet = new Set(folios.map(f => Number(f.id)));
+        const mht = typeIds.length ? await prisma.model_has_types.findMany({
+          where: { model_type: 'App\\Models\\Folio', type_id: { in: typeIds } },
+          select: { model_id: true, type_id: true },
+        }) : [];
+        const folioTypeMap = new Map<number, Set<number>>();
+        for (const row of mht) {
+          const fid = Number(row.model_id);
+          if (!folioIdSet.has(fid)) continue;
+          if (!folioTypeMap.has(fid)) folioTypeMap.set(fid, new Set());
+          folioTypeMap.get(fid)!.add(Number(row.type_id));
+        }
+        const reservations = folios.length ? await prisma.reservations.findMany({
+          where: { folio_id: { in: folios.map(f => f.id) }, date: { gte: s, lt: e } },
+          select: { folio_id: true, amount: true },
+        }) : [];
+        const sumByFolio = new Map<number, number>();
+        for (const r of reservations) {
+          const fid = Number(r.folio_id);
+          sumByFolio.set(fid, (sumByFolio.get(fid) ?? 0) + Number(r.amount));
+        }
+        let sumTotal = 0;
+        for (const [fid, typeSet] of folioTypeMap) {
+          if (typeSet.size > 0) sumTotal += sumByFolio.get(fid) ?? 0;
+        }
+        const listRaw: any[] = [];
+        typeRows.forEach(t => {
+          let sum = 0;
+          for (const [fid, typeSet] of folioTypeMap) {
+            if (typeSet.has(Number(t.id))) sum += sumByFolio.get(fid) ?? 0;
+          }
+          if (sum !== 0) listRaw.push({ name: t.name.toUpperCase(), data: sum, color: '#FF6384' });
+        });
+        listRaw.sort((a, b) => b.data - a.data);
+        const list = listRaw.map((item, key) => ({
+          ...item,
+          key,
+          color: key === 0 ? '#10b981' : key === listRaw.length - 1 ? '#FF0000' : '#36A2EB',
+        }));
+        return { type: 'donut', span: '3', label: 'Market Segment ' + group.slice(-1), list, total: moneyFormat(sumTotal), is_active: false };
+      };
+
       // ==== Room.getListAndMaidStatusRoom parity (total_room / chart_room) ====
       const computeRoomData = async () => {
         const rooms = await prisma.rooms.findMany({
@@ -2203,7 +2282,11 @@ const payload = formatSystemBalanceData(
         case 'market_segment_1':
         case 'market_segment_2':
         case 'market_segment_3':
-        case 'market_segment_4':
+        case 'market_segment_4': {
+          const idx = Number(resolvedCode.slice(-1)) as 1 | 2 | 3 | 4;
+          detail = await computeMarketSegment(`market-segment-${idx}`, !!((property as any)?.[`market_segment_${idx}`]));
+          break;
+        }
         case 'mtd_actual_vs_budget':
         case 'room_sold_per_segment':
         case 'forecast_per_room_sold':
@@ -2236,6 +2319,286 @@ const payload = formatSystemBalanceData(
     } catch (err: any) {
       console.error('Get dashboard detail error:', err);
       res.status(500).type('text/plain').send(encrypt(JSON.stringify({ code: '500', message: 'Failed to load dashboard detail', data: null })));
+    }
+  }
+
+  // ==================== DASHBOARD REVENUE LISTS ====================
+  // Laravel Transaction@getListRevenueDTD/MTD/YTD + DashboardController@todayRevenue/mtdRevenue/ytdRevenue parity
+  private static async dashboardRevenueList(propertyId: bigint, mode: 'DTD' | 'MTD' | 'YTD', dateLog: string) {
+    const prisma = getPrisma();
+    const [y, m] = [Number(dateLog.substring(0, 4)), Number(dateLog.substring(5, 7))];
+    const s = mode === 'DTD' ? new Date(dateLog + 'T00:00:00Z') : mode === 'MTD' ? new Date(Date.UTC(y, m - 1, 1)) : new Date(Date.UTC(y, 0, 1));
+    const e = mode === 'DTD' ? new Date(s.getTime() + 86400000) : mode === 'MTD' ? new Date(Date.UTC(y, m, 1)) : new Date(Date.UTC(y + 1, 0, 1));
+
+    const defaultPosts = await prisma.code_posts.findMany({
+      where: { property_id: propertyId, type: 'DEFAULT', deleted_at: null },
+      select: { id: true, name: true },
+    });
+    const postIds = defaultPosts.map(p => String(p.id));
+    const txns = await prisma.transactions.findMany({
+      where: {
+        property_id: propertyId, deleted_at: null, date: { gte: s, lt: e },
+        code: { in: postIds },
+        folios: { status_reservation: { not: 2 }, deleted_at: null },
+      },
+      select: { code: true, amount: true, type_amount: true },
+    });
+    const nameMap = new Map(defaultPosts.map(p => [String(p.id), p.name]));
+    const groups = new Map<string, { debit: number; credit: number }>();
+    for (const t of txns) {
+      const code = t.code ?? '';
+      const g = groups.get(code) ?? { debit: 0, credit: 0 };
+      const amt = Number(t.amount);
+      if (t.type_amount === 'MINUS') g.debit += -amt; else g.credit += amt;
+      groups.set(code, g);
+    }
+    const mapped = [...groups.entries()].map(([code, g]) => {
+      const net = g.debit + g.credit;
+      return { name: nameMap.get(code) ?? '', debit: net > 0 ? 0 : net, credit: net > 0 ? net : 0 };
+    });
+    return formatSystemBalanceData(mapped, 'posting');
+  }
+
+  static async todayRevenue(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const dateLog = (req.query.dateLog as string) || await AuthController.getBusinessDate(propertyId);
+      const r = await SystemController.dashboardRevenueList(propertyId, 'DTD', dateLog);
+      success(res, r.data, 'Success', 200, { table: r.table, pagination: r.pagination, permission: r.permission });
+    } catch (err: any) {
+      console.error('Today revenue error:', err);
+      error(res, 'Failed to load revenue', 500);
+    }
+  }
+
+  static async mtdRevenue(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const dateLog = (req.query.dateLog as string) || await AuthController.getBusinessDate(propertyId);
+      const r = await SystemController.dashboardRevenueList(propertyId, 'MTD', dateLog);
+      success(res, r.data, 'Success', 200, { table: r.table, pagination: r.pagination, permission: r.permission });
+    } catch (err: any) {
+      console.error('MTD revenue error:', err);
+      error(res, 'Failed to load revenue', 500);
+    }
+  }
+
+  static async ytdRevenue(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const dateLog = (req.query.dateLog as string) || await AuthController.getBusinessDate(propertyId);
+      const r = await SystemController.dashboardRevenueList(propertyId, 'YTD', dateLog);
+      success(res, r.data, 'Success', 200, { table: r.table, pagination: r.pagination, permission: r.permission });
+    } catch (err: any) {
+      console.error('YTD revenue error:', err);
+      error(res, 'Failed to load revenue', 500);
+    }
+  }
+
+  // ==================== HOTEL COMPETITOR DASHBOARD ====================
+  // Laravel HotelCompetitorDashboardController@index parity
+  static async hotelCompetitorDashboard(req: Request, res: Response): Promise<void> {
+    try {
+      const prisma = getPrisma();
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 9999;
+      const businessDate = await AuthController.getBusinessDate(propertyId);
+      const date = (req.query.date as string) || businessDate;
+      const s = new Date(date + 'T00:00:00Z');
+      const e = new Date(s.getTime() + 86400000);
+      const STATUS_CANCEL = 2;
+      const STATUS_PENDING = 5;
+
+      const [db, master, property] = await Promise.all([
+        prisma.hotel_competitors.findMany({
+          where: { property_id: propertyId, deleted_at: null, date: { gte: s, lt: e } },
+          orderBy: [{ sort: 'asc' }, { id: 'asc' }],
+          include: { master_hotel_competitors: { select: { name: true } } },
+        }),
+        prisma.master_hotel_competitors.findMany({
+          where: { property_id: propertyId, status: 1, deleted_at: null },
+          orderBy: { id: 'asc' },
+        }),
+        prisma.properties.findUnique({ where: { id: propertyId }, select: { name: true } }),
+      ]);
+
+      const [reservationAmount, reservationTotal] = await Promise.all([
+        prisma.reservations.aggregate({
+          where: { property_id: propertyId, date: { gte: s, lt: e }, folios: { status_reservation: { not: STATUS_CANCEL }, deleted_at: null } },
+          _sum: { amount: true },
+        }),
+        prisma.reservations.aggregate({
+          where: { property_id: propertyId, date: { gte: s, lt: e }, folios: { status_reservation: { not: STATUS_CANCEL }, deleted_at: null } },
+          _sum: { total: true },
+        }),
+      ]);
+      const reservation = Number(reservationAmount._sum.amount ?? 0);
+      const total = Number(reservationTotal._sum.total ?? 0);
+
+      // manual_posting transactions whose code post is billed as room_revenue
+      const billings = await prisma.code_billings.findMany({
+        where: { name: { contains: 'room_revenue', mode: 'insensitive' }, deleted_at: null },
+        select: { id: true },
+      });
+      const manualPostIds = (await prisma.code_posts.findMany({
+        where: { code_billing_id: { in: billings.map(b => b.id) }, deleted_at: null },
+        select: { id: true },
+      })).map(p => String(p.id));
+      const manualTxns = await prisma.transactions.findMany({
+        where: { property_id: propertyId, deleted_at: null, type: 'manual_posting', date: { gte: s, lt: e }, code: { in: manualPostIds } },
+        select: { amount: true, type_amount: true },
+      });
+      let manualPost = 0;
+      for (const t of manualTxns) manualPost += t.type_amount === 'MINUS' ? -Number(t.amount) : Number(t.amount);
+
+      const roomAvailable = await prisma.rooms.count({
+        where: { property_id: propertyId, deleted_at: null, status: 1 },
+      });
+
+      // room sold: FIT/GIT non house-use/complimentary, rate not tagged company-type compliment/house use
+      const folios = await prisma.folios.findMany({
+        where: {
+          property_id: propertyId, deleted_at: null,
+          status_reservation: { notIn: [STATUS_CANCEL, STATUS_PENDING] },
+          type_reservation: { in: ['git', 'fit'] },
+          is_house_use: false, complimentary: false,
+        },
+        select: { id: true },
+      });
+      const folioIds = folios.map(f => f.id);
+      const resRows = folioIds.length ? await prisma.reservations.findMany({
+        where: { property_id: propertyId, date: { gte: s, lt: e }, folio_id: { in: folioIds } },
+        select: { rate_id: true },
+      }) : [];
+      let badRateIds = new Set<number>();
+      if (resRows.length) {
+        const rateIds = [...new Set(resRows.map(r => r.rate_id != null ? Number(r.rate_id) : -1).filter(x => x > 0))];
+        const mht = rateIds.length ? await prisma.model_has_types.findMany({
+          where: { model_type: 'App\\Models\\Rate', model_id: { in: rateIds } },
+          select: { model_id: true, type_id: true },
+        }) : [];
+        const typeIds = [...new Set(mht.map(m => Number(m.type_id)))];
+        const badTypes = typeIds.length ? await prisma.types.findMany({
+          where: {
+            id: { in: typeIds }, group: 'company-type', deleted_at: null,
+            OR: [
+              { name: { contains: 'compliment', mode: 'insensitive' } },
+              { name: { contains: 'house use', mode: 'insensitive' } },
+            ],
+          },
+          select: { id: true },
+        }) : [];
+        const badTypeIds = new Set(badTypes.map(t => Number(t.id)));
+        badRateIds = new Set(mht.filter(m => badTypeIds.has(Number(m.type_id))).map(m => Number(m.model_id)));
+      }
+      const roomSold = resRows.filter(r => r.rate_id == null || !badRateIds.has(Number(r.rate_id))).length;
+
+      const data: any[] = [];
+      data.push({
+        action_table: false,
+        master_hotel_competitor_id: { value: 0, label: property?.name ?? null },
+        id: 0,
+        name: property?.name ?? null,
+        date,
+        master_hotel_competitor: { value: 0, label: property?.name ?? null },
+        room_available: roomAvailable,
+        room_sold: roomSold,
+        room_occupancy: roomSold / (roomAvailable < 1 ? 1 : roomAvailable),
+        arr: reservation / (roomSold < 1 ? 1 : roomSold),
+        room_revenue: reservation,
+        total_revenue: total,
+        revpar: (reservation + manualPost) / (roomAvailable < 1 ? 1 : roomAvailable),
+        trevpar: (total + manualPost) / (roomAvailable < 1 ? 1 : roomAvailable),
+        sales_cost: total / (reservation < 1 ? 1 : reservation),
+      });
+      const dbMap = new Map(db.map(d => [Number(d.master_hotel_competitor_id), d]));
+      // hotel_competitors.name not mapped in Prisma -> raw SQL (Laravel HotelCompetitor@formatData uses it)
+      const dbNameRows = await prisma.$queryRaw<Array<{ id: bigint; name: string | null }>>`
+        SELECT id, name FROM hotel_competitors
+        WHERE property_id = ${propertyId} AND deleted_at IS NULL AND date >= ${s} AND date < ${e}
+      `;
+      const dbNameMap = new Map(dbNameRows.map(r => [Number(r.id), r.name]));
+      for (const value of master) {
+        const hc = dbMap.get(Number(value.id));
+        if (hc) {
+          const sold = Number(hc.room_sold);
+          const avail = Number(hc.room_available);
+          const arrVal = Number(hc.arr);
+          const roomRev = sold * arrVal;
+          const totRev = Number(hc.total_revenue);
+          data.push({
+            master_hotel_competitor_id: { value: Number(hc.master_hotel_competitor_id), label: hc.master_hotel_competitors?.name ?? '' },
+            id: Number(value.id),
+            name: dbNameMap.get(Number(hc.id)) ?? hc.master_hotel_competitors?.name ?? '',
+            date: hc.date instanceof Date ? hc.date.toISOString().substring(0, 10) : String(hc.date),
+            master_hotel_competitor: { value: Number(value.id), label: value.name },
+            room_available: Number(hc.room_available),
+            room_sold: sold,
+            room_occupancy: sold / (avail < 1 ? 1 : avail),
+            arr: arrVal,
+            room_revenue: roomRev,
+            total_revenue: totRev,
+            revpar: roomRev / (avail < 1 ? 1 : avail),
+            trevpar: totRev / (avail < 1 ? 1 : avail),
+            sales_cost: totRev / (roomRev < 1 ? 1 : roomRev),
+          });
+        } else {
+          data.push({
+            master_hotel_competitor_id: { value: Number(value.id), label: value.name },
+            id: Number(value.id),
+            name: value.name,
+            date,
+            master_hotel_competitor: { value: Number(value.id), label: value.name },
+            room_available: 0, room_sold: 0, room_occupancy: 0, arr: 0, room_revenue: 0, total_revenue: 0, revpar: 0, trevpar: 0, sales_cost: 0,
+          });
+        }
+      }
+
+      const sum = (k: string) => data.reduce((a: number, r: any) => a + Number(r[k] ?? 0), 0);
+      const sumAvail = sum('room_available');
+      const sumSold = sum('room_sold');
+      const sumRoomRev = sum('room_revenue');
+      const sumTotRev = sum('total_revenue');
+      data.push({
+        id: 0,
+        master_hotel_competitor_id: { value: 0, label: 'Total' },
+        name: 'Total',
+        room_available: sumAvail,
+        room_sold: sumSold,
+        room_occupancy: sumSold / (sumAvail < 1 ? 1 : sumAvail),
+        arr: sumTotRev / (sumSold < 1 ? 1 : sumSold),
+        room_revenue: sumRoomRev,
+        total_revenue: sumTotRev,
+        revpar: sumRoomRev / (sumAvail < 1 ? 1 : sumAvail),
+        trevpar: sumTotRev / (sumAvail < 1 ? 1 : sumAvail),
+        sales_cost: sumTotRev / (sumRoomRev < 1 ? 1 : sumRoomRev),
+      });
+      const roomOccupancy = sumSold / (sumAvail < 1 ? 1 : sumAvail);
+      const arrAvg = sumTotRev / (sumSold < 1 ? 1 : sumSold);
+      for (const row of data) {
+        const mpi = Number(row.room_occupancy) / (roomOccupancy <= 0 ? 1 : roomOccupancy);
+        const ari = Number(row.arr) / (arrAvg <= 0 ? 1 : arrAvg);
+        row.room_occupancy = moneyFormat(row.room_occupancy);
+        row.arr = moneyFormat(row.arr);
+        row.room_revenue = moneyFormat(row.room_revenue);
+        row.total_revenue = moneyFormat(row.total_revenue);
+        row.revpar = moneyFormat(row.revpar);
+        row.trevpar = moneyFormat(row.trevpar);
+        row.sales_cost = moneyFormat(row.sales_cost);
+        row.mpi = moneyFormat(mpi);
+        row.ari = moneyFormat(ari);
+        row.rgi = moneyFormat(mpi * ari);
+      }
+
+      success(res, data, 'Success', 200, {
+        table: COMPETITOR_TABLE,
+        pagination: laravelPaging(data.length, limit, page),
+        permission: { view: true, add: false, edit: false, delete: false },
+      });
+    } catch (err: any) {
+      console.error('Hotel competitor dashboard error:', err);
+      error(res, 'Failed to load hotel competitor dashboard', 500);
     }
   }
 
