@@ -150,9 +150,9 @@ export class ServiceSchedulerController {
         ? shifts.find((s: any) => s.id === BigInt(roster.shift_id))
         : undefined;
 
-      return {
+return {
         id: Number(roster.id),
-        date: roster.date,
+        date: roster.date ? roster.date.toISOString().slice(0, 10) : null,
         shift_id: roster.shift_id,
         roster_list_id: roster.roster_list_id,
         user_id: Number(roster.user_id),
@@ -162,8 +162,8 @@ export class ServiceSchedulerController {
           ? {
               id: Number(shift.id),
               name: String(shift.name || '').toUpperCase(),
-              time_start: shift.time_start,
-              time_end: shift.time_end,
+              time_start: shift.time_start ? shift.time_start.toISOString().slice(11, 19) : null,
+              time_end: shift.time_end ? shift.time_end.toISOString().slice(11, 19) : null,
               description: shift.description,
             }
           : null,
