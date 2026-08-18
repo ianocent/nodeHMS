@@ -53,6 +53,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: buildDefaultTable(data),
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
