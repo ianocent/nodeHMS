@@ -30,6 +30,34 @@ function sendEncrypted(res: Response, statusCode: number, payload: Record<string
   return res.status(statusCode).type('text/plain').send(encrypted);
 }
 
+// Normalize any pagination meta shape (laravelPaging or current_page-style)
+// into Laravel's full `pagging` contract + a `pagination` alias.
+// Frontends read BOTH keys: table-edit/pages read `.pagging`, table-drag/table-editM read `.pagination`.
+export function buildPagging(p: any): Record<string, number> {
+  const total = Number(p?.total ?? p?.total_data ?? 0);
+  const limit = Number(p?.per_page ?? p?.limit_data ?? 25);
+  const page = Number(p?.current_page ?? p?.start_paging ?? 1);
+  const totalPages = Math.max(1, Math.ceil(total / Math.max(1, limit)));
+  const from = total ? (page - 1) * limit + 1 : 0;
+  const to = Math.min(total, page * limit);
+  return {
+    limit_data: limit,
+    total_data: total,
+    start_paging: page,
+    end_paging: totalPages,
+    prev_jump: page > 1 ? 1 : 0,
+    prev: page > 1 ? page - 1 : 0,
+    next: page < totalPages ? page + 1 : 0,
+    next_jump: page < totalPages ? totalPages : 0,
+    current_page: page,
+    last_page: totalPages,
+    per_page: limit,
+    total,
+    from,
+    to,
+  };
+}
+
 export function success(
   res: Response,
   data: any = null,
@@ -50,12 +78,14 @@ export function success(
       return row;
     });
   }
+  const pagging = meta?.pagination ? buildPagging(meta.pagination) : undefined;
   return sendEncrypted(res, code, {
     code,
     message,
     data,
     ...(meta?.permission ? { permission: meta.permission } : {}),
-    ...(meta?.pagination ? { pagination: meta.pagination } : {}),
+    ...(pagging ? { pagging } : {}),
+    ...(pagging ? { pagination: pagging } : {}),
     ...(meta?.table ? { table: meta.table } : {}),
     ...(meta?.master ? { master: meta.master } : {}),
     ...(meta?.search_data ? { search_data: meta.search_data } : {}),

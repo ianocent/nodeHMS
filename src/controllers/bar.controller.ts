@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch, applySearchField } from '../utils/search';
+import { getStatusLabel } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -91,7 +93,37 @@ export class BarController {
         };
       }
 
-      const orderBy: any = sortKey === 'id' ? [{ end_date: 'desc' }, { id: 'asc' }] : { [sortKey]: order };
+const orderBy: any = sortKey === 'id' ? [{ end_date: 'desc' }, { id: 'asc' }] : { [sortKey]: order };
+
+      const businessDate = await getBusinessDate(propertyId!);
+
+      const codePosts = await prisma.code_posts.findMany({
+        where: { deleted_at: null, status: 1, type: 'DEFAULT' },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const codePostOptions = codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name }));
+
+      const table = [
+        { label: 'Status', key: 'status', type: 'checkbox', options: STATUSES, is_search: true },
+        { label: 'Bar Code', key: 'code', type: 'text', is_link: true, is_search: true },
+        { label: 'Description', key: 'description', type: 'text', is_search: true },
+        { label: 'Minimum Rate', key: 'minimum_rate', type: 'number', is_search: true },
+        {
+          label: 'Start Date',
+          key: 'start_date',
+          type: 'date',
+          is_search: true,
+          value: businessDate,
+          min: businessDate,
+        },
+        { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
+        { label: 'Post Code', key: 'code_post_id', type: 'select', options: codePostOptions, is_search: true },
+        { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
+      ];
+
+      applySearchField(where, req, table);
+
       const [bars, total] = await Promise.all([
         prisma.rates.findMany({
           where,
@@ -114,15 +146,6 @@ export class BarController {
         : [];
       const extraMap = new Map(extraBeds.map((c: any) => [Number(c.id), c.name]));
 
-      const businessDate = await getBusinessDate(propertyId!);
-
-      const codePosts = await prisma.code_posts.findMany({
-        where: { deleted_at: null, status: 1, type: 'DEFAULT' },
-        select: { id: true, name: true },
-        orderBy: { name: 'asc' },
-      });
-      const codePostOptions = codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name }));
-
       const formatted = bars.map((b: any) => ({
         id: Number(b.id),
         name: b.name,
@@ -138,11 +161,11 @@ export class BarController {
         code_post_extra_bed_id: b.code_post_extra_bed_id
           ? { value: Number(b.code_post_extra_bed_id), label: extraMap.get(Number(b.code_post_extra_bed_id)) || '' }
           : null,
-        minimum_rate: Number(b.minimum_rate),
+minimum_rate: Number(b.minimum_rate),
         sort: b.sort,
         created_at: b.created_at,
         created_by: b.created_by ? Number(b.created_by) : null,
-        status: b.status,
+        status: getStatusLabel(b.status),
         is_view: true,
         is_edit: true,
         is_need_approval: false,
@@ -151,25 +174,7 @@ export class BarController {
             ? { id: Number(b.code_posts.id), name: b.code_posts.name }
             : null,
         },
-      }));
-
-      const table = [
-        { label: 'Status', key: 'status', type: 'checkbox', options: STATUSES, is_search: true },
-        { label: 'Bar Code', key: 'code', type: 'text', is_link: true, is_search: true },
-        { label: 'Description', key: 'description', type: 'text', is_search: true },
-        { label: 'Minimum Rate', key: 'minimum_rate', type: 'number', is_search: true },
-        {
-          label: 'Start Date',
-          key: 'start_date',
-          type: 'date',
-          is_search: true,
-          value: businessDate,
-          min: businessDate,
-        },
-        { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
-        { label: 'Post Code', key: 'code_post_id', type: 'select', options: codePostOptions, is_search: true },
-        { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
-      ];
+}));
 
       const permFlags = getPermissionFlags(req.user, MENU_ID_BAR);
       const permission = {
@@ -179,10 +184,10 @@ export class BarController {
         delete: req.user?.superUser || permFlags.delete,
       };
 
-      success(res, bigintToNumber(formatted), 'Success', 200, {
+success(res, bigintToNumber(formatted), 'Success', 200, {
         table,
         permission,
-        search_data: [],
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

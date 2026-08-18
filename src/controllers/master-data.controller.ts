@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES, STATUS_OPTIONS, laravelPaging, listPermission } from '../utils/tableMeta';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
+import { dataSearch, applySearchField } from '../utils/search';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -94,15 +95,7 @@ export class MasterDataController {
 
       const where: any = { property_id: pid, deleted_at: null };
 
-      const [data, total, codeBillings, codeGls] = await Promise.all([
-        prisma.code_posts.findMany({
-          where,
-          orderBy: { id: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-          include: { code_billings: { select: { name: true } } },
-        }),
-        prisma.code_posts.count({ where }),
+      const [codeBillings, codeGls] = await Promise.all([
         prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
         prisma.code_gls.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
       ]);
@@ -139,6 +132,40 @@ export class MasterDataController {
         return opt;
       });
 
+      // parity CodePost::formatTable with dynamic options
+      const table = [
+        { label: 'No', key: 'no', type: 'none', is_search: false },
+        { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
+        { label: 'Post Code POS', key: 'is_pos', type: 'checkbox', is_search: true },
+        { label: 'Post Code', key: 'name', type: 'text', is_search: true },
+        { label: 'Type', key: 'type', type: 'select', options: typeOptions, related: relatedKeys, is_related: true, is_search: true },
+        { label: 'Billing Code', key: 'code_billing_id', type: 'select', options: billingOptions, is_search: true },
+        { label: 'Pay Commission', key: 'pay_commission', type: 'checkbox', related: relatedKeys, is_related: true, is_search: false },
+        { label: 'PB1', key: 'local_tax', type: 'checkbox', is_search: false },
+        { label: 'PB1 Percentage', key: 'local_tax_percentage', type: 'number', is_search: false },
+        { label: 'Service Charge', key: 'service_charge', type: 'checkbox', is_search: false },
+        { label: 'Service Charge Percentage', key: 'service_charge_percentage', type: 'number', is_search: false },
+        { label: 'Service Charge Include PB1', key: 'service_charge_include_local_tax', type: 'checkbox', is_search: false },
+        { label: 'Tax3', key: 'tax', type: 'checkbox', is_search: false },
+        { label: 'Tax3 Percentage', key: 'tax_percentage', type: 'number', is_search: false },
+        { label: 'Tax3 Include PB1', key: 'tax_include_local_tax', type: 'checkbox', is_search: false },
+        { label: 'GL Code', key: 'code_gl_id', type: 'select', options: glOptions, is_search: true },
+        { label: 'GL Description', key: 'code_gl_description', type: 'none', is_search: false },
+      ];
+
+      applySearchField(where, req, table);
+
+      const [data, total] = await Promise.all([
+        prisma.code_posts.findMany({
+          where,
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          include: { code_billings: { select: { name: true } } },
+        }),
+        prisma.code_posts.count({ where }),
+      ]);
+
       const rows = bigintToNumber(data).map((r: any, i: number) => {
         const glLabel = r.code_gl_id != null ? (glMap.get(Number(r.code_gl_id)) ?? '') : '';
         return {
@@ -169,30 +196,11 @@ export class MasterDataController {
         };
       });
 
-      // parity CodePost::formatTable with dynamic options
-      const table = [
-        { label: 'No', key: 'no', type: 'none', is_search: false },
-        { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
-        { label: 'Post Code POS', key: 'is_pos', type: 'checkbox', is_search: true },
-        { label: 'Post Code', key: 'name', type: 'text', is_search: true },
-        { label: 'Type', key: 'type', type: 'select', options: typeOptions, related: relatedKeys, is_related: true, is_search: true },
-        { label: 'Billing Code', key: 'code_billing_id', type: 'select', options: billingOptions, is_search: true },
-        { label: 'Pay Commission', key: 'pay_commission', type: 'checkbox', related: relatedKeys, is_related: true, is_search: false },
-        { label: 'PB1', key: 'local_tax', type: 'checkbox', is_search: false },
-        { label: 'PB1 Percentage', key: 'local_tax_percentage', type: 'number', is_search: false },
-        { label: 'Service Charge', key: 'service_charge', type: 'checkbox', is_search: false },
-        { label: 'Service Charge Percentage', key: 'service_charge_percentage', type: 'number', is_search: false },
-        { label: 'Service Charge Include PB1', key: 'service_charge_include_local_tax', type: 'checkbox', is_search: false },
-        { label: 'Tax3', key: 'tax', type: 'checkbox', is_search: false },
-        { label: 'Tax3 Percentage', key: 'tax_percentage', type: 'number', is_search: false },
-        { label: 'Tax3 Include PB1', key: 'tax_include_local_tax', type: 'checkbox', is_search: false },
-        { label: 'GL Code', key: 'code_gl_id', type: 'select', options: glOptions, is_search: true },
-        { label: 'GL Description', key: 'code_gl_description', type: 'none', is_search: false },
-      ];
       success(res, rows, 'Success', 200, {
         table,
         pagination: laravelPaging(total, limit, page),
         permission: listPermission(req, { add: true, edit: true, delete: true }),
+        search_data: dataSearch(req, table) as any,
       } as any);
     } catch (err: any) {
       console.error('CodePost list error:', err);

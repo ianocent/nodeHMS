@@ -3260,13 +3260,139 @@ async function getRoomTypeDetailedReport(params: any): Promise<any[]> {
   const pid = params.propertyId;
   const startDate = params.startDate || params.date || formatDate(new Date());
   const endDate = params.endDate || startDate;
-  const method = 'room_type_detailed_report';
-  const requestId = `${startDate}-${endDate}-${String(pid)}-${method}`;
-  const existing = await prisma.requests.findFirst({ where: { request_id: requestId, property_id: pid, created_at: { gte: new Date(Date.now() - 10 * 60000) } }, orderBy: { id: 'desc' } });
-  if (!existing) {
-    await prisma.requests.create({ data: { request_id: requestId, property_id: pid, method, start_date: startDate, end_date: endDate, status: 0, created_at: new Date() } });
+  const s = new Date(`${startDate}T00:00:00Z`);
+  const e = new Date(`${endDate}T23:59:59Z`);
+
+  // code_posts linked to code_billings named 'room revenue' (breakdown.code = code_posts.id)
+  const billingIds = (await prisma.code_billings.findMany({
+    where: { property_id: pid, name: { contains: 'room revenue', mode: 'insensitive' }, deleted_at: null },
+    select: { id: true },
+  })).map((b: any) => b.id);
+  const postIds = billingIds.length ? (await prisma.code_posts.findMany({
+    where: { code_billing_id: { in: billingIds }, deleted_at: null },
+    select: { id: true },
+  })).map((p: any) => p.id) : [];
+
+  const roomTypes = (await prisma.room_types.findMany({
+    where: { property_id: pid, deleted_at: null },
+    include: { rooms: { where: { deleted_at: null }, select: { room_status: true } } },
+  })).filter((t: any) => !t.name.toUpperCase().includes('VIRTUAL'));
+
+  const reservations = await prisma.reservations.findMany({
+    where: {
+      property_id: pid,
+      date: { gte: s, lte: e },
+      deleted_at: null,
+      folios: {
+        is: {
+          status_reservation: { notIn: [2, 5] },
+          is_house_use: false,
+          complimentary: false,
+          type_reservation: { in: ['fit', 'git', 'vr'] },
+        },
+      },
+    },
+    select: {
+      id: true, date: true, folio_id: true, room_type_id: true,
+      folios: {
+        select: {
+          check_in_date: true, check_out_date: true, type_reservation: true,
+          folio_number: true, parent: true,
+        },
+      },
+    },
+  });
+  const fitFoliosByType: Record<string, any[]> = {};
+  const gitFoliosByType: Record<string, any[]> = {};
+  const allFitFolioIds: bigint[] = [];
+  const allGitFolioIds: bigint[] = [];
+  const dstr = (d: any) => d ? d.toISOString().slice(0, 10) : '';
+  for (const r of reservations) {
+    const f = (r as any).folios;
+    if (!f) continue;
+    const isFit = f.type_reservation === 'fit' || (f.type_reservation === 'vr' && f.folio_number && f.folio_number.startsWith('F'));
+    const isGit = f.type_reservation === 'git' && f.parent !== 0;
+    if (isFit) { (fitFoliosByType[String(r.room_type_id)] = fitFoliosByType[String(r.room_type_id)] || []).push(r); allFitFolioIds.push(r.folio_id); }
+    if (isGit) { (gitFoliosByType[String(r.room_type_id)] = gitFoliosByType[String(r.room_type_id)] || []).push(r); allGitFolioIds.push(r.folio_id); }
   }
-  return [{ status: 'success', message: 'Report is being generated. Please check back later.', request_id: requestId }];
+
+  const breakdowns = await prisma.transaction_breakdowns.findMany({
+    where: {
+      property_id: pid,
+      date: { gte: s, lte: e },
+      type: { notIn: ['payment', 'paidout', 'refund'] },
+      folio_id: { in: [...new Set([...allFitFolioIds, ...allGitFolioIds])] },
+      ...(postIds.length ? { code: { in: postIds } } : {}),
+    },
+    select: { folio_id: true, date: true, amount: true, type_amount: true },
+  });
+  const fitRevSet = new Set(allFitFolioIds.map(String));
+  const gitRevSet = new Set(allGitFolioIds.map(String));
+  const revByDay = (dateStr: string, kind: 'fit' | 'git'): number => {
+    let sum = 0;
+    for (const b of breakdowns) {
+      if (dstr(b.date) !== dateStr) continue;
+      const fid = String(b.folio_id);
+      if (kind === 'fit' && !fitRevSet.has(fid)) continue;
+      if (kind === 'git' && !gitRevSet.has(fid)) continue;
+      sum += b.type_amount === 'PLUS' ? Number(b.amount) : -Number(b.amount);
+    }
+    return sum;
+  };
+
+  const emptyTotals = () => ({
+    total_room: 0, block: 0, non_grp_arr: 0, non_grp_dep: 0, non_grp_sty: 0, non_grp_revenue: 0,
+    grp_arr: 0, grp_dep: 0, grp_sty: 0, grp_revenue: 0, occupied_rooms: 0,
+    total_arr: 0, total_dep: 0, total_sty: 0, total_revenue: 0, occupancy: 0, ave_nett_revenue: 0,
+  });
+  const grandTotal = emptyTotals();
+  const reportData: any[] = [];
+  const cursor = new Date(s);
+  while (cursor <= e) {
+    const dateStr = cursor.toISOString().slice(0, 10);
+    const dateData: any = { date: dateStr, room_types: [], totals: emptyTotals() };
+    for (const rt of roomTypes) {
+      const totalRooms = rt.rooms.length;
+      const blockedRooms = rt.rooms.filter((r: any) => r.room_status === 4 || r.room_status === 3).length;
+      const fit = fitFoliosByType[String(rt.id)] || [];
+      const git = gitFoliosByType[String(rt.id)] || [];
+      const onDate = (r: any) => dstr(r.date) === dateStr;
+      const inOnDate = (r: any) => dstr(r.folios.check_in_date) === dateStr;
+      const outOnDate = (r: any) => dstr(r.folios.check_out_date) === dateStr;
+      const non_grp_arr = fit.filter((r) => onDate(r) && inOnDate(r)).length;
+      const non_grp_dep = fit.filter((r) => onDate(r) && outOnDate(r)).length;
+      const non_grp_sty = fit.filter((r) => onDate(r) && !inOnDate(r) && !outOnDate(r)).length;
+      const grp_arr = git.filter((r) => onDate(r) && inOnDate(r)).length;
+      const grp_dep = git.filter((r) => onDate(r) && outOnDate(r)).length;
+      const grp_sty = git.filter((r) => onDate(r) && !inOnDate(r) && !outOnDate(r)).length;
+      const non_grp_revenue = revByDay(dateStr, 'fit');
+      const grp_revenue = revByDay(dateStr, 'git');
+      const occupiedRooms = non_grp_arr + non_grp_sty + grp_arr + grp_sty;
+      const total_revenue = non_grp_revenue + grp_revenue;
+      const rtData: any = {
+        room_type: rt.name, total_room: totalRooms, block: blockedRooms,
+        non_grp_arr, non_grp_dep, non_grp_sty, non_grp_revenue,
+        grp_arr, grp_dep, grp_sty, grp_revenue,
+        occupied_rooms: occupiedRooms,
+        total_arr: non_grp_arr + grp_arr, total_dep: non_grp_dep + grp_dep, total_sty: non_grp_sty + grp_sty,
+        total_revenue,
+        occupancy: totalRooms > 0 ? (occupiedRooms / totalRooms) * 100 : 0,
+        ave_nett_revenue: occupiedRooms > 0 ? total_revenue / occupiedRooms : 0,
+      };
+      dateData.room_types.push(rtData);
+      for (const key of Object.keys(emptyTotals())) (dateData.totals as any)[key] += rtData[key];
+    }
+    reportData.push(dateData);
+    for (const key of Object.keys(emptyTotals())) (grandTotal as any)[key] += (dateData.totals as any)[key];
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+
+  return [{
+    startDate: `${String(s.getUTCDate()).padStart(2, '0')}/${String(s.getUTCMonth() + 1).padStart(2, '0')}/${s.getUTCFullYear()}`,
+    endDate: `${String(e.getUTCDate()).padStart(2, '0')}/${String(e.getUTCMonth() + 1).padStart(2, '0')}/${e.getUTCFullYear()}`,
+    reportData,
+    grandTotal,
+  }];
 }
 
 async function getInHouseGuestListing(params: any): Promise<any[]> {

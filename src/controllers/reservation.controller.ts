@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch, applySearchField } from '../utils/search';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 
@@ -280,12 +281,25 @@ export class ReservationController {
 
       if (propertyId) where.property_id = propertyId;
       if (is_day_use) where.is_day_use = true;
-      if (parentId !== null) where.parent = parentId;
+if (parentId !== null) where.parent = parentId;
 
-      // Search
-      if (search_field && search_value) {
-        where[search_field] = { contains: search_value, mode: 'insensitive' };
-      }
+      const table = [
+        { label: 'Folio No.', key: 'folio_number', type: 'none', is_search: true },
+        { label: 'Guest Name', key: 'first_name', type: 'none', is_search: true },
+        { label: 'Last Name', key: 'last_name', type: 'none', is_search: true },
+        { label: 'Company', key: 'company_name', type: 'none', is_search: true },
+        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: true },
+        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: true },
+        { label: 'Status', key: 'status_reservation', type: 'badge', is_search: false },
+        { label: 'Type', key: 'type_reservation', type: 'none', is_search: false },
+        { label: 'Property', key: 'property_name', type: 'none', is_search: false },
+        { label: 'Total', key: 'total_amount', type: 'number', is_search: false },
+        { label: 'Day Use', key: 'is_day_use', type: 'checkbox', is_search: false },
+        { label: 'House Use', key: 'is_house_use', type: 'checkbox', is_search: false },
+        { label: 'Complimentary', key: 'complimentary', type: 'checkbox', is_search: false },
+      ];
+
+      applySearchField(where, req, table);
 
       const [folios, total] = await Promise.all([
         prisma.folios.findMany({
@@ -343,8 +357,10 @@ export class ReservationController {
         delete: req.user?.superUser || permFlags.delete,
       };
 
-      success(res, formatted, 'Success', 200, {
+success(res, formatted, 'Success', 200, {
+        table,
         permission,
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
@@ -2846,8 +2862,8 @@ export class ReservationController {
         { label: 'Name', key: 'name', type: 'none', is_search: false },
         ...days.map((day) => ({ label: day, key: day, type: 'none', is_search: false })),
       ];
-      const total = data.length;
-      res.json({ data, code: 200, message: 'Success', table, pagination: paggingMetaLocal(total, 99999, parseInt(req.query.page as string) || 1), permission: { view: true, add: true, edit: true, delete: true } });
+const total = data.length;
+      success(res, data, 'Success', 200, { table, pagination: paggingMetaLocal(total, 99999, parseInt(req.query.page as string) || 1), permission: { view: true, add: true, edit: true, delete: true } });
     } catch (err: any) { console.error('Reservation available room error:', err); error(res, 'Failed to get available room', 500); }
   }
 
@@ -2957,9 +2973,9 @@ export class ReservationController {
           item: bigintToNumber(rt),
         });
       }
-      const filtered = data.filter((d: any) => d.available > 0);
+const filtered = data.filter((d: any) => d.available > 0);
       const totalData = filtered.length;
-      res.json({ data: filtered, code: 200, message: 'Success', table, pagination: paggingMetaLocal(totalData, 9999, 1), permission: { view: true, add: true, edit: true, delete: true } });
+      success(res, filtered, 'Success', 200, { table, pagination: paggingMetaLocal(totalData, 9999, 1), permission: { view: true, add: true, edit: true, delete: true } });
     } catch (err: any) { console.error('Reservation room git error:', err); error(res, 'Failed to get room git', 500); }
   }
 

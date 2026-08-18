@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch, applySearchField } from '../utils/search';
+import { getStatusLabel } from '../utils/cmsConfig';
 import crypto from 'crypto';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -80,6 +82,17 @@ export class PromotionController {
         where.status = 1; // onlyActive
       }
 
+const table = [
+        { label: 'Code', key: 'promotion_code', type: 'none', is_search: true },
+        { label: 'Type', key: 'promotion_type', type: 'none', is_search: true },
+        { label: 'Description', key: 'description', type: 'none', is_search: true },
+        { label: 'Discount', key: 'discount_percentage', type: 'none', is_search: false },
+        { label: 'Status', key: 'status', type: 'badge', is_search: false },
+        { label: 'Action', key: 'action', type: 'action', is_search: false }
+      ];
+
+      applySearchField(where, req, table);
+
       const [promotions, total] = await Promise.all([
         prisma.promotions.findMany({
           where,
@@ -90,15 +103,6 @@ export class PromotionController {
         prisma.promotions.count({ where })
       ]);
 
-      const table = [
-        { label: 'Code', key: 'promotion_code', type: 'none', is_search: true },
-        { label: 'Type', key: 'promotion_type', type: 'none', is_search: true },
-        { label: 'Description', key: 'description', type: 'none', is_search: true },
-        { label: 'Discount', key: 'discount_percentage', type: 'none', is_search: false },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false }
-      ];
-
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
         view: true,
@@ -107,16 +111,10 @@ export class PromotionController {
         delete: req.user?.superUser || permFlags.delete
       };
 
-      const searchData = [
-        { field: 'promotion_code', label: 'Code' },
-        { field: 'promotion_type', label: 'Type' },
-        { field: 'description', label: 'Description' }
-      ];
-
-      success(res, promotions.map(p => bigintToNumber(p)), 'Success', 200, {
+      success(res, promotions.map((p: any) => ({ ...bigintToNumber(p), status: getStatusLabel(p.status) })), 'Success', 200, {
         table,
         permission,
-        search_data: searchData,
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { STATUSES } from '../utils/cmsConfig';
+import { getPermissionFlags } from '../middleware/permission.middleware';
 import { AuthController } from './auth.controller';
 
 const genericPool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -81,7 +82,15 @@ function sanitizeBody(body: any): any {
 }
 
 // Models whose rows must stay scoped to the authenticated user's property.
-const PROPERTY_SCOPED_MODELS = new Set(['shift_roster', 'roster_list', 'rosters']);
+const PROPERTY_SCOPED_MODELS = new Set(['shift_roster', 'roster_list', 'rosters', 'content_rooms', 'payment_matrices', 'staah_interfaces', 'staah_reservations', 'staah_ota_company_mappings', 'stop_sells']);
+
+// menuId-based permission per generic model (Laravel hasCrudPermission parity).
+const MODEL_MENU: Record<string, number> = {
+  staah_reservations: 1184,
+  staah_interfaces: 1185,
+  staah_ota_company_mappings: 1186,
+  rates: 109,
+};
 
 const TIME_FIELDS = ['time_start', 'time_end', 'overtime_start', 'overtime_end'];
 
@@ -114,6 +123,12 @@ function parsePagination(query: any) {
 }
 
 export class GenericController {
+  private getPermission(req: Request, model: string): { view: boolean; add: boolean; edit: boolean; delete: boolean } {
+    const menuId = MODEL_MENU[model];
+    if (!menuId) return { view: true, add: true, edit: true, delete: true };
+    return getPermissionFlags(req.user as any, menuId);
+  }
+
   private getPrismaModel(modelName: string): any {
     const client = getPrisma();
     const model = (client as any)[this.toPlural(modelName)];
@@ -223,11 +238,17 @@ export class GenericController {
         ? (hasSoftDelete ? { deleted_at: { not: null } } : {})
         : (hasSoftDelete ? { deleted_at: null } : {});
       for (const [k, v] of Object.entries(req.query)) {
-        if (['page', 'limit', 'search', 'sort', 'order', 'trash', 'group'].includes(k)) continue;
+        if (['page', 'limit', 'search', 'sort', 'order', 'trash'].includes(k)) continue;
         if (k.endsWith('_id') && String(v)) where[k] = BigInt(String(v));
       };
       if (PROPERTY_SCOPED_MODELS.has(model) && !where.property_id && req.user?.lastProperty) {
         where.property_id = BigInt(req.user.lastProperty);
+      }
+      if (req.query.group && String(req.query.group)) {
+        try {
+          await modelDelegate.findFirst({ where: { group: String(req.query.group) }, select: { id: true } });
+          where.group = String(req.query.group);
+        } catch { /* model has no group column */ }
       }
       if (search && searchFields.length > 0) {
         where.OR = searchFields.map((f: string) => ({ [f]: { contains: search, mode: 'insensitive' } }));
@@ -256,7 +277,7 @@ export class GenericController {
       }));
       if (table.length > 0) table.push({ label: 'Action', key: 'action', type: 'action', is_search: false });
 
-      const permission = { view: true, add: true, edit: true, delete: true };
+      const permission = this.getPermission(req, model);
 
       success(res, formatTimeRows(bigintToNumber(data)), 'Success', 200, {
         table,
@@ -285,7 +306,7 @@ export class GenericController {
       if (id === null) { notFound(res, 'Record not found'); return; }
       const record = await modelDelegate.findUnique({ where: { id } });
       if (!record) { notFound(res, 'Record not found'); return; }
-      const permission = { view: true, add: true, edit: true, delete: true };
+      const permission = this.getPermission(req, model);
       success(res, formatTimeRows(bigintToNumber(record)), 'Success', 200, { table: [], search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
@@ -322,7 +343,7 @@ export class GenericController {
   async createForm(req: Request, res: Response): Promise<void> {
     try {
       const model = String(req.params.model);
-      const permission = { view: true, add: true, edit: true, delete: true };
+      const permission = this.getPermission(req, model);
       const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
       const extra: any = { table: [], master, search_data: [], permission };
       if (model === 'overbooking') {
@@ -342,7 +363,7 @@ export class GenericController {
       if (id === null) { notFound(res, 'Record not found'); return; }
       const record = await modelDelegate.findUnique({ where: { id } });
       if (!record) { notFound(res, 'Record not found'); return; }
-      const permission = { view: true, add: true, edit: true, delete: true };
+      const permission = this.getPermission(req, model);
       const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
       success(res, formatTimeRows(bigintToNumber(record)), 'Success', 200, { table: [], master, search_data: [], permission });
     } catch (err: any) {
@@ -370,7 +391,7 @@ export class GenericController {
           throw e;
         }
       }
-      const permission = { view: true, add: true, edit: true, delete: true };
+      const permission = this.getPermission(req, model);
       success(res, bigintToNumber(record), 'Created', 201, { table: [], search_data: [], permission });
     } catch (err: any) {
       console.error('Generic create error:', err);

@@ -3,6 +3,19 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { dataSearch, applySearchField } from '../utils/search';
+import { getStatusLabel } from '../utils/cmsConfig';
+
+const ACCOUNTING_STATUSES = [
+  { value: 1, label: 'Processed' },
+  { value: 2, label: 'Pending' },
+  { value: 3, label: 'Cancelled' },
+];
+
+function getAccountingStatusLabel(statusId: number | null | undefined): { value: number; label: string } {
+  const s = ACCOUNTING_STATUSES.find((x) => x.value === statusId);
+  return { value: statusId ?? 0, label: s?.label ?? 'Unknown' };
+}
 
 const ACCOUNTING_TABLE = [
   { label: 'Date', key: 'date', type: 'date', is_search: true },
@@ -77,14 +90,16 @@ export class AccountingController {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
-      const trash = req.query.trash === '1' || req.query.trash === 'true';
+const trash = req.query.trash === '1' || req.query.trash === 'true';
       const where: any = {
         property_id: pid,
         type_accounting: mappedType,
         deleted_at: trash ? { not: null } : null,
       };
 
-      const [records, total] = await Promise.all([
+      applySearchField(where, req, ACCOUNTING_TABLE);
+
+const [records, total] = await Promise.all([
         prisma.accountings.findMany({
           where,
           orderBy: { id: 'desc' },
@@ -98,11 +113,15 @@ export class AccountingController {
         prisma.accountings.count({ where }),
       ]);
 
-      const formatted = records.map((r: any) => bigintToNumber(r));
+      const formatted = records.map((r: any) => ({
+        ...bigintToNumber(r),
+        status_accounting: getAccountingStatusLabel(r.status_accounting),
+      }));
 
-      success(res, formatted, 'Success', 200, {
+success(res, formatted, 'Success', 200, {
         table: ACCOUNTING_TABLE,
         permission: { view: true, add: true, edit: true, delete: true },
+        search_data: dataSearch(req, ACCOUNTING_TABLE) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

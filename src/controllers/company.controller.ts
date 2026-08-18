@@ -4,7 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
-import { STATUSES, REGIONS, BILLINGS, TERMS } from '../utils/cmsConfig';
+import { STATUSES, REGIONS, BILLINGS, TERMS, moneyFormat } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -487,9 +487,44 @@ export class CompanyController {
     } catch (err: any) { console.error('Statistic destroy error:', err); error(res, 'Failed to delete statistic', 500); }
   }
 
-  // â”€â”€ AR Transaction â”€â”€
+// — AR Transaction (Laravel parity: query `transactions` by model_type/model_id, folio not cancelled)
   static async arTransactionList(req: Request, res: Response): Promise<void> {
-    try { const data = await prisma.company_profile_ar_transactions.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try {
+      const companyId = req.query.company_id as string;
+      const page = parseInt(req.query.page as string) || 1;
+      const lim = parseInt(req.query.limit as string) || 10;
+      const s = req.query.search as string;
+      const where: any = {
+        model_type: 'App\\Models\\CompanyProfile',
+        model_id: companyId ? BigInt(companyId) : undefined,
+        type: { in: ['room_revenue', 'manual_posting', 'additional_item'] },
+        folios: { is: { status_reservation: { not: 2 } } },
+      };
+      if (s) where.OR = [{ folios: { is: { folio_number: { contains: s, mode: 'insensitive' } } } }];
+      const totalData = await prisma.transactions.count({ where });
+      const data = await prisma.transactions.findMany({
+        where,
+        orderBy: { created_at: 'desc' },
+        skip: (page - 1) * lim,
+        take: lim,
+        include: { folios: { select: { folio_number: true } } },
+      });
+      const result = data.map((t) => ({
+        date: t.date ? t.date.toISOString().slice(0, 10) : '',
+        folio_number: t.folios?.folio_number ?? '',
+        total: moneyFormat(Number(t.amount)),
+      }));
+      success(res, result, 'Success', 200, {
+        table: [
+          { label: 'Date', key: 'date', type: 'none', is_search: true },
+          { label: 'Description', key: 'folio_number', type: 'none', is_search: true },
+          { label: 'Total', key: 'total', type: 'none', is_search: false },
+        ],
+        pagination: laravelPaging(totalData, lim, page),
+        permission: listPermission(req, { add: true }),
+        search_data: s ? [{ field: s, value: s }] : [],
+      });
+    } catch (err: any) { console.error('AR transaction list error:', err); error(res, 'Failed', 500); }
   }
   static async arTransactionStore(req: Request, res: Response): Promise<void> {
     try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, transaction_code, document, date, description, amount } = req.body;

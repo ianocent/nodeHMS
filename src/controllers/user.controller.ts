@@ -5,6 +5,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch, applySearchField } from '../utils/search';
+import { getStatusLabel } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -56,6 +58,17 @@ export class UserController {
         where.last_property = propertyId;
       }
 
+      const table = [
+        { label: 'Name', key: 'name', type: 'none', is_search: true },
+        { label: 'Username', key: 'username', type: 'none', is_search: true },
+        { label: 'Email', key: 'email', type: 'none', is_search: true },
+        { label: 'Status', key: 'status', type: 'badge', is_search: false },
+        { label: 'Role', key: 'roles', type: 'none', is_search: false },
+        { label: 'Action', key: 'action', type: 'action', is_search: false }
+      ];
+
+      applySearchField(where, req, table);
+
       const [users, total] = await Promise.all([
         prisma.users.findMany({
           where,
@@ -84,17 +97,9 @@ export class UserController {
         ...u,
         id: Number(u.id),
         roles: rolesMap.get(u.id) || [],
-        last_property: u.last_property ? Number(u.last_property) : null
+        last_property: u.last_property ? Number(u.last_property) : null,
+        status: getStatusLabel(u.status),
       }));
-
-      const table = [
-        { label: 'Name', key: 'name', type: 'none', is_search: true },
-        { label: 'Username', key: 'username', type: 'none', is_search: true },
-        { label: 'Email', key: 'email', type: 'none', is_search: true },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Role', key: 'roles', type: 'none', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false }
-      ];
 
       const permFlags = getPermissionFlags(req.user, 1116);
       const permission = {
@@ -107,6 +112,7 @@ export class UserController {
       success(res, bigintToNumber(formattedUsers), 'Success', 200, {
         table,
         permission,
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

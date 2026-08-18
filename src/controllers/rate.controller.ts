@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch, applySearchField } from '../utils/search';
+import { getStatusLabel } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -117,7 +119,38 @@ export class RateController {
         ];
       }
 
-      const [rates, total, allCodePosts] = await Promise.all([
+const allCodePosts = await prisma.code_posts.findMany({
+        where: { deleted_at: null, status: STATUS_ACTIVE },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+
+      const codePostById = new Map(allCodePosts.map((cp: any) => [cp.id, cp.name]));
+      const codePostOptions = allCodePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name }));
+
+      const table = [
+        {
+          label: 'Status',
+          key: 'status',
+          type: 'checkbox',
+          options: [
+            { value: 1, label: 'Active' },
+            { value: 0, label: 'Inactive' },
+          ],
+          is_search: true,
+        },
+        { label: 'Rate Code', key: 'code', type: 'text', is_link: true, uri: '/rate-management/rate', is_search: true },
+        { label: 'Name', key: 'name', type: 'text', is_search: true },
+        { label: 'Description', key: 'description', type: 'text', is_search: true },
+        { label: 'Start Date', key: 'start_date', type: 'date', is_search: true },
+        { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
+        { label: 'Post Code', key: 'code_post_id', type: 'select', options: codePostOptions, is_search: true },
+        { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
+      ];
+
+      applySearchField(where, req, table);
+
+      const [rates, total] = await Promise.all([
         prisma.rates.findMany({
           where,
           orderBy: { [sort]: order },
@@ -125,15 +158,7 @@ export class RateController {
           take: limit,
         }),
         prisma.rates.count({ where }),
-        prisma.code_posts.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
-          select: { id: true, name: true },
-          orderBy: { name: 'asc' },
-        }),
       ]);
-
-      const codePostById = new Map(allCodePosts.map((cp: any) => [cp.id, cp.name]));
-      const codePostOptions = allCodePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name }));
 
       const formatted = rates.map((r: any) => ({
         id: Number(r.id),
@@ -166,33 +191,13 @@ export class RateController {
           value: r.code_post_extra_bed_id ? Number(r.code_post_extra_bed_id) : null,
           label: codePostById.get(r.code_post_extra_bed_id) || '',
         },
-        sort: r.sort,
-        status: r.status,
+sort: r.sort,
+        status: getStatusLabel(r.status),
         created_at: r.created_at,
         updated_at: r.updated_at,
-      }));
+}));
 
-      const table = [
-        {
-          label: 'Status',
-          key: 'status',
-          type: 'checkbox',
-          options: [
-            { value: 1, label: 'Active' },
-            { value: 0, label: 'Inactive' },
-          ],
-          is_search: true,
-        },
-        { label: 'Rate Code', key: 'code', type: 'text', is_link: true, uri: '/rate-management/rate', is_search: true },
-        { label: 'Name', key: 'name', type: 'text', is_search: true },
-        { label: 'Description', key: 'description', type: 'text', is_search: true },
-        { label: 'Start Date', key: 'start_date', type: 'date', is_search: true },
-        { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
-        { label: 'Post Code', key: 'code_post_id', type: 'select', options: codePostOptions, is_search: true },
-        { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
-      ];
-
-      const permFlags = getPermissionFlags(req.user, MENU_ID);
+const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
         view: true,
         add: req.user?.superUser || permFlags.add,
@@ -203,6 +208,7 @@ export class RateController {
       success(res, bigintToNumber(formatted), 'Success', 200, {
         table,
         permission,
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

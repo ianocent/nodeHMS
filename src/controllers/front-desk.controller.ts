@@ -4,7 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { STATUSES, moneyFormat } from '../utils/cmsConfig';
+import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
+import { dataSearch, applySearchField } from '../utils/search';
 import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -717,26 +718,91 @@ export class FrontDeskController {
   }
 
   // ==================== BATCH POSTING ====================
-  static async batchPostingList(req: Request, res: Response): Promise<void> {
+static async batchPostingList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 50;
+      const limit = parseInt(req.query.limit as string) || 10;
       const pid = req.user?.lastProperty ?? 0n;
 
-      const where: any = { property_id: pid, is_posting: 1, deleted_at: null };
+      const where: any = { property_id: pid, deleted_at: null };
+      if (req.query.search) {
+        where.description = { contains: String(req.query.search), mode: 'insensitive' };
+      }
 
-      const [data, total] = await Promise.all([
-        prisma.transactions.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
-        prisma.transactions.count({ where }),
+      // parity TransactionTemp::formatTable (options: folios check-in, code items active)
+      const [folioOptions, codeItemOptions] = await Promise.all([
+        prisma.folios.findMany({
+          where: { status_reservation: STATUS_RESERVATION.check_in.id, deleted_at: null },
+          select: { id: true, folio_number: true },
+          orderBy: { id: 'desc' },
+          take: 100,
+        }),
+        prisma.code_items.findMany({
+          where: { deleted_at: null, status: 1 },
+          select: { id: true, name: true, sales: true },
+          orderBy: { name: 'asc' },
+        }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      const table = [
+        {
+          label: 'Folio', key: 'folio_id', type: 'select',
+          options: folioOptions.map((f: any) => ({ value: Number(f.id), label: f.folio_number })),
+          is_search: false,
+        },
+        { label: 'Date', key: 'date', type: 'none', is_search: false },
+        {
+          label: 'Item Code', key: 'code_item_id', type: 'select',
+          options: codeItemOptions.map((c: any) => ({ value: Number(c.id), label: c.name, amount: moneyFormat(c.sales) })),
+          related: ['amount'], is_related: true, is_search: false,
+        },
+        { label: 'Remark', key: 'description', type: 'text', is_search: true },
+        { label: 'Total Amount', key: 'amount', type: 'number', is_search: false },
+        { label: 'Staff', key: 'staff', type: 'none', is_search: false },
+        { label: 'Overwrite Time', key: 'time', type: 'none', is_search: false },
+      ];
+
+      applySearchField(where, req, table);
+
+      const [data, total] = await Promise.all([
+        prisma.transaction_temps.findMany({
+          where,
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          include: { folios: { select: { folio_number: true } } },
+        }),
+        prisma.transaction_temps.count({ where }),
+      ]);
+
+      const userIds = [...new Set(data.map((d) => d.created_by).filter((x): x is bigint => x !== null))];
+      const users = userIds.length > 0
+        ? await prisma.users.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } })
+        : [];
+      const userMap = new Map(users.map((u) => [Number(u.id), u.name]));
+
+      const formatted = bigintToNumber(data).map((r: any) => ({
+        ...r,
+        folio_id: { value: r.folio_id, label: r.folios?.folio_number ?? '' },
+        code: { value: r.code_item_id, label: r.code_item_name ?? '' },
+        code_item_id: { value: r.code_item_id, label: r.code_item_name ?? '' },
+        description: (r.description || '').toUpperCase(),
+        total: r.type_amount === 'MINUS' ? -Math.abs(r.total) : r.total,
+        amount: r.total,
+        staff: r.created_by ? userMap.get(Number(r.created_by)) || '' : '',
+        time: r.created_at ? new Date(r.created_at).toISOString().slice(0, 19).replace('T', ' ') : '',
+        folios: undefined,
+      }));
+
+      success(res, formatted, 'Success', 200, {
+        table,
+        search_data: dataSearch(req, table) as any,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Batch posting list error:', err); error(res, 'Failed to list batch postings', 500); }
   }
 
-  static async batchPostingStore(req: Request, res: Response): Promise<void> {
+static async batchPostingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
       const { transactions: txns } = req.body;
@@ -744,8 +810,63 @@ export class FrontDeskController {
 
       const created = [];
       for (const t of txns) {
-        const data = await prisma.transactions.create({
-          data: { property_id: pid, folio_id: BigInt(t.folio_id), type: 'debit', date: new Date(), code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id ? BigInt(t.type_payment_id) : null, amount: t.amount || 0, total: t.total || 0, description: t.description, is_posting: 1, created_at: new Date(), created_by: req.user?.id },
+        // parity Laravel: validate code_item_id, get code_post, calculate charges
+        const codeItemId = BigInt(t.code_item_id ?? t.code);
+        const codeItem = await prisma.code_items.findUnique({ where: { id: codeItemId }, include: { code_posts: true } });
+        if (!codeItem) { badRequest(res, 'Code Item not found'); return; }
+
+        const codePost = codeItem.code_posts;
+        const sumPrice = Number(t.amount ?? t.total ?? 0);
+        const calc = codePost ? calculateCodePost(
+          {
+            tax: codePost.tax ?? false,
+            tax_percentage: codePost.tax_percentage ? Number(codePost.tax_percentage) : 0,
+            local_tax: codePost.local_tax ?? false,
+            local_tax_percentage: codePost.local_tax_percentage ? Number(codePost.local_tax_percentage) : 0,
+            service_charge: codePost.service_charge ?? false,
+            service_charge_percentage: codePost.service_charge_percentage ? Number(codePost.service_charge_percentage) : 0,
+            service_charge_include_local_tax: codePost.service_charge_include_local_tax ?? false,
+            tax_include_local_tax: codePost.tax_include_local_tax ?? false,
+          },
+          sumPrice,
+          false
+        ) : { amount: sumPrice, service: 0, tax3: 0, pb1: 0, total: sumPrice };
+
+        const businessDate = await AuthController.getBusinessDate(pid);
+
+        const data = await prisma.transaction_temps.create({
+          data: {
+            property_id: pid,
+            folio_id: BigInt(t.folio_id),
+            type: 'manual_posting',
+            type_amount: 'PLUS',
+            date: new Date(businessDate),
+            code: codePost ? BigInt(codePost.id) : BigInt(t.code),
+            code_item_id: codeItemId,
+            description: t.description,
+            overwrite_reason: t.overwrite_reason,
+            time: t.time,
+            bill_to: t.bill_to ? Number(t.bill_to) : null,
+            reference: t.reference,
+            pos: t.pos,
+            receipt: t.receipt,
+            last_digit_card: t.last_digit_card,
+            card_name: t.card_name,
+            remark: t.remark,
+            voucher: t.voucher,
+            booking: t.booking,
+            amount: calc.amount,
+            svr_chrg: calc.service,
+            tax3: calc.tax3,
+            pb1: calc.pb1,
+            total: calc.total,
+            rate: sumPrice,
+            surcharge: 0,
+            gst: 0,
+            status: 1,
+            created_at: new Date(),
+            created_by: req.user?.id ?? null,
+          },
         });
         created.push(data);
       }

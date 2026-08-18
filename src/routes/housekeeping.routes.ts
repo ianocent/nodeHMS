@@ -18,6 +18,13 @@ router.put('/housekeeping/setups/:id', authMiddleware, requirePermission(158, 'e
 router.delete('/housekeeping/setups/:id', authMiddleware, requirePermission(158, 'delete'), HousekeepingController.setupDestroy);
 router.get('/housekeeping/room-status', authMiddleware, requirePermission(158, 'view'), HousekeepingController.roomStatus);
 router.get('/housekeeping/room-status/master', authMiddleware, requirePermission(158, 'view'), HousekeepingController.roomStatusMaster);
+// static paths BEFORE /room-status/:id (Express :id would swallow them)
+router.get('/housekeeping/room-status/checklist', authMiddleware, requirePermission(158, 'view'), HousekeepingController.roomStatusChecklist);
+router.post('/housekeeping/room-status/batch', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.roomStatusBatch);
+router.get('/housekeeping/room-status/current-housekeepers', authMiddleware, requirePermission(158, 'view'), HousekeepingController.currentHousekeepers);
+router.put('/housekeeping/room-status/status/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.roomStatusUpdateStatus);
+router.get('/housekeeping/history', authMiddleware, requirePermission(158, 'view'), HousekeepingController.housekeeperHistoryList);
+router.get('/housekeeping/shift-user-list', authMiddleware, requirePermission(158, 'view'), HousekeepingController.shiftUserList);
 router.get('/housekeeping/room-status/create', authMiddleware, requirePermission(158, 'add'), RoomController.create);
 router.get('/housekeeping/room-status/:id', authMiddleware, requirePermission(158, 'view'), RoomController.show);
 router.get('/housekeeping/room-status/:id/update', authMiddleware, requirePermission(158, 'edit'), RoomController.edit);

@@ -10,6 +10,15 @@ export const STATUSES: OptionItem[] = [
   { value: 0, label: 'Inactive' },
 ];
 
+/**
+ * Laravel HasStatus::getStatus() parity — returns {value, label} for a status id.
+ * Uses STATUSES config (active/inactive) as default.
+ */
+export function getStatusLabel(statusId: number | null | undefined): { value: number; label: string } {
+  const s = STATUSES.find((x) => x.value === statusId);
+  return { value: statusId ?? 0, label: s?.label ?? 'Unknown' };
+}
+
 export const REGIONS: OptionItem[] = [
   { value: 'Asia', label: 'Asia' },
   { value: 'Europe', label: 'Europe' },

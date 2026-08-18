@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { getStatusLabel } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -1037,7 +1038,7 @@ export class GuestController {
         email: g.email,
         address: g.address,
         status_profile: g.status_profile,
-        status: g.status,
+        status: getStatusLabel(g.status),
       }));
 
       const table = [

@@ -4,6 +4,8 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch, applySearchField } from '../utils/search';
+import { getStatusLabel } from '../utils/cmsConfig';
 import { AuthController } from './auth.controller';
 
 // Helper: coerce sort/status to number (matches Laravel int casting)
@@ -79,28 +81,6 @@ export class RoomController {
         where.name = { contains: search, mode: 'insensitive' };
       }
 
-      const [roomTypes, total] = await Promise.all([
-        prisma.room_types.findMany({
-          where,
-          orderBy: { sort: 'asc' },
-          skip: (page - 1) * limit,
-          take: limit,
-          include: {
-            rooms: {
-              where: { deleted_at: null },
-              select: { id: true },
-            },
-          },
-        }),
-        prisma.room_types.count({ where }),
-      ]);
-
-      const formatted = roomTypes.map((rt: any) => ({
-        ...bigintToNumber(rt),
-        room_count: rt.rooms?.length || 0,
-        rooms: undefined,
-      }));
-
       let table: any[];
       if (reservation !== undefined) {
         table = [
@@ -123,6 +103,31 @@ export class RoomController {
         ];
       }
 
+      applySearchField(where, req, table);
+
+      const [roomTypes, total] = await Promise.all([
+        prisma.room_types.findMany({
+          where,
+          orderBy: { sort: 'asc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          include: {
+            rooms: {
+              where: { deleted_at: null },
+              select: { id: true },
+            },
+          },
+        }),
+        prisma.room_types.count({ where }),
+      ]);
+
+      const formatted = roomTypes.map((rt: any) => ({
+        ...bigintToNumber(rt),
+        room_count: rt.rooms?.length || 0,
+        rooms: undefined,
+        status: getStatusLabel(rt.status),
+      }));
+
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
         view: true,
@@ -134,7 +139,7 @@ export class RoomController {
       success(res, formatted, 'Success', 200, {
         table,
         permission,
-        search_data: [],
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),
@@ -655,6 +660,26 @@ export class RoomController {
         where.sort = order;
       }
 
+      const table = group === 'room'
+        ? [
+            { label: 'Room Name', key: 'name', type: 'none', is_search: true },
+            { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
+            { label: 'Max Pax', key: 'max_pax', type: 'none', is_search: false },
+            { label: 'Total Bed', key: 'total_bed', type: 'none', is_search: false },
+            { label: 'Action', key: 'action', type: 'action', is_search: false },
+          ]
+        : [
+            { label: 'No', key: 'no', type: 'none', is_search: false },
+            { label: 'Room Name', key: 'name', type: 'none', is_search: true },
+            { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
+            { label: 'Parent Room', key: 'parent_room_name', type: 'none', is_search: false },
+            { label: 'Sort', key: 'sort', type: 'none', is_search: false },
+            { label: 'Status', key: 'status', type: 'badge', is_search: false },
+            { label: 'Action', key: 'action', type: 'action', is_search: false },
+          ];
+
+      applySearchField(where, req, table);
+
       const [rooms, total] = await Promise.all([
         prisma.rooms.findMany({
           where,
@@ -696,24 +721,6 @@ export class RoomController {
         room_configurations: configMap.get(r.id) || [],
       }));
 
-      const table = group === 'room'
-        ? [
-            { label: 'Room Name', key: 'name', type: 'none', is_search: true },
-            { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
-            { label: 'Max Pax', key: 'max_pax', type: 'none', is_search: false },
-            { label: 'Total Bed', key: 'total_bed', type: 'none', is_search: false },
-            { label: 'Action', key: 'action', type: 'action', is_search: false },
-          ]
-        : [
-            { label: 'No', key: 'no', type: 'none', is_search: false },
-            { label: 'Room Name', key: 'name', type: 'none', is_search: true },
-            { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
-            { label: 'Parent Room', key: 'parent_room_name', type: 'none', is_search: false },
-            { label: 'Sort', key: 'sort', type: 'none', is_search: false },
-            { label: 'Status', key: 'status', type: 'badge', is_search: false },
-            { label: 'Action', key: 'action', type: 'action', is_search: false },
-          ];
-
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
         view: true,
@@ -725,7 +732,7 @@ export class RoomController {
       success(res, formatted, 'Success', 200, {
         table,
         permission,
-        search_data: [],
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

@@ -498,7 +498,8 @@ export class AuthController {
       return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().substring(0, 10);
     }
 
-    return new Date().toISOString().substring(0, 10);
+    // Asia/Jakarta (UTC+7, no DST) — Laravel config/app.php 'timezone'
+    return new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().substring(0, 10);
   }
 
   /**

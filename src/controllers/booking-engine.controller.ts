@@ -291,7 +291,7 @@ export class BookingEngineController {
       }
 
       const property = await prisma.properties.findFirst({
-        where: { client_uid: req.body.client_uid },
+        where: { client_uid: req.body.client_uid ?? req.query.client_uid },
         orderBy: { id: 'asc' },
       });
       if (!property) {
