@@ -249,6 +249,704 @@ async function generateDailyFlashExcel(res: Response, row: any): Promise<void> {
   res.end();
 }
 
+// ── Account Daily Revenue Report ──
+// Laravel parity: DailyRevenueReportService + daily-revenue-report.blade.php
+// Sections: STATISTICS (10 cols today/mtd/ytd x actual/budget/variance), ROOM ACTIVITIES,
+// ROOM REVENUE (per billing/post), PAYMENT, LEDGER CONTROL BALANCE.
+
+async function calcDailyRevPeriod(
+  pid: bigint,
+  s: string,
+  e: string,
+  roomTypes: any[],
+  exclRateIds: bigint[],
+  yearBudgets: any[],
+  ongoingDay: number,
+  ongoingMonth: number,
+  totalDaysInMonth: number
+): Promise<any> {
+  const start = new Date(`${s}T00:00:00Z`);
+  const end = new Date(`${e}T23:59:59Z`);
+  const days = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+  const y = Number(s.slice(0, 4));
+  const m = Number(s.slice(5, 7));
+
+  const [activeRooms, vacantRooms, workOrders, resvs] = await Promise.all([
+    prisma.rooms.count({ where: { property_id: pid, status: 1, deleted_at: null } }),
+    prisma.rooms.count({ where: { property_id: pid, room_status: 0, deleted_at: null } }),
+    prisma.work_orders.findMany({
+      where: {
+        property_id: pid,
+        room_id: { not: null },
+        deleted_at: null,
+        date: { lte: end },
+        OR: [{ end_date: null }, { end_date: { gte: start } }],
+      },
+      select: { id: true, room_id: true, date: true, end_date: true },
+    }),
+    prisma.reservations.findMany({
+      where: {
+        property_id: pid,
+        deleted_at: null,
+        date: { gte: start, lte: end },
+        folios: {
+          is: {
+            status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] },
+            type_reservation: { in: ['fit', 'git', 'vr'] },
+          },
+        },
+      },
+      select: {
+        id: true, date: true, room_type_id: true, adult: true, child: true, rate_id: true,
+        folios: { select: { id: true, is_house_use: true, complimentary: true, check_in_date: true, check_out_date: true, folio_number: true } },
+      },
+    }),
+  ]);
+
+  // blocked = distinct rooms per day where work_order active that day
+  let totalBlocked = 0;
+  const dayMap = new Map<string, number>();
+  for (let d = 0; d < days; d++) {
+    const dd = new Date(start.getTime() + d * 86400000);
+    const key = dd.toISOString().slice(0, 10);
+    const rooms = new Set<bigint>();
+    for (const wo of workOrders) {
+      const woDate = wo.date ? wo.date.toISOString().slice(0, 10) : '';
+      const woEnd = wo.end_date ? wo.end_date.toISOString().slice(0, 10) : '';
+      if (woDate <= key && (woEnd === '' || woEnd >= key) && wo.room_id) rooms.add(wo.room_id);
+    }
+    dayMap.set(key, rooms.size);
+    totalBlocked += rooms.size;
+  }
+
+  const isFitGit = (f: any) => f && ['fit', 'git'].includes(f.type_reservation) ||
+    (f && f.type_reservation === 'vr' && String(f.folio_number || '').startsWith('F'));
+
+  let totalSold = 0;
+  let totalComplimentary = 0;
+  let totalHouseUse = 0;
+  let totalDayUse = 0;
+  let totalInHouseGuests = 0;
+  const roomTypeSales: Record<string, number> = {};
+  roomTypes.forEach((t: any) => { roomTypeSales[t.name] = 0; });
+
+  for (const r of resvs) {
+    const f = r.folios as any;
+    if (!f || !isFitGit(f)) continue;
+    const cin = f.check_in_date ? f.check_in_date.toISOString().slice(0, 10) : '';
+    const cout = f.check_out_date ? f.check_out_date.toISOString().slice(0, 10) : '';
+    const isDayUse = cin !== '' && cin === cout;
+    if (f.is_house_use) { totalHouseUse++; continue; }
+    if (f.complimentary || (r.rate_id && exclRateIds.includes(r.rate_id))) { totalComplimentary++; continue; }
+    if (isDayUse) { totalDayUse++; }
+    else { totalSold++; const rt = roomTypes.find((t: any) => t.id === r.room_type_id); if (rt) roomTypeSales[rt.name] = (roomTypeSales[rt.name] || 0) + 1; }
+    totalInHouseGuests += (r.adult || 0) + (r.child || 0);
+  }
+
+  const budgetOf = (type: string) => {
+    const posts = yearBudgets.filter((b: any) => b.type === type);
+    const monthly = posts.reduce((sum: number, b: any) => sum + Number(b.budget), 0);
+    const em = Number(e.slice(5, 7));
+    if (s === e) return monthly / totalDaysInMonth;
+    if (Number(s.slice(5, 7)) === em) return (monthly / totalDaysInMonth) * days;
+    let tot = 0;
+    for (const b of posts) {
+      if (b.month === em) tot += (Number(b.budget) / totalDaysInMonth) * ongoingDay;
+      else tot += Number(b.budget);
+    }
+    return tot;
+  };
+
+  const totalAvailable = activeRooms * days;
+  const totalAvailableBudget = budgetOf('total room available');
+  const totalBlockedBudget = budgetOf('ooo rooms');
+  const totalSoldBudget = budgetOf('total room sold');
+  const totalSaleable = totalAvailable - totalBlocked;
+  const totalSaleableBudget = totalAvailableBudget - totalBlockedBudget;
+  const totalComplimentaryBudget = budgetOf('comp rooms');
+  const totalHouseUseBudget = budgetOf('hse rooms');
+  const totalDayUseBudget = budgetOf('total day use');
+  const totalInHouseGuestsBudget = budgetOf('total no. of inhouse guest');
+
+  const soldForOcc = totalSold + totalDayUse;
+  const roomSaleableOcc = totalSaleable > 0 ? ((totalSold + totalDayUse) / totalSaleable) * 100 : 0;
+  const roomSaleableOccWithCom = totalSaleable > 0 ? ((totalSold + totalComplimentary + totalHouseUse) / totalSaleable) * 100 : 0;
+  const roomSaleableOccWithComDayUse = totalSaleable > 0 ? ((totalSold + totalComplimentary + totalDayUse + totalHouseUse) / totalSaleable) * 100 : 0;
+  const roomAvailOcc = totalAvailable > 0 ? ((totalSold + totalDayUse) / totalAvailable) * 100 : 0;
+  const roomAvailOccWithCom = totalAvailable > 0 ? ((totalSold + totalComplimentary + totalHouseUse) / totalAvailable) * 100 : 0;
+  const roomAvailOccWithComDayUse = totalAvailable > 0 ? ((totalSold + totalComplimentary + totalDayUse + totalHouseUse) / totalAvailable) * 100 : 0;
+  const doubleOcc = (totalSold + totalComplimentary + totalHouseUse) > 0 ? (totalInHouseGuests / (totalSold + totalComplimentary + totalHouseUse + totalDayUse)) / (totalSold + totalComplimentary + totalHouseUse) : 0;
+
+  const avgRoomRate = soldForOcc > 0 ? await calcRoomRevenueNett(pid, s, e) / soldForOcc : 0;
+  const revPAR = totalAvailable > 0 ? await calcRoomRevenueTransactions(pid, s, e) / totalAvailable : 0;
+
+  return {
+    totalAvailableRoom: totalAvailable,
+    totalAvailableRoomBudget: totalAvailableBudget,
+    totalBlockedRoom: totalBlocked,
+    totalBlockedRoomBudget: totalBlockedBudget,
+    totalRoomSold: totalSold,
+    totalRoomSoldBudget: totalSoldBudget,
+    roomTypeSales,
+    totalComplimentary,
+    totalComplimentaryBudget,
+    totalHouseUse,
+    totalHouseUseBudget,
+    totalSaleableRoom: totalSaleable,
+    totalSaleableRoomBudget: totalSaleableBudget,
+    totalVacantRoom: vacantRooms,
+    totalDayUse,
+    totalDayUseBudget,
+    totalInHouseGuests,
+    totalInHouseGuestsBudget,
+    averageRoomRate: Math.round(avgRoomRate * 100) / 100,
+    roomSaleableOccupancy: Math.round(roomSaleableOcc * 100) / 100,
+    roomSaleableOccupancyWithCOM: Math.round(roomSaleableOccWithCom * 100) / 100,
+    roomSaleableOccupancyWithCOMDayUse: Math.round(roomSaleableOccWithComDayUse * 100) / 100,
+    revenuePerAvailableRoom: Math.round(revPAR * 100) / 100,
+    roomAvailableOccupancy: Math.round(roomAvailOcc * 100) / 100,
+    roomAvailableOccupancyWithCOM: Math.round(roomAvailOccWithCom * 100) / 100,
+    roomAvailableOccupancyWithCOMDayUse: Math.round(roomAvailOccWithComDayUse * 100) / 100,
+    doubleOccupancy: Math.round(doubleOcc * 100) / 100,
+    averageLengthOfStay: 0,
+  };
+}
+
+async function calcRoomRevenueNett(pid: bigint, s: string, e: string): Promise<number> {
+  const rows: any = await prisma.$queryRaw`
+    SELECT COALESCE(SUM(tb.amount), 0)::float8 AS total
+    FROM transaction_breakdowns tb
+    JOIN code_posts p ON tb.code = p.id::text
+    JOIN code_billings cb ON cb.id = p.code_billing_id
+    WHERE tb.property_id = ${pid}
+      AND tb.date BETWEEN ${new Date(`${s}T00:00:00Z`)} AND ${new Date(`${e}T23:59:59Z`)}
+      AND tb.type NOT IN ('payment', 'paidout', 'refund')
+      AND LOWER(cb.name) LIKE '%room revenue%'`;
+  return Number(rows[0]?.total || 0);
+}
+
+async function calcRoomRevenueTransactions(pid: bigint, s: string, e: string): Promise<number> {
+  const agg = await prisma.transactions.aggregate({
+    where: { property_id: pid, date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`), }, type: 'room_revenue' },
+    _sum: { amount: true },
+  });
+  return Number(agg._sum?.amount || 0);
+}
+
+async function getAccountDailyRevenueReport(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const date = params.date || params.startDate || formatDate(new Date());
+  const startOfMonth = `${date.slice(0, 8)}01`;
+  const startOfYear = `${date.slice(0, 4)}-01-01`;
+  const y = Number(date.slice(0, 4));
+  const m = Number(date.slice(5, 7));
+  const totalDaysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const ongoingDay = new Date().getDate();
+  const ongoingMonth = new Date().getMonth() + 1;
+
+  const roomTypes = (await prisma.room_types.findMany({
+    where: { property_id: pid, deleted_at: null },
+    select: { id: true, name: true },
+    orderBy: { id: 'asc' },
+  })).filter((t: any) => !String(t.name || '').toUpperCase().includes('VIRTUAL'));
+
+  const [exclRates, budgets, codePostRoomRevenue, codeBillingRoomRevenue, codePostPayment, codeBillingPayment] = await Promise.all([
+    prisma.rates.findMany({
+      where: {
+        property_id: pid,
+        deleted_at: null,
+        OR: [
+          { name: { contains: 'compliment', mode: 'insensitive' } },
+          { name: { contains: 'house use', mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true },
+    }),
+    prisma.post_code_budgets.findMany({ where: { property_id: pid, year: y } }),
+    prisma.code_posts.findMany({ where: { property_id: pid, type: 'DEFAULT', deleted_at: null } }),
+    prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null } }),
+    prisma.code_posts.findMany({ where: { property_id: pid, type: { not: 'STATISTIC' }, deleted_at: null } }),
+    prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null } }),
+  ]);
+  const exclRateIds = exclRates.map((r: any) => r.id);
+
+  const billingName = (b: any) => String(b.name || '').toLowerCase();
+  const revBillings = codeBillingRoomRevenue.filter((b: any) => !billingName(b).includes('payment') && !billingName(b).includes('statistic'));
+  const revBillIds = new Set(revBillings.map((b: any) => b.id));
+  const revPosts = codePostRoomRevenue.filter((p: any) => p.code_billing_id && revBillIds.has(p.code_billing_id));
+  const payBillings = codeBillingPayment.filter((b: any) => billingName(b).includes('payment'));
+  const payBillIds = new Set(payBillings.map((b: any) => b.id));
+  const payPosts = codePostPayment.filter((p: any) => p.code_billing_id && payBillIds.has(p.code_billing_id));
+
+  const budgetPosts = new Map<bigint, { type: string }>();
+  const allPosts = await prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true } });
+  const postNameById = new Map(allPosts.map((p: any) => [p.id, String(p.name || '').toLowerCase()]));
+  budgets.forEach((b: any) => {
+    const nm = postNameById.get(b.code_post_id) || '';
+    for (const t of ['total room available', 'ooo rooms', 'total room sold', 'comp rooms', 'hse rooms', 'total day use', 'total no. of inhouse guest', 'no show', 'reservation made', 'cancelation reservation']) {
+      if (nm.includes(t)) { (b as any).type = t; break; }
+    }
+  });
+
+  const periodData = (s: string, e: string) => calcDailyRevPeriod(pid, s, e, roomTypes, exclRateIds, budgets, ongoingDay, ongoingMonth, totalDaysInMonth);
+  const [todayData, mtdData, ytdData] = await Promise.all([periodData(date, date), periodData(startOfMonth, date), periodData(startOfYear, date)]);
+
+  // room revenue / payment transactions
+  const fetchTb = (s: string, e: string, isPayment: boolean) => prisma.transaction_breakdowns.findMany({
+    where: {
+      property_id: pid,
+      date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) },
+      type: isPayment ? { in: ['payment', 'paidout', 'refund'] } : { notIn: ['payment', 'paidout', 'refund'] },
+    },
+    select: { code: true, amount: true, pb1: true, svr_chrg: true, surcharge: true, type_amount: true },
+  });
+  const [todayRoomRevenue, mtdRoomRevenue, ytdRoomRevenue, todayPayment, mtdPayment, ytdPayment] = await Promise.all([
+    fetchTb(date, date, false), fetchTb(startOfMonth, date, false), fetchTb(startOfYear, date, false),
+    fetchTb(date, date, true), fetchTb(startOfMonth, date, true), fetchTb(startOfYear, date, true),
+  ]);
+
+  const roomActivities = await calcRoomActivities(pid, date, startOfMonth, startOfYear, budgets, totalDaysInMonth, ongoingDay, ongoingMonth);
+
+  const sysBal = async (s: string, e: string, name: string) => {
+    const rows = await prisma.system_balances.findMany({
+      where: { property_id: pid, date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`), }, name },
+      select: { debit: true, credit: true },
+    });
+    return rows.reduce((sum: number, r: any) => sum + Number(r.debit || 0) + Number(r.credit || 0), 0);
+  };
+  const ledger = async (s: string, e: string) => {
+    const [gCur, gPrev, adCur, adPrev] = await Promise.all([
+      sysBal(s, e, 'Guest Ledger Current Day'),
+      sysBal(s, e, 'Guest Ledger Previous Day'),
+      sysBal(s, e, 'Advance Deposit Current Day'),
+      sysBal(s, e, 'Advance Deposit Previous Day'),
+    ]);
+    return { GUESTLEDGERCURRENT: gCur, GUESTLEDGERPREVIOUS: gPrev, ADVANCEDDEPOSITCURRENTDAY: adCur, ADVANCEDDEPOSITPREVIOUSDAY: adPrev, TOTALLEDGERDEPOSIT: gCur + gPrev + adCur + adPrev };
+  };
+  const [ledgerToday, ledgerMtd, ledgerYtd] = await Promise.all([ledger(date, date), ledger(startOfMonth, date), ledger(startOfYear, date)]);
+
+  const sumSigned = (rows: any[], code: string) => rows
+    .filter((t: any) => String(t.code) === code)
+    .reduce((sum: number, t: any) => sum + (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? -Number(t.amount || 0) : Number(t.amount || 0)), 0);
+
+  return {
+    reportTitle: 'Daily Revenue Report',
+    reportDate: date,
+    startDate: date,
+    endDate: date,
+    totalDaysInMonth,
+    roomTypes,
+    todayData,
+    mtdData,
+    ytdData,
+    roomActivities,
+    roomRevenue: { codeBillingRoomRevenue: revBillings, codePostRoomRevenue: revPosts, today: todayRoomRevenue, mtd: mtdRoomRevenue, ytd: ytdRoomRevenue },
+    payment: { codeBillingPayment: payBillings, codePostPayment: payPosts, today: todayPayment, mtd: mtdPayment, ytd: ytdPayment },
+    mtdBudget: budgets.filter((b: any) => b.month === m),
+    ledgerToday,
+    ledgerMtd,
+    ledgerYtd,
+  };
+}
+
+async function calcRoomActivities(pid: bigint, date: string, startOfMonth: string, startOfYear: string, budgets: any[], totalDaysInMonth: number, ongoingDay: number, ongoingMonth: number): Promise<any> {
+  const tomorrow = addDays(date, 1);
+  const folios = await prisma.folios.findMany({
+    where: { property_id: pid, deleted_at: null, status_reservation: STATUS_RESERVATION_CANCEL },
+    select: { id: true, data: true, res_date: true, check_in_date: true, check_out_date: true, type_reservation: true, folio_number: true, parent: true },
+  });
+  const reasonOf = (f: any) => {
+    try { const d = JSON.parse(f.data || '{}'); return String(d.reason_cancel_reservation || '').toUpperCase(); } catch { return ''; }
+  };
+  const isFitGit = (f: any) => ['fit', 'git'].includes(f.type_reservation) || (f.type_reservation === 'vr' && String(f.folio_number || '').startsWith('F'));
+  const dayOf = (d: any) => (d ? new Date(d).toISOString().slice(0, 10) : '');
+  const noShow = (s: string, e?: string) => folios.filter((f: any) => isFitGit(f) && (!e ? dayOf(f.res_date) === s : dayOf(f.res_date) >= s && dayOf(f.res_date) <= e) && reasonOf(f) === 'NO SHOW').length;
+  const cancelNotShow = (s: string, e?: string) => folios.filter((f: any) => isFitGit(f) && (!e ? dayOf(f.res_date) === s : dayOf(f.res_date) >= s && dayOf(f.res_date) <= e) && reasonOf(f) !== 'NO SHOW').length;
+
+  const countFolios = async (where: any) => prisma.folios.count({ where: { property_id: pid, deleted_at: null, ...where } });
+  const resMade = (s: string, e: string) => countFolios({ res_date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) }, status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } });
+  const arrivals = (s: string, e: string) => countFolios({ check_in_date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) }, status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } });
+  const departures = (s: string, e: string) => countFolios({ check_out_date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) }, status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } });
+
+  const budgetOf = (type: string, s: string, e: string) => {
+    const posts = budgets.filter((b: any) => b.type === type);
+    const monthly = posts.reduce((sum: number, b: any) => sum + Number(b.budget), 0);
+    if (s === e) return monthly / totalDaysInMonth;
+    const em = Number(e.slice(5, 7));
+    if (Number(s.slice(5, 7)) === em) return (monthly / totalDaysInMonth) * ongoingDay;
+    let tot = 0;
+    for (const b of posts) {
+      if (b.month === em) tot += (Number(b.budget) / totalDaysInMonth) * ongoingDay;
+      else tot += Number(b.budget);
+    }
+    return tot;
+  };
+
+  const period = (s: string, e: string) => ({
+    noShow: noShow(s, e),
+    noShowBudget: budgetOf('no show', s, e),
+    reservationMade: resMade(s, e),
+    reservationMadeBudget: budgetOf('reservation made', s, e),
+    cancellationReservation: cancelNotShow(s, e),
+    cancellationReservationBudget: budgetOf('cancelation reservation', s, e),
+  });
+
+  const [today, mtd, ytd, arrivalsToday, departuresToday, arrivalsTomorrow, departuresTomorrow] = await Promise.all([
+    period(date, date),
+    period(startOfMonth, date),
+    period(startOfYear, date),
+    arrivals(date, date),
+    departures(date, date),
+    arrivals(tomorrow, tomorrow),
+    departures(tomorrow, tomorrow),
+  ]);
+
+  return {
+    today: {
+      ...today,
+      roomArrivalsToday: arrivalsToday,
+      roomDepartureToday: departuresToday,
+      roomArrivalsTomorrow: arrivalsTomorrow,
+      roomDepartureTomorrow: departuresTomorrow,
+    },
+    mtd,
+    ytd,
+  };
+}
+
+// ── Excel builder: daily-revenue-report ──
+async function generateDailyRevenueExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Daily Revenue Report');
+  const HEADERS = ['Description', 'Today Actual', 'Today Budget', 'Today Variance', 'MTD Actual', 'MTD Budget', 'MTD Variance', 'YTD Actual', 'YTD Budget', 'YTD Variance'];
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  ws.mergeCells(1, 1, 1, 10);
+  const title = ws.getCell(1, 1);
+  title.value = String(data.reportTitle || 'Daily Revenue Report').toUpperCase();
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 10);
+  const meta = ws.getCell(2, 1);
+  meta.value = `For Business Date: ${data.reportDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+  const headerRow = ws.getRow(3);
+  headerRow.values = HEADERS;
+  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+  for (let i = 1; i <= 10; i++) ws.getColumn(i).width = 26;
+
+  const section = (label: string) => {
+    const r = ws.addRow([label]);
+    ws.mergeCells(r.getCell(1).address, r.getCell(10).address);
+    r.font = { bold: true };
+    r.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+    return r;
+  };
+  const row10 = (vals: any[], bold = false) => {
+    const r = ws.addRow(vals);
+    if (bold) r.font = { bold: true };
+    return r;
+  };
+  section('STATISTICS');
+  const stat = (label: string, key: string, fmt: (v: any) => any = (v) => v) => {
+    const [d, m, y] = [data.todayData[key], data.mtdData[key], data.ytdData[key]];
+    const [db, mb, yb] = [data.todayData[key + 'Budget'], data.mtdData[key + 'Budget'], data.ytdData[key + 'Budget']];
+    row10([label, fmt(d), fmt(db), fmt(d - db), fmt(m), fmt(mb), fmt(m - mb), fmt(y), fmt(yb), fmt(y - yb)]);
+  };
+  stat('TOTAL ROOM AVAILABLE', 'totalAvailableRoom');
+  stat('TOTAL ROOM OUT OF ORDER', 'totalBlockedRoom');
+  stat('TOTAL ROOM SOLD (Excl. HSE & COMP)', 'totalRoomSold');
+  for (const rt of data.roomTypes || []) {
+    const key = rt.name;
+    const [d, m, y] = [data.todayData.roomTypeSales[key] || 0, data.mtdData.roomTypeSales[key] || 0, data.ytdData.roomTypeSales[key] || 0];
+    row10([`- ${key}`, d, 0, d, m, 0, m, y, 0, y]);
+  }
+  stat('TOTAL ROOM COMPLIMENTARY (COM)', 'totalComplimentary');
+  stat('TOTAL ROOM HOUSE USE (HSE)', 'totalHouseUse');
+  stat('TOTAL SALEABLE ROOM', 'totalSaleableRoom');
+  stat('TOTAL VACANT ROOM', 'totalVacantRoom');
+  stat('TOTAL DAY USE', 'totalDayUse');
+  stat('TOTAL IN-HOUSE GUESTS (Excl. HSE)', 'totalInHouseGuests');
+  stat('AVERAGE ROOM RATE (ARR)', 'averageRoomRate', (v) => Number(v).toFixed(2));
+  stat('% ROOM SALEABLE OCCUPANCY', 'roomSaleableOccupancy', (v) => Number(v).toFixed(2));
+  stat('% ROOM SALEABLE OCCUPANCY (Incl. COM)', 'roomSaleableOccupancyWithCOM', (v) => Number(v).toFixed(2));
+  stat('% ROOM SALEABLE OCC. (Incl. COM&Day Use)', 'roomSaleableOccupancyWithCOMDayUse', (v) => Number(v).toFixed(2));
+  stat('REVENUE PER AVAIL. ROOM (REVPAR)', 'revenuePerAvailableRoom', (v) => Number(v).toFixed(2));
+  stat('% ROOM AVAILABLE OCCUPANCY', 'roomAvailableOccupancy', (v) => Number(v).toFixed(2));
+  stat('% ROOM AVAILABLE OCCUPANCY (Incl. COM)', 'roomAvailableOccupancyWithCOM', (v) => Number(v).toFixed(2));
+  stat('% ROOM AVAILABLE OCC. (Incl. COM&Day Use)', 'roomAvailableOccupancyWithCOMDayUse', (v) => Number(v).toFixed(2));
+  stat('% DOUBLE OCCUPANCY (Incl. COM)', 'doubleOccupancy', (v) => Number(v).toFixed(2));
+
+  section('ROOM ACTIVITIES');
+  const act = (label: string, key: string) => {
+    const t = data.roomActivities?.today || {};
+    const m = data.roomActivities?.mtd || {};
+    const y = data.roomActivities?.ytd || {};
+    row10([label, t[key], t[key + 'Budget'], (t[key] || 0) - (t[key + 'Budget'] || 0), m[key], m[key + 'Budget'], (m[key] || 0) - (m[key + 'Budget'] || 0), y[key], y[key + 'Budget'], (y[key] || 0) - (y[key + 'Budget'] || 0)]);
+  };
+  act('NO SHOW', 'noShow');
+  act('RESERVATION MADE', 'reservationMade');
+  act('CANCELATION RESERVATION', 'cancellationReservation');
+  const dashRow = (label: string, key: string) => {
+    const t = data.roomActivities?.today || {};
+    row10([label, t[key], 0, t[key], '-', '-', '-', '-', '-', '-']);
+  };
+  dashRow('ROOM ARRIVALS TODAY', 'roomArrivalsToday');
+  dashRow('ROOM DEPARTURE TODAY', 'roomDepartureToday');
+  dashRow('ROOM ARRIVALS TOMORROW', 'roomArrivalsTomorrow');
+  dashRow('ROOM DEPARTURE TOMORROW', 'roomDepartureTomorrow');
+
+  const revSection = (label: string, codeBillings: any[], codePosts: any[], today: any[], mtd: any[], ytd: any[], budgetRows: any[], isPayment: boolean) => {
+    section(label);
+    const totals: any = { revenue: [], tax: [], svc: [], surcharge: [] };
+    const sumSigned = (rows: any[], code: string, field: string) => rows
+      .filter((t: any) => String(t.code) === code)
+      .reduce((sum: number, t: any) => sum + (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? -Number(t[field] || 0) : Number(t[field] || 0)), 0);
+    for (const billing of codeBillings) {
+      const bPosts = codePosts.filter((p: any) => p.code_billing_id === billing.id);
+      if (!bPosts.length) continue;
+      section(String(billing.name || '').toUpperCase());
+      let acc = { revenue: { today: 0, mtd: 0, ytd: 0 }, tax: { today: 0, mtd: 0, ytd: 0 }, svc: { today: 0, mtd: 0, ytd: 0 }, surcharge: { today: 0, mtd: 0, ytd: 0 } };
+      for (const post of bPosts) {
+        const t = sumSigned(today, String(post.id), 'amount');
+        const m = sumSigned(mtd, String(post.id), 'amount');
+        const y = sumSigned(ytd, String(post.id), 'amount');
+        const taxT = sumSigned(today, String(post.id), 'pb1');
+        const taxM = sumSigned(mtd, String(post.id), 'pb1');
+        const taxY = sumSigned(ytd, String(post.id), 'pb1');
+        const svcT = sumSigned(today, String(post.id), 'svr_chrg');
+        const svcM = sumSigned(mtd, String(post.id), 'svr_chrg');
+        const svcY = sumSigned(ytd, String(post.id), 'svr_chrg');
+        const surT = isPayment ? sumSigned(today, String(post.id), 'surcharge') : 0;
+        const surM = isPayment ? sumSigned(mtd, String(post.id), 'surcharge') : 0;
+        const surY = isPayment ? sumSigned(ytd, String(post.id), 'surcharge') : 0;
+        const monthlyBudget = budgetRows.filter((b: any) => b.code_post_id === post.id).reduce((s: number, b: any) => s + Number(b.budget), 0);
+        const todayBudget = monthlyBudget / data.totalDaysInMonth;
+        const mtdBudget = todayBudget * new Date().getDate();
+        const ytdBudget = todayBudget * new Date().getDate() + monthlyBudget * (new Date().getMonth());
+        const nf = (v: number) => Number(v).toFixed(2);
+        row10([String(post.name || '').toUpperCase(), nf(t), nf(todayBudget), nf(t - todayBudget), nf(m), nf(mtdBudget), nf(m - mtdBudget), nf(y), nf(ytdBudget), nf(y - ytdBudget)]);
+        acc.revenue.today += t; acc.revenue.mtd += m; acc.revenue.ytd += y;
+        acc.tax.today += taxT; acc.tax.mtd += taxM; acc.tax.ytd += taxY;
+        acc.svc.today += svcT; acc.svc.mtd += svcM; acc.svc.ytd += svcY;
+        acc.surcharge.today += surT; acc.surcharge.mtd += surM; acc.surcharge.ytd += surY;
+      }
+      const nf = (v: number) => Number(v).toFixed(2);
+      row10([`Total ${String(billing.name || '').toUpperCase()}`, nf(acc.revenue.today), nf(acc.revenue.today * 0.11), nf(acc.revenue.today - acc.revenue.today * 0.11), nf(acc.revenue.mtd), nf(acc.revenue.mtd * 0.11), nf(acc.revenue.mtd - acc.revenue.mtd * 0.11), nf(acc.revenue.ytd), nf(acc.revenue.ytd * 0.11), nf(acc.revenue.ytd - acc.revenue.ytd * 0.11)], true);
+      totals.revenue.push(acc.revenue);
+      totals.tax.push(acc.tax);
+      totals.svc.push(acc.svc);
+      totals.surcharge.push(acc.surcharge);
+    }
+    const sum = (arr: any[], key: string) => arr.reduce((s: number, a: any) => s + a[key], 0);
+    const lbl = isPayment ? 'Hotel Payment' : 'Hotel Revenue';
+    section(lbl);
+    const netLbl = isPayment ? 'Hotel Net Payment' : 'Total Net Revenue';
+    const extraLbl = isPayment ? 'Surcharge' : 'Government Tax';
+    const grossLbl = isPayment ? 'Total Gross Payment' : 'Total Gross Revenue';
+    const nf = (v: number) => Number(v).toFixed(2);
+    row10([netLbl, nf(sum(totals.revenue, 'today')), nf(sum(totals.revenue, 'today')), nf(sum(totals.revenue, 'today')), nf(sum(totals.revenue, 'mtd')), nf(sum(totals.revenue, 'mtd')), nf(sum(totals.revenue, 'mtd')), nf(sum(totals.revenue, 'ytd')), nf(sum(totals.revenue, 'ytd')), nf(sum(totals.revenue, 'ytd'))], true);
+    const extraArr = isPayment ? totals.surcharge : totals.tax;
+    const extraSvc = isPayment ? totals.svc : totals.svc;
+    row10([extraLbl, nf(sum(extraArr, 'today')), nf(sum(extraArr, 'today')), nf(sum(extraArr, 'today')), nf(sum(extraArr, 'mtd')), nf(sum(extraArr, 'mtd')), nf(sum(extraArr, 'mtd')), nf(sum(extraArr, 'ytd')), nf(sum(extraArr, 'ytd')), nf(sum(extraArr, 'ytd'))], true);
+    if (!isPayment) {
+      row10(['Service Charge', nf(sum(totals.svc, 'today')), nf(sum(totals.svc, 'today')), nf(sum(totals.svc, 'today')), nf(sum(totals.svc, 'mtd')), nf(sum(totals.svc, 'mtd')), nf(sum(totals.svc, 'mtd')), nf(sum(totals.svc, 'ytd')), nf(sum(totals.svc, 'ytd')), nf(sum(totals.svc, 'ytd'))], true);
+      row10([grossLbl, nf(sum(totals.revenue, 'today') + sum(totals.tax, 'today') + sum(totals.svc, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.tax, 'today') + sum(totals.svc, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.tax, 'today') + sum(totals.svc, 'today')), nf(sum(totals.revenue, 'mtd') + sum(totals.tax, 'mtd') + sum(totals.svc, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.tax, 'mtd') + sum(totals.svc, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.tax, 'mtd') + sum(totals.svc, 'mtd')), nf(sum(totals.revenue, 'ytd') + sum(totals.tax, 'ytd') + sum(totals.svc, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.tax, 'ytd') + sum(totals.svc, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.tax, 'ytd') + sum(totals.svc, 'ytd'))], true);
+    } else {
+      row10([grossLbl, nf(sum(totals.revenue, 'today') + sum(totals.surcharge, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.surcharge, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.surcharge, 'today')), nf(sum(totals.revenue, 'mtd') + sum(totals.surcharge, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.surcharge, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.surcharge, 'mtd')), nf(sum(totals.revenue, 'ytd') + sum(totals.surcharge, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.surcharge, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.surcharge, 'ytd'))], true);
+    }
+  };
+
+  revSection('ROOM REVENUE', data.roomRevenue?.codeBillingRoomRevenue || [], data.roomRevenue?.codePostRoomRevenue || [], data.roomRevenue?.today || [], data.roomRevenue?.mtd || [], data.roomRevenue?.ytd || [], data.mtdBudget || [], false);
+  revSection('PAYMENT', data.payment?.codeBillingPayment || [], data.payment?.codePostPayment || [], data.payment?.today || [], data.payment?.mtd || [], data.payment?.ytd || [], data.mtdBudget || [], true);
+
+  const ledgerRow = (label: string, key: string) => {
+    const t = data.ledgerToday || {}, m = data.ledgerMtd || {}, y = data.ledgerYtd || {};
+    const nf = (v: any) => Number(v || 0).toFixed(2);
+    row10([label, nf(t[key]), 0, nf(t[key]), nf(m[key]), 0, nf(m[key]), nf(y[key]), 0, nf(y[key])], true);
+  };
+  ledgerRow('GUEST LEDGER CURRENT DAY', 'GUESTLEDGERCURRENT');
+  ledgerRow('GUEST LEDGER PREVIOUS DAY', 'GUESTLEDGERPREVIOUS');
+  ledgerRow('ADVANCED DEPOSIT CURRENT DAY', 'ADVANCEDDEPOSITCURRENTDAY');
+  ledgerRow('ADVANCED DEPOSIT PREVIOUS DAY', 'ADVANCEDDEPOSITPREVIOUSDAY');
+  ledgerRow('TOTAL LEDGER & DEPOSIT', 'TOTALLEDGERDEPOSIT');
+  const cb = (v: any) => Number(v || 0).toFixed(2);
+  const ctrl = (side: 'today' | 'mtd' | 'ytd') => {
+    const l = data[`ledger${side === 'today' ? 'Today' : side === 'mtd' ? 'Mtd' : 'Ytd'}`] || {};
+    return Number(l.TOTALLEDGERDEPOSIT || 0);
+  };
+  row10(['CONTROL BALANCE', cb(ctrl('today')), 0, cb(ctrl('today')), cb(ctrl('mtd')), 0, cb(ctrl('mtd')), cb(ctrl('ytd')), 0, cb(ctrl('ytd'))], true);
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn: number) => {
+    if (rn < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.border = border;
+      c.alignment = { horizontal: cn === 1 ? 'left' : 'right' };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-revenue-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Tax Breakdown Detail Report ──
+// Laravel parity: TaxBreakdownDetailReportController raw SQL + tax-breakdown-detail-report.blade.php
+
+async function getTaxBreakdownDetail(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+
+  const rows: any = await prisma.$queryRaw`
+    WITH last_room AS (
+      SELECT folio_id, room_name
+      FROM (
+        SELECT folio_id, room_name, ROW_NUMBER() OVER (PARTITION BY folio_id ORDER BY id DESC) AS rn
+        FROM reservations
+      ) x
+      WHERE rn = 1
+    )
+    SELECT
+      CASE WHEN p.type = 'DEFAULT' THEN p.name WHEN p.type = 'IS_PAYMENT' OR p.type IS NULL THEN tp.name END AS "Postcode",
+      tb.date,
+      f.folio_number,
+      lr.room_name AS room_no,
+      CONCAT(f.first_name, ' ', f.last_name) AS "Guest_Name",
+      f.company_name,
+      CONCAT(COALESCE(tb.type, ''), ' - ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, '')))) AS description,
+      tb.created_at AS "Posting_date",
+      CASE WHEN tb.type = 'Room_Revenue' THEN 'SYSTEM' WHEN tb.receipt IS NOT NULL THEN 'POS SYSTEM' ELSE u.name END AS "STAFF",
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.amount AS DECIMAL(18,2)) ELSE CAST(tb.amount AS DECIMAL(18,2)) END AS "Charge",
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.pb1 AS DECIMAL(18,2)) ELSE CAST(tb.pb1 AS DECIMAL(18,2)) END AS "Govt_tax",
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.svr_chrg AS DECIMAL(18,2)) ELSE CAST(tb.svr_chrg AS DECIMAL(18,2)) END AS svr_chrg,
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.surcharge AS DECIMAL(18,2)) ELSE CAST(tb.surcharge AS DECIMAL(18,2)) END AS surcharge,
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.total AS DECIMAL(18,2)) ELSE CAST(tb.total AS DECIMAL(18,2)) END AS total
+    FROM transaction_breakdowns tb
+    JOIN folios f ON tb.folio_id = f.id
+    JOIN code_posts p ON tb.code = p.id::text
+    LEFT JOIN users u ON tb.created_by = u.id
+    LEFT JOIN type_payments tp ON tp.id = tb.type_payment_id
+    LEFT JOIN last_room lr ON lr.folio_id = f.id
+    WHERE f.property_id = ${pid}
+      AND tb.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T23:59:59Z`)}
+      AND p.type IN ('DEFAULT', 'IS_PAYMENT')
+    ORDER BY p.type, p.id, tb.created_at`;
+
+  const reportData: Record<string, any> = {};
+  let grandTotalCharge = 0, grandTotalGovtTax = 0, grandTotalSvcCharge = 0, grandTotalSurcharge = 0, grandTotal = 0, totalTransactions = 0;
+  for (const r of rows) {
+    const code = r.Postcode || 'UNKNOWN';
+    if (!reportData[code]) reportData[code] = { transactions: [], count: 0, totalCharge: 0, totalGovtTax: 0, totalSvcCharge: 0, totalSurcharge: 0, totalAmount: 0 };
+    const g = reportData[code];
+    g.transactions.push({
+      date: r.date ? formatDate(r.date) : '',
+      folio_number: r.folio_number || '',
+      room_no: r.room_no || '',
+      Guest_Name: r.Guest_Name || '',
+      company_name: r.company_name || '',
+      description: r.description || '',
+      STAFF: r.STAFF || '',
+      Posting_date: r.Posting_date ? formatDateTimeLocal(r.Posting_date) : '',
+      Charge: Number(r.Charge || 0),
+      Govt_tax: Number(r.Govt_tax || 0),
+      svr_chrg: Number(r.svr_chrg || 0),
+      surcharge: Number(r.surcharge || 0),
+      total: Number(r.total || 0),
+    });
+    g.count++;
+    g.totalCharge += Number(r.Charge || 0);
+    g.totalGovtTax += Number(r.Govt_tax || 0);
+    g.totalSvcCharge += Number(r.svr_chrg || 0);
+    g.totalSurcharge += Number(r.surcharge || 0);
+    g.totalAmount += Number(r.total || 0);
+    grandTotalCharge += Number(r.Charge || 0);
+    grandTotalGovtTax += Number(r.Govt_tax || 0);
+    grandTotalSvcCharge += Number(r.svr_chrg || 0);
+    grandTotalSurcharge += Number(r.surcharge || 0);
+    grandTotal += Number(r.total || 0);
+    totalTransactions++;
+  }
+
+  return {
+    reportTitle: 'Tax Breakdown Detail Report',
+    startDate,
+    endDate,
+    reportData,
+    grandTotalCharge,
+    grandTotalGovtTax,
+    grandTotalSvcCharge,
+    grandTotalSurcharge,
+    grandTotal,
+    totalTransactions,
+  };
+}
+
+function formatDateTimeLocal(d: any): string {
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getFullYear()).slice(2)} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}:${String(dt.getSeconds()).padStart(2, '0')}`;
+}
+
+async function generateTaxBreakdownDetailExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Tax Breakdown Detail');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'Folio', 'Room', 'Guest', 'Company', 'Description', 'Staff', 'Post Date/Time', 'Charge', 'Govt Tax', 'Svc Charge', 'Surcharge', 'Total'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 13);
+  const title = ws.getCell(1, 1);
+  title.value = String(data.reportTitle || 'Tax Breakdown Detail Report').toUpperCase();
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 13);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Period: ${data.startDate || ''} - ${data.endDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  let rn = 3;
+  for (const [code, group] of Object.entries<any>(data.reportData || {})) {
+    ws.getRow(rn).values = [code];
+    ws.mergeCells(rn, 1, rn, 13);
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    ws.getRow(rn).values = HEADERS;
+    ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const t of group.transactions || []) {
+      ws.getRow(rn).values = [t.date, t.folio_number, t.room_no, t.Guest_Name, t.company_name, t.description, t.STAFF, t.Posting_date, nf(t.Charge), nf(t.Govt_tax), nf(t.svr_chrg), nf(t.surcharge), nf(t.total)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = [`Number Of Transactions: ${group.count}`, '', '', '', '', '', '', '', nf(group.totalCharge), nf(group.totalGovtTax), nf(group.totalSvcCharge), nf(group.totalSurcharge), nf(group.totalAmount)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = [`Grand Total (Number Of Transactions: ${data.totalTransactions || 0})`, '', '', '', '', '', '', nf(data.grandTotalCharge || 0), nf(data.grandTotalGovtTax || 0), nf(data.grandTotalSvcCharge || 0), nf(data.grandTotalSurcharge || 0), nf(data.grandTotal || 0)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn >= 9 ? 'right' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="tax-breakdown-detail.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
 function parseReportParams(req: Request) {
   return {
     date: req.query.date as string || formatDate(new Date()),
@@ -4433,8 +5131,8 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'account/tax-breakdown-summary': getTaxBreakdownSummary,
   'account/in-house-folio-bal-history': getInHouseFolioBalHistory,
   'account/transaction-report-by-staff': getTransactionReportByStaff,
-  'account/daily-revenue-report': (p: any) => getAsyncJobReport('daily_revenue_report', p),
-  'account/tax-breakdown-detail': (p: any) => getAsyncJobReport('tax_breakdown_detail', p),
+  'account/daily-revenue-report': getAccountDailyRevenueReport,
+  'account/tax-breakdown-detail': getTaxBreakdownDetail,
   'account/daily-sales-report': getAccountDailySalesReport,
   'account/daily-statistic-report': getDailyStatisticReport,
   'account/room-type-revenue-report': getRoomTypeRevenueReport,
@@ -4489,8 +5187,8 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'account/tax-breakdown-summary/view': getTaxBreakdownSummary,
   'account/in-house-folio-bal-history/view': getInHouseFolioBalHistory,
   'account/transaction-report-by-staff/view': getTransactionReportByStaff,
-  'account/daily-revenue-report/view': (p: any) => getAsyncJobReport('daily_revenue_report', p),
-  'account/tax-breakdown-detail/view': (p: any) => getAsyncJobReport('tax_breakdown_detail', p),
+  'account/daily-revenue-report/view': getAccountDailyRevenueReport,
+  'account/tax-breakdown-detail/view': getTaxBreakdownDetail,
   'account/daily-sales-report/view': getAccountDailySalesReport,
   'account/daily-statistic-report/view': getDailyStatisticReport,
   'batch/frontoffice/free-of-charge-detail-report/view': getFreeOfChargeDetailReport,
@@ -4656,6 +5354,14 @@ export class ReportController {
               header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
               key: k,
             })), fileName);
+            return;
+          }
+          if (reportKey === 'account/daily-revenue-report/view') {
+            await generateDailyRevenueExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/tax-breakdown-detail/view') {
+            await generateTaxBreakdownDetailExcel(res, data);
             return;
           }
           if (reportKey.startsWith('account/')) {
