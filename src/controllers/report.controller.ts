@@ -157,6 +157,98 @@ async function generateExcel(
   res.end();
 }
 
+// Laravel parity: DailyFlashReportController -> daily-flash-report.blade.php
+// Layout: title + meta row, 7 columns (STATISTIC x Today/MTD/MTDLastMonth/MTDBudget/MTDVariance/YTD),
+// sections ROOMS STATISTICS (incl. per room-type rows), AVERAGE RATE, OCCUPANCY.
+async function generateDailyFlashExcel(res: Response, row: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Daily Flash Report');
+  const HEADERS = ['STATISTIC', 'Today Actual', 'MTD Actual', 'MTD Last Month', 'MTD Budget', 'MTD Variance', 'YTD Actual'];
+  const PERIODS = ['todayActual', 'mtdActual', 'mtdLastMonth', 'mtdBudget', 'mtdVariance', 'ytdActual'];
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+
+  const fmtCount = (p: string, k: string) => Number(row?.[p]?.[k] ?? 0);
+  const fmtRate = (p: string, k: string) => Number(row?.[p]?.[k] ?? 0).toFixed(2);
+  const fmtPct = (p: string, k: string) => `${Number(row?.[p]?.[k] ?? 0).toFixed(2)}%`;
+
+  ws.columns = HEADERS.map((h) => ({ header: h, key: h, width: 26 }));
+
+  ws.mergeCells(1, 1, 1, 7);
+  const title = ws.getCell(1, 1);
+  title.value = String(row.reportTitle || 'Daily Flash Report').toUpperCase();
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+
+  ws.mergeCells(2, 1, 2, 7);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Report Date: ${row.reportDate || ''}   Period: ${row.startDate || ''} - ${row.endDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  const headerRow = ws.getRow(3);
+  headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+  headerRow.eachCell((c: any) => { c.border = border; });
+
+  const section = (label: string) => {
+    const r = ws.addRow([label]);
+    ws.mergeCells(r.getCell(1).address, r.getCell(7).address);
+    r.font = { bold: true };
+    r.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+    r.eachCell((c: any) => { c.border = border; });
+    return r;
+  };
+  const statRow = (label: string, key: string, fmt: (p: string, k: string) => any) => {
+    const r = ws.addRow([label, ...PERIODS.map((p) => fmt(p, key))]);
+    r.eachCell((c: any) => { c.border = border; });
+    return r;
+  };
+
+  section('ROOMS STATISTICS');
+  statRow('TOTAL AVAILABLE ROOM', 'totalAvailableRoom', fmtCount);
+  statRow('TOTAL BLOCK / OOO ROOM', 'totalBlockedRoom', fmtCount);
+  statRow('TOTAL OCCUPIED ROOM', 'totalOccupiedRoom', fmtCount);
+  statRow('TOTAL ROOM SOLD (Excl. HSE & COM)', 'totalRoomSold', fmtCount);
+
+  const roomTypes = row.roomTypes || [];
+  const roomTypeSales = row.roomTypeSales || {};
+  for (const rt of roomTypes) {
+    const s = roomTypeSales[String(rt.id)] || {};
+    const r = ws.addRow(['- ' + rt.name, ...PERIODS.map((p) => Number(s[p] ?? 0))]);
+    r.eachCell((c: any) => { c.border = border; });
+  }
+
+  statRow('TOTAL HOUSE USE (HSE)', 'totalHouseUse', fmtCount);
+  statRow('TOTAL COMPLIMENTARY (COM)', 'totalComplimentary', fmtCount);
+  statRow('TOTAL SALEABLE ROOM', 'totalSaleableRoom', fmtCount);
+  statRow('TOTAL VACANT ROOM', 'totalVacantRoom', fmtCount);
+  statRow('TOTAL WALK IN', 'totalWalkIn', fmtCount);
+  statRow('TOTAL DAYUSE', 'totalDayUse', fmtCount);
+  statRow('TOTAL INHOUSE GUESTS (Excl. HSE)', 'totalInHouseGuests', fmtCount);
+  section('AVERAGE RATE');
+  statRow('AVERAGE ROOM RATE (ARR)', 'averageRoomRate', fmtRate);
+  statRow('AVERAGE ROOM RATE (INC BF)', 'averageRoomRateIncBF', fmtRate);
+  statRow('REVENUE PER AVAIL. ROOM (REVPAR)', 'revenuePerAvailableRoom', fmtRate);
+  section('OCCUPANCY');
+  statRow('% ROOM SALEABLE OCCUPANCY', 'roomSaleableOccupancy', fmtPct);
+  statRow('% ROOM AVAILABLE OCCUPANCY', 'roomAvailableOccupancy', fmtPct);
+  statRow('% OCCUPIED ROOM OCCUPANCY', 'occupiedRoomOccupancy', fmtPct);
+  statRow('% DOUBLE OCCUPANCY', 'doubleOccupancy', fmtPct);
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn: number) => {
+    if (rn < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.border = border;
+      c.alignment = { horizontal: cn === 1 ? 'left' : 'right' };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-flash-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
 function parseReportParams(req: Request) {
   return {
     date: req.query.date as string || formatDate(new Date()),
@@ -4567,6 +4659,11 @@ export class ReportController {
             return;
           }
           if (reportKey.startsWith('account/')) {
+            if (reportKey === 'account/daily-statistic-report/view') {
+              const row = Array.isArray(data) ? data[0] : data;
+              await generateDailyFlashExcel(res, row || {});
+              return;
+            }
             const baseKey = reportKey.replace('/view', '');
             const fileName = baseKey.replace('/', '-');
             await generateExcel(res, Array.isArray(data) ? data : [data], Object.keys((Array.isArray(data) ? data[0] : data) || {}).map((k) => ({
