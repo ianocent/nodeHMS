@@ -947,6 +947,146 @@ async function generateTaxBreakdownDetailExcel(res: Response, data: any): Promis
   res.end();
 }
 
+// ── Cash / Payment Detailed Report ──
+// Laravel parity: CashDetailedController (index = cash-only, payment = all payment types)
+// + cash-detailed.blade.php ("Payment Detailed Report", 9 columns, grouped by payment type).
+
+async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const date = params.date || startDate;
+
+  const typeIds = cashOnly
+    ? (await prisma.type_payments.findMany({
+        where: { property_id: pid, deleted_at: null, name: { contains: 'cash', mode: 'insensitive' } },
+        select: { id: true },
+      })).map((t: any) => t.id)
+    : undefined;
+
+  const transactions = await prisma.transactions.findMany({
+    where: {
+      property_id: pid,
+      deleted_at: null,
+      date: { gte: new Date(`${startDate}T00:00:00Z`), lte: new Date(`${endDate}T23:59:59Z`) },
+      ...(typeIds ? { type_payment_id: { in: typeIds } } : { type: { in: ['payment', 'paidout', 'refund'] } }),
+    },
+    orderBy: { id: 'asc' },
+    include: {
+      folios: {
+        select: {
+          folio_number: true, first_name: true, last_name: true, company_name: true,
+          reservations: { orderBy: { id: 'desc' }, take: 1, select: { room_type_name: true, room_name: true } },
+        },
+      },
+      type_payments: { select: { name: true } },
+    },
+  });
+
+  const creatorIds: any[] = [...new Set(transactions.map((t: any) => t.created_by).filter(Boolean))];
+  const users = creatorIds.length
+    ? await prisma.users.findMany({ where: { id: { in: creatorIds } }, select: { id: true, name: true } })
+    : [];
+  const userMap = new Map(users.map((u: any) => [u.id, u.name]));
+
+  const groups: Record<string, any> = {};
+  for (const t of transactions) {
+    const pname = String(t.type_payments?.name || 'Unknown').toUpperCase();
+    if (!groups[pname]) groups[pname] = { type: pname, transaksi: [], totalAmount: 0, totalSurcharge: 0, total: 0 };
+    const g = groups[pname];
+    const sign = cashOnly ? 1 : (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? 1 : -1);
+    const lastRes: any = (t.folios as any)?.reservations?.[0];
+    const guest = [(t.folios as any)?.first_name, (t.folios as any)?.last_name].filter(Boolean).join(' ');
+    const parts = [guest, (t.folios as any)?.company_name || '', lastRes?.room_type_name || '', lastRes?.room_name || '', t.description || ''].filter(Boolean);
+    const charge = Number(t.amount || 0) * sign;
+    const surcharge = Number(t.surcharge || 0) * sign;
+    const total = Number(t.total || 0) * sign;
+    g.transaksi.push({
+      date: t.date ? formatDate(t.date) : '',
+      folio_number: (t.folios as any)?.folio_number || '-',
+      description: parts.join(' - '),
+      staff: userMap.get(t.created_by as any) || 'Unknown',
+      card_name: t.card_name || '-',
+      last_digit_card: t.last_digit_card ?? '-',
+      charge,
+      surcharge,
+      total,
+    });
+    g.totalAmount += charge;
+    g.totalSurcharge += surcharge;
+    g.total += total;
+  }
+  const transactionsArr = Object.values(groups);
+  const grandTotal = transactionsArr.reduce((s: number, g: any) => s + g.total, 0);
+
+  return {
+    reportTitle: 'Payment Detailed Report',
+    businessDate: date,
+    startDate,
+    endDate,
+    transactions: transactionsArr,
+    grandTotal,
+  };
+}
+
+async function generateCashDetailedExcel(res: Response, data: any, filename: string): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Payment Detailed');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio No', 'Description', 'Staff', 'Posting Date', 'Card Name', 'Last 4 digits', 'Amount', 'Surcharge', 'Total'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 9);
+  const title = ws.getCell(1, 1);
+  title.value = String(data.reportTitle || 'Payment Detailed Report').toUpperCase();
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 9);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Business Date: ${data.businessDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+  for (let i = 1; i <= 9; i++) ws.getColumn(i).width = i === 2 ? 60 : 16;
+
+  let rn = 3;
+  for (const g of data.transactions || []) {
+    ws.getRow(rn).values = [g.type];
+    ws.mergeCells(rn, 1, rn, 9);
+    ws.getRow(rn).font = { bold: true, size: 11 };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    ws.getRow(rn).values = HEADERS;
+    ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const t of g.transaksi || []) {
+      ws.getRow(rn).values = [t.folio_number, t.description, t.staff, t.date, t.card_name, String(t.last_digit_card), nf(t.charge), nf(t.surcharge), nf(t.total)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = [`Total for ${g.type}`, '', '', '', '', '', nf(g.totalAmount), nf(g.totalSurcharge), nf(g.total)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['Grand Total', '', '', '', '', '', '', '', nf(data.grandTotal || 0)];
+  ws.getRow(rn).font = { bold: true, size: 11 };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn >= 7 ? 'right' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
 function parseReportParams(req: Request) {
   return {
     date: req.query.date as string || formatDate(new Date()),
@@ -1646,41 +1786,6 @@ async function getTransactionReport(params: any): Promise<any[]> {
     total: Number(t.total),
     type_amount: t.type_amount || '',
     type_payment: t.type_payments?.name || '',
-  }));
-}
-
-async function getCashDetailed(params: any): Promise<any[]> {
-  const pid = params.propertyId;
-  const startDate = params.startDate || formatDate(new Date());
-  const endDate = params.endDate || startDate;
-
-  const transactions = await prisma.transactions.findMany({
-    where: {
-      property_id: pid,
-      deleted_at: null,
-      type: 'cash',
-      date: {
-        gte: new Date(`${startDate}T00:00:00Z`),
-        lte: new Date(`${endDate}T23:59:59Z`),
-      },
-    },
-    orderBy: { date: 'desc' },
-    include: {
-      folios: { select: { folio_number: true, first_name: true, last_name: true } },
-      type_payments: { select: { name: true } },
-    },
-  });
-
-  return transactions.map((t: any) => ({
-    date: t.date ? formatDate(t.date) : '',
-    folio_number: t.folios?.folio_number || '',
-    guest: `${t.folios?.first_name || ''} ${t.folios?.last_name || ''}`.trim(),
-    code: t.code || '',
-    description: t.description || '',
-    amount: Number(t.amount),
-    total: Number(t.total),
-    payment_type: t.type_payments?.name || '',
-    receipt: t.receipt || '',
   }));
 }
 
@@ -5106,7 +5211,8 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/after-night-audit/expected-arrival-summary': getExpectedArrivalSummary,
   'batch/after-night-audit/expected-departure-summary': getExpectedDepartureSummary,
   'account/transaction-report': getTransactionReport,
-  'account/cash-detailed': getCashDetailed,
+  'account/cash-detailed': (p: any) => getCashDetailed(p, true),
+  'account/payment-detailed': (p: any) => getCashDetailed(p, false),
   'account/cash-summary': getCashSummary,
   'batch/frontoffice/daily-sales-report': getDailySalesReport,
   'batch/frontoffice/daily-revenue-report': getDailyRevenueReport,
@@ -5162,7 +5268,8 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/after-night-audit/expected-arrival-summary/view': getExpectedArrivalSummary,
   'batch/after-night-audit/expected-departure-summary/view': getExpectedDepartureSummary,
   'account/transaction-report/view': getTransactionReport,
-  'account/cash-detailed/view': getCashDetailed,
+  'account/cash-detailed/view': (p: any) => getCashDetailed(p, true),
+  'account/payment-detailed/view': (p: any) => getCashDetailed(p, false),
   'account/cash-summary/view': getCashSummary,
   'batch/frontoffice/daily-sales-report/view': getDailySalesReport,
   'batch/frontoffice/daily-revenue-report/view': getDailyRevenueReport,
@@ -5354,6 +5461,10 @@ export class ReportController {
               header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
               key: k,
             })), fileName);
+            return;
+          }
+          if (reportKey === 'account/cash-detailed/view' || reportKey === 'account/payment-detailed/view') {
+            await generateCashDetailedExcel(res, data, reportKey.replace('/view', '').replace('account/', ''));
             return;
           }
           if (reportKey === 'account/daily-revenue-report/view') {
