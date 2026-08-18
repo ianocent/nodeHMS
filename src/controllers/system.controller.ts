@@ -4,7 +4,7 @@ import { Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Pool } from 'pg';
-import { moneyFormat } from '../utils/cmsConfig';
+import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { encrypt } from '../utils/encryption';
 import { badRequest, error, notFound, success } from '../utils/response';
 import { crudPermission, laravelPaging, postCodeBudgetTable, setupTable } from '../utils/tableMeta';
@@ -98,6 +98,141 @@ async function formatNightAuditFolios(data: any[]): Promise<any[]> {
       no: idx + 1,
     };
   });
+}
+
+// Laravel SystemBalance::storeBalance parity — rebuilds system_balances rows for the night audit date
+async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
+  const prisma = getPrisma();
+  const nextObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000);
+  const dayRange: any = { gte: dateObj, lt: nextObj };
+  const prevRange: any = { gte: prevObj, lt: dateObj };
+  const propertyBig = BigInt(propertyId);
+
+  await prisma.system_balances.deleteMany({ where: { date: dayRange, property_id: propertyBig } });
+
+  const tbs = await prisma.transaction_breakdowns.findMany({
+    where: { property_id: propertyBig, date: dayRange, is_posting: 1, deleted_at: null },
+    include: { type_payments: true },
+  });
+
+  // payment (type payment/paidout/refund grouped by type_payment_id)
+  const paymentTbs = tbs.filter((t) => ['payment', 'paidout', 'refund'].includes(String(t.type)));
+  const paymentRows: any[] = [];
+  for (const tpId of [...new Set(paymentTbs.map((t) => Number(t.type_payment_id)).filter((x) => x > 0))]) {
+    const items = paymentTbs.filter((t) => Number(t.type_payment_id) === tpId);
+    const debit = items.filter((t) => t.type_amount === 'MINUS').reduce((s, t) => s + Number(t.amount), 0) * -1;
+    const credit = items.filter((t) => t.type_amount === 'PLUS').reduce((s, t) => s + Number(t.amount), 0);
+    const tp = items[0]?.type_payments;
+    const sum = debit + credit;
+    paymentRows.push({
+      code_id: BigInt(tpId),
+      date: dateObj,
+      property_id: propertyBig,
+      type: 'payment',
+      name: tp?.name ?? '',
+      debit: sum > 0 ? 0 : sum,
+      credit: sum > 0 ? sum : 0,
+    });
+  }
+  if (paymentRows.length > 0) await prisma.system_balances.createMany({ data: paymentRows });
+
+  // posting (all other types grouped by code = code_post id)
+  const postingTbs = tbs.filter((t) => !['payment', 'paidout', 'refund'].includes(String(t.type)));
+  const postingRows: any[] = [];
+  for (const codeStr of [...new Set(postingTbs.map((t) => String(t.code)).filter(Boolean))]) {
+    const items = postingTbs.filter((t) => String(t.code) === codeStr);
+    const debit = items.filter((t) => t.type_amount === 'MINUS').reduce((s, t) => s + Number(t.amount), 0) * -1;
+    const credit = items.filter((t) => t.type_amount === 'PLUS').reduce((s, t) => s + Number(t.amount), 0);
+    const codePost = await prisma.code_posts.findUnique({ where: { id: BigInt(codeStr) } });
+    const sum = debit + credit;
+    postingRows.push({
+      code_id: BigInt(codeStr),
+      date: dateObj,
+      property_id: propertyBig,
+      type: 'posting',
+      name: codePost?.name ?? '',
+      debit: sum > 0 ? 0 : sum,
+      credit: sum > 0 ? sum : 0,
+    });
+  }
+  if (postingRows.length > 0) await prisma.system_balances.createMany({ data: postingRows });
+
+  // tax (PB1 / Service Charge / Tax 3 / Surcharge aggregates)
+  const taxItems = tbs.map((t) => ({
+    pb1: Number(t.pb1),
+    svr: Number(t.svr_chrg),
+    sur: Number(t.surcharge),
+    tax3: Number(t.tax3),
+    typeAmount: String(t.type_amount),
+  }));
+  const taxRows: any[] = [];
+  const taxPicks: Array<[string, (i: any) => number]> = [
+    ['PB1', (i) => i.pb1],
+    ['Service Charge', (i) => i.svr],
+    ['Tax 3', (i) => i.tax3],
+    ['Surcharge', (i) => i.sur],
+  ];
+  for (const [label, pick] of taxPicks) {
+    const debit = taxItems.filter((i) => i.typeAmount === 'MINUS').reduce((s, i) => s + pick(i), 0) * -1;
+    const credit = taxItems.filter((i) => i.typeAmount === 'PLUS').reduce((s, i) => s + pick(i), 0);
+    const sum = debit + credit;
+    taxRows.push({ date: dateObj, property_id: propertyBig, type: 'tax', name: label, debit: sum > 0 ? 0 : sum, credit: sum > 0 ? sum : 0 });
+  }
+  if (taxRows.length > 0) await prisma.system_balances.createMany({ data: taxRows });
+
+  // deposit (reservation folios or future check-in, all dates <= audit date)
+  const depositTbs = await prisma.transaction_breakdowns.findMany({
+    where: {
+      property_id: propertyBig,
+      is_posting: 1,
+      deleted_at: null,
+      date: { lte: dateObj },
+      folios: { is: { OR: [{ status_reservation: 3 }, { check_in_date: { gt: dateObj } }] } },
+    },
+  });
+  const yesterdayDeposit = await prisma.system_balances.findMany({
+    where: { date: prevRange, property_id: propertyBig, name: 'Advance Deposit Current Day', type: 'deposit' },
+  });
+  let depositAmount = 0;
+  for (const t of depositTbs) depositAmount += t.type_amount === 'PLUS' ? Number(t.total) : -Number(t.total);
+  depositAmount *= -1;
+  const depositRows: any[] = [
+    { date: dateObj, property_id: propertyBig, type: 'deposit', name: 'Advance Deposit Current Day', debit: depositAmount > 0 ? 0 : depositAmount, credit: depositAmount > 0 ? depositAmount : 0 },
+    {
+      date: dateObj,
+      property_id: propertyBig,
+      type: 'deposit',
+      name: 'Advance Deposit Previous Day',
+      debit: yesterdayDeposit.reduce((s, y) => s + Number(y.credit), 0) * -1,
+      credit: yesterdayDeposit.reduce((s, y) => s + Number(y.debit), 0) * -1,
+    },
+  ];
+  if (depositRows.length > 0) await prisma.system_balances.createMany({ data: depositRows });
+
+  // ledger (current day vs previous day guest ledger)
+  const yesterdayLedger = await prisma.system_balances.findMany({
+    where: { date: prevRange, property_id: propertyBig, name: 'Guest Ledger Current Day', type: 'ledger' },
+  });
+  const yesterdayMovementTotal = yesterdayLedger.reduce((s, y) => s + Number(y.debit) + Number(y.credit), 0) * -1;
+  const ledgerTbs = await prisma.transaction_breakdowns.findMany({
+    where: {
+      property_id: propertyBig,
+      is_posting: 1,
+      deleted_at: null,
+      date: { lte: dateObj },
+      folios: { is: { check_in_date: { lte: dateObj } } },
+    },
+  });
+  let totalAmountValue = 0;
+  for (const t of ledgerTbs) {
+    const parts = Number(t.amount) + Number(t.pb1) + Number(t.svr_chrg) + Number(t.surcharge) + Number(t.tax3);
+    totalAmountValue += t.type_amount === 'PLUS' ? parts : -parts;
+  }
+  const ledgerRows: any[] = [
+    { date: dateObj, property_id: propertyBig, type: 'ledger', name: 'Guest Ledger Current Day', debit: totalAmountValue > 0 ? totalAmountValue * -1 : 0, credit: totalAmountValue > 0 ? 0 : totalAmountValue * -1 },
+    { date: dateObj, property_id: propertyBig, type: 'ledger', name: 'Guest Ledger Previous Day', debit: yesterdayMovementTotal > 0 ? 0 : yesterdayMovementTotal, credit: yesterdayMovementTotal > 0 ? yesterdayMovementTotal : 0 },
+  ];
+  if (ledgerRows.length > 0) await prisma.system_balances.createMany({ data: ledgerRows });
 }
 
 // Helper: coerce sort/status to number (matches Laravel int casting)
@@ -334,15 +469,252 @@ export class SystemController {
 
   static async nightAuditPost(req: Request, res: Response): Promise<void> {
     try {
-      const date = (req.body?.date as string) ?? (req.query.date as string);
-      if (!date) { badRequest(res, 'date is required'); return; }
-
-      const propertyId = Number(req.user?.lastProperty ?? 0);
-      const dateObj = new Date(date);
+      const dateStr = (req.body?.date as string) ?? (req.query.date as string);
+      if (!dateStr) { badRequest(res, 'date is required'); return; }
+      const dateObj = new Date(`${dateStr}T00:00:00`);
       if (Number.isNaN(dateObj.getTime())) { badRequest(res, 'date must be a valid date'); return; }
 
-      // Laravel NightAuditController@postNightAudit: LogAudit upsert per property
-      // (HasProperties global scope → property-scoped where('date', ...))
+      const propertyId = Number(req.user?.lastProperty ?? 0);
+      const nextObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000);
+      const prevObj = new Date(dateObj.getTime() - 24 * 60 * 60 * 1000);
+      const nextRange = { gte: nextObj, lt: new Date(nextObj.getTime() + 24 * 60 * 60 * 1000) };
+      const dayRange: any = { gte: dateObj, lt: nextObj };
+
+      // 1. Open shifts must be closed first (Laravel: Shift where is_posting 0, end null, date=date)
+      const openShifts = await getPrisma().shifts.findMany({
+        where: { property_id: BigInt(propertyId), date: dayRange, is_posting: false, end: null, deleted_at: null },
+        orderBy: { created_at: 'asc' },
+      });
+      if (openShifts.length > 0) { badRequest(res, 'Please close all shift first'); return; }
+
+      // 2. Unbalanced transactions guard (Laravel groups by code, sums PLUS/MINUS total)
+      const unposting = await getPrisma().transactions.findMany({
+        where: { property_id: BigInt(propertyId), date: dayRange, is_end_of_day: 0, deleted_at: null },
+      });
+      if (unposting.length > 0) {
+        const byCode = new Map<string, { sum: number; label: string }>();
+        for (const t of unposting) {
+          const key = String(t.code ?? '');
+          const isPlus = ['PLUS', '+'].includes(String(t.type_amount ?? '').toUpperCase());
+          const label = String(t.code_name ?? t.type ?? 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
+          const g = byCode.get(key) ?? { sum: 0, label };
+          g.sum += isPlus ? Number(t.total) : -Number(t.total);
+          byCode.set(key, g);
+        }
+        const debug = [...byCode.entries()].map(([id, g]) => ({ id, sum: Math.round(g.sum * 100) / 100, label: g.label }));
+        const unbalanced = debug.filter((d) => Math.abs(d.sum) > 0.001);
+        if (unbalanced.length > 0) {
+          res.json({ code: 200, status: 'error', details: [...new Set(unbalanced.map((d) => d.label))], debug, count: unbalanced.length });
+          return;
+        }
+        await getPrisma().transactions.updateMany({
+          where: { property_id: BigInt(propertyId), date: dayRange, is_end_of_day: 0 },
+          data: { is_end_of_day: 1 },
+        });
+      }
+
+      // 3. Pending room change / no show / over stay guards
+      const roomChange = await getPrisma().folios.findMany({
+        where: {
+          property_id: BigInt(propertyId),
+          is_posting: false,
+          deleted_at: null,
+          reservations: { some: { OR: [{ room_type_id_next: { not: null } }, { room_id_next: { not: null } }] } },
+        },
+        orderBy: { created_at: 'asc' },
+      });
+      if (roomChange.length > 0) { badRequest(res, 'Please confirm all room change first'); return; }
+
+      const noShow = await getPrisma().folios.findMany({
+        where: {
+          property_id: BigInt(propertyId),
+          status_reservation: { in: [3, 5] },
+          check_in_date: { lte: dateObj },
+          is_posting: false,
+          deleted_at: null,
+        },
+        orderBy: { created_at: 'asc' },
+      });
+      if (noShow.length > 0) { badRequest(res, 'Please confirm all no show first'); return; }
+
+      const overStay = await getPrisma().folios.findMany({
+        where: {
+          property_id: BigInt(propertyId),
+          status_reservation: 0,
+          check_out_date: { lte: dateObj },
+          is_posting: false,
+          deleted_at: null,
+        },
+        orderBy: { created_at: 'asc' },
+      });
+      if (overStay.length > 0) { badRequest(res, 'Please confirm all over stay first'); return; }
+
+      // Mark posting (Laravel order: shift, roomChange, noShow, overStay)
+      if (openShifts.length > 0) {
+        await getPrisma().shifts.updateMany({ where: { id: { in: openShifts.map((s) => s.id) } }, data: { is_posting: true } });
+      }
+      if (roomChange.length > 0) {
+        await getPrisma().folios.updateMany({ where: { id: { in: roomChange.map((f) => f.id) } }, data: { is_posting: true } });
+      }
+      if (noShow.length > 0) {
+        await getPrisma().folios.updateMany({ where: { id: { in: noShow.map((f) => f.id) } }, data: { is_posting: true } });
+      }
+      if (overStay.length > 0) {
+        await getPrisma().folios.updateMany({ where: { id: { in: overStay.map((f) => f.id) } }, data: { is_posting: true } });
+      }
+
+      // 4. Room revenue + extra bed per check-in reservation (Laravel getAllReservation)
+      const postTrx = async (folio: any, codePostId: number | null, amount: number, type: string) => {
+        if (!codePostId) return;
+        const codePost = await getPrisma().code_posts.findUnique({ where: { id: BigInt(codePostId) } });
+        if (!codePost) return;
+        const calc = calculateCodePost(codePost as any, amount, false);
+        const ledger = codePost.code_billing_id
+          ? await getPrisma().ledgers.findFirst({
+              where: { folio_id: Number(folio.id), code_billing_id: codePost.code_billing_id, deleted_at: null },
+            })
+          : null;
+        let profile: any = null;
+        let modelType = 'App\Models\CompanyProfile';
+        if (ledger?.profileable_type === 'App\Models\GuestProfile') {
+          profile = await getPrisma().guest_profiles.findUnique({ where: { id: BigInt(Number(ledger.profileable_id)) } });
+          modelType = 'App\Models\GuestProfile';
+        } else if (ledger?.profileable_type === 'App\Models\CompanyProfile') {
+          profile = await getPrisma().company_profiles.findUnique({ where: { id: BigInt(Number(ledger.profileable_id)) } });
+        } else {
+          profile = await getPrisma().company_profiles.findUnique({ where: { id: BigInt(Number(folio.company_profile_id)) } });
+        }
+        const data: any = {
+          type,
+          folio_id: folio.id,
+          date: dateObj,
+          code: String(codePost.id),
+          amount: calc.amount,
+          total: calc.total,
+          pb1: calc.pb1,
+          svr_chrg: calc.service,
+          tax3: calc.tax3,
+          type_amount: 'PLUS',
+          is_posting: 1,
+          is_end_of_day: 1,
+          is_endshift: 1,
+          status: 1,
+          property_id: BigInt(propertyId),
+        };
+        if (profile) {
+          data.model_type = modelType;
+          data.model_id = profile.id;
+        }
+        await getPrisma().transactions.create({ data });
+      };
+
+      const reservations = await getPrisma().reservations.findMany({
+        where: {
+          property_id: BigInt(propertyId),
+          date: dayRange,
+          is_posting: 0,
+          deleted_at: null,
+          folios: { is: { status_reservation: 0, is_virtual: false } },
+        },
+        include: { folios: true, rates: true },
+      });
+
+      for (const value of reservations) {
+        const folio = value.folios;
+        if (value.room_id) {
+          const room = await getPrisma().rooms.findUnique({ where: { id: value.room_id } });
+          if (room) {
+            const upd: any = { maid_status: 1 };
+            if (folio.check_out_date && new Date(folio.check_out_date.getTime()).getTime() === nextObj.getTime()) {
+              upd.room_status = 2;
+            }
+            await getPrisma().rooms.update({ where: { id: room.id }, data: upd });
+          }
+        }
+        const nextRes = await getPrisma().reservations.findFirst({
+          where: { folio_id: folio.id, date: nextRange },
+        });
+        if (nextRes && nextRes.room_id !== value.room_id) {
+          await getPrisma().reservations.update({
+            where: { id: nextRes.id },
+            data: {
+              room_id_next: nextRes.room_id,
+              room_id: nextRes.room_id,
+              room_type_id_next: nextRes.room_type_id,
+              room_type_id: nextRes.room_type_id,
+            },
+          });
+        }
+        if (value.rates?.code_post_id) {
+          await postTrx(folio, Number(value.rates.code_post_id), Number(value.total ?? 0), 'room_revenue');
+        }
+        if (Number(value.total_extra_bed ?? 0) > 0 && value.rates?.code_post_extra_bed_id) {
+          await postTrx(folio, Number(value.rates.code_post_extra_bed_id), Number(value.total_extra_bed), 'extra_bed');
+        }
+        await getPrisma().reservations.updateMany({ where: { id: value.id }, data: { is_posting: 1 } });
+      }
+
+      // 5. Additional item per folio inclusive (Laravel model_has_code_items loop — Prisma @@ignore, raw SQL)
+      const mhciRows: any[] = await getPrisma().$queryRaw`
+        SELECT model_id FROM model_has_code_items WHERE model_type = 'App\Models\Folio'
+      `;
+      const mhciFolioIds = mhciRows.map((m: any) => BigInt(String(m.model_id)));
+      const inclusiveFolios = await getPrisma().folios.findMany({
+        where: { property_id: BigInt(propertyId), status_reservation: 0, deleted_at: null, id: { in: mhciFolioIds } },
+        orderBy: { created_at: 'asc' },
+      });
+      for (const folio of inclusiveFolios) {
+        const items: any[] = await getPrisma().$queryRaw`
+          SELECT * FROM model_has_code_items
+          WHERE model_id = ${folio.id} AND model_type = 'App\Models\Folio'
+            AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+        `;
+        if (items.length === 0) continue;
+        for (const item of items) {
+          const codeItemId = Number(item.code_item_id);
+          if (!codeItemId) continue;
+          const codeItem = await getPrisma().code_items.findUnique({ where: { id: BigInt(codeItemId) } });
+          if (!codeItem?.code_post_id) continue;
+          const upsales = Number(item.upsales ?? 0);
+          const sales = Number(item.sales ?? 0);
+          await postTrx(folio, Number(codeItem.code_post_id), upsales > 0 ? upsales : sales, 'additional_item');
+        }
+        await getPrisma().$executeRaw`
+          UPDATE model_has_code_items SET is_posting = 1
+          WHERE model_id = ${folio.id} AND model_type = 'App\Models\Folio'
+            AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+        `;
+      }
+
+      // 6. Room status transitions (vacant→block, block→vacant+dirty, vacant→out of order)
+      const availTomorrow = (await getPrisma().room_availabilities.findMany({
+        where: { property_id: propertyId, date: nextRange },
+      })).map((a) => a.room_id);
+      const workOrderRooms = (await getPrisma().work_orders.findMany({
+        where: { property_id: BigInt(propertyId), date: nextRange, end_date: null },
+      })).map((w) => Number(w.room_id)).filter((x) => x > 0);
+
+      const roomsVacant = await getPrisma().rooms.findMany({ where: { property_id: BigInt(propertyId), room_status: 0, id: { in: availTomorrow } } });
+      if (roomsVacant.length > 0) {
+        await getPrisma().rooms.updateMany({ where: { id: { in: roomsVacant.map((r) => r.id) } }, data: { room_status: 3 } });
+      }
+
+      const roomsBlock = await getPrisma().rooms.findMany({
+        where: { property_id: BigInt(propertyId), room_status: 3, NOT: { id: { in: availTomorrow } } },
+      });
+      if (roomsBlock.length > 0) {
+        await getPrisma().rooms.updateMany({ where: { id: { in: roomsBlock.map((r) => r.id) } }, data: { room_status: 0, maid_status: 1 } });
+      }
+
+      const roomsOOO = await getPrisma().rooms.findMany({ where: { property_id: BigInt(propertyId), room_status: 0, id: { in: workOrderRooms } } });
+      if (roomsOOO.length > 0) {
+        await getPrisma().rooms.updateMany({ where: { id: { in: roomsOOO.map((r) => r.id) } }, data: { room_status: 4 } });
+      }
+
+      // 7. SystemBalance store (Laravel SystemBalance::storeBalance)
+      await storeSystemBalance(dateObj, prevObj, propertyId);
+
+      // 8. LogAudit upsert per property (HasProperties scope parity)
       const existing = await getPrisma().log_audits.findFirst({ where: { date: dateObj, property_id: propertyId } });
       if (existing) {
         await getPrisma().log_audits.update({ where: { id: existing.id }, data: { status: BigInt(1) } });
@@ -350,13 +722,7 @@ export class SystemController {
         await getPrisma().log_audits.create({ data: { date: dateObj, property_id: propertyId, status: BigInt(1) } });
       }
 
-      // Next business date = latest log_audits.date + 1 (parity LogAudit::getBusinessDate)
-      const latest = await getPrisma().log_audits.findFirst({ where: { property_id: propertyId }, orderBy: { date: 'desc' } });
-      const businessDate = latest
-        ? new Date(new Date(latest.date).getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
-        : new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
-
-      success(res, { date, business_date: businessDate, status: 'posted' }, 'Night audit posted successfully');
+      success(res, { bussinesDate: dateStr, name: req.user?.name ?? '', image: '' }, 'Success');
     } catch (err: any) {
       console.error('Night audit post error:', err);
       error(res, 'Failed to post night audit', 500);
@@ -1305,7 +1671,7 @@ const payload = formatSystemBalanceData(
 
       const where: any = {
         property_id: propertyId,
-        status_reservation: { in: [1, 0] },
+        status_reservation: { in: [3, 5] },
         check_in_date: { lte: new Date(dateStr) },
         is_posting: false,
       };
@@ -1341,7 +1707,7 @@ const payload = formatSystemBalanceData(
 
       const where: any = {
         property_id: propertyId,
-        status_reservation: 2,
+        status_reservation: 0,
         check_out_date: { lte: new Date(dateStr) },
         is_posting: false,
       };
@@ -1368,35 +1734,58 @@ const payload = formatSystemBalanceData(
   // ==================== NIGHT AUDIT CHECK ====================
   static async nightAuditCheck(req: Request, res: Response): Promise<void> {
     try {
-      const dateStr = req.query.date as string;
+      const dateStr = (req.body?.date as string) ?? (req.query.date as string);
       const propertyId = req.user?.lastProperty ?? 0n;
 
       if (!dateStr || dateStr === '-1') {
-        badRequest(res, 'Valid date is required');
+        badRequest(res, 'date is required');
         return;
       }
 
-      const d = new Date(dateStr);
-      const next = new Date(d);
-      next.setDate(next.getDate() + 1);
+      const d = new Date(`${dateStr}T00:00:00`);
+      if (Number.isNaN(d.getTime())) { badRequest(res, 'date must be a valid date'); return; }
+      const next = new Date(d.getTime() + 24 * 60 * 60 * 1000);
+      const dayRange: any = { gte: d, lt: next };
 
-      const openShifts = await getPrisma().shifts.count({
+      // Laravel checkNightAudit: shift → transaction → room change → no show → over stay
+      const shift = await getPrisma().shifts.findMany({
+        where: { property_id: propertyId, date: dayRange, is_posting: false, end: null, deleted_at: null },
+        orderBy: { created_at: 'asc' },
+      });
+      if (shift.length > 0) { badRequest(res, 'Please close all shift first'); return; }
+
+      const transactions = await getPrisma().transactions.findMany({
+        where: { property_id: propertyId, date: dayRange, is_posting: 0, deleted_at: null },
+      });
+      if (transactions.length > 0) {
+        res.json({ code: 400, transaction: bigintToNumber(transactions), message: 'Please confirm all transaction first' });
+        return;
+      }
+
+      const roomChange = await getPrisma().folios.findMany({
         where: {
           property_id: propertyId,
-          date: { gte: d, lt: next },
-          deleted_at: null,
           is_posting: false,
+          deleted_at: null,
+          reservations: { some: { OR: [{ room_type_id_next: { not: null } }, { room_id_next: { not: null } }] } },
         },
+        orderBy: { created_at: 'asc' },
       });
+      if (roomChange.length > 0) { badRequest(res, 'Please confirm all room change first'); return; }
 
-      success(res, {
-        date: dateStr,
-        open_shifts: openShifts,
-        status: openShifts === 0 ? 'ready' : 'pending_shifts',
-        message: openShifts === 0
-          ? 'All shifts posted. Ready for night audit.'
-          : `${openShifts} shift(s) still open. Please confirm all shifts first.`,
-      }, 'Night audit check complete');
+      const noShow = await getPrisma().folios.findMany({
+        where: { property_id: propertyId, status_reservation: { in: [3, 5] }, check_in_date: { lte: d }, is_posting: false, deleted_at: null },
+        orderBy: { created_at: 'asc' },
+      });
+      if (noShow.length > 0) { badRequest(res, 'Please confirm all no show first'); return; }
+
+      const overStay = await getPrisma().folios.findMany({
+        where: { property_id: propertyId, status_reservation: 0, check_out_date: { lte: d }, is_posting: false, deleted_at: null },
+        orderBy: { created_at: 'asc' },
+      });
+      if (overStay.length > 0) { badRequest(res, 'Please confirm all over stay first'); return; }
+
+      success(res, { date: dateStr }, 'Success');
     } catch (err: any) {
       console.error('Night audit check error:', err);
       error(res, 'Failed to check night audit', 500);
