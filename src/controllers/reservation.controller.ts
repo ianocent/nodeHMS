@@ -7,6 +7,7 @@ import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -24,6 +25,57 @@ const STATUS_RESERVATION = {
 
 const STATUS_ACTIVE = 1;
 const MENU_ID = 80; // Reservation menu ID
+
+// Reservation action icons (matching Laravel config/cms.php action_reservation.action)
+const ACTION_RESERVATION: { key: string; name: string; icon: string; line?: boolean }[] = [
+  { key: 'fit', name: 'New FIT', icon: '/theme/cms/images/reservation/icon/New_Reservation.svg' },
+  { key: 'git', name: 'New GIT', icon: '/theme/cms/images/reservation/icon/New_Reservation.svg' },
+  { key: 'vr', name: 'New VR', icon: '/theme/cms/images/reservation/icon/New_Reservation.svg' },
+  { key: 'edit', name: 'Edit', icon: '/theme/cms/images/reservation/icon/Edit_Reservation.svg', line: true },
+  { key: 'assign_room', name: 'Assign Room', icon: '/theme/cms/images/reservation/icon/Asign_room.svg' },
+  { key: 'un_assign_room', name: 'Un Assign Room', icon: '/theme/cms/images/reservation/icon/Asign_room.svg' },
+  { key: 'confirm_change_room', name: 'Confirm Change Room', icon: '/theme/cms/images/reservation/icon/Confirm_Reservation.svg' },
+  { key: 'cancel_change_room', name: 'Cancel Change Room', icon: '/theme/cms/images/reservation/icon/Cancel_Reservation.svg', line: true },
+  { key: 'check_in', name: 'Check In', icon: '/theme/cms/images/reservation/icon/Checkin.svg' },
+  { key: 'un_check_in', name: 'Un Check In', icon: '/theme/cms/images/reservation/icon/Checkin.svg' },
+  { key: 'cancel_reservation', name: 'Cancel Reservation', icon: '/theme/cms/images/reservation/icon/Cancel_Reservation.svg' },
+  { key: 'un_cancel_reservation', name: 'Un Cancel Reservation', icon: '/theme/cms/images/reservation/icon/Cancel_Reservation.svg' },
+  { key: 'check_out', name: 'Check Out', icon: '/theme/cms/images/reservation/icon/Checkout.svg' },
+  { key: 'un_check_out', name: 'Re-Check In', icon: '/theme/cms/images/reservation/icon/Checkout.svg', line: true },
+  { key: 'copy_reservation', name: 'Copy Reservation', icon: '/theme/cms/images/reservation/icon/Add_Message.svg', line: true },
+  { key: 'move_reservation', name: 'Move Reservation', icon: '/theme/cms/images/reservation/icon/Checkin.svg', line: true },
+  { key: 'confirm_reservation', name: 'Confirm Reservation', icon: '/theme/cms/images/reservation/icon/Add_Message.svg', line: true },
+  { key: 'add_message', name: 'Add Message', icon: '/theme/cms/images/reservation/icon/Add_Message.svg' },
+  { key: 'view_message', name: 'View Message', icon: '/theme/cms/images/reservation/icon/View_Message.svg' },
+  { key: 'add_remark', name: 'Add Remark', icon: '/theme/cms/images/reservation/icon/Add_Message.svg' },
+  { key: 'view_remark', name: 'View Remark', icon: '/theme/cms/images/reservation/icon/View_Message.svg' },
+  { key: 'new_key', name: 'New Key', icon: '/theme/cms/images/reservation/icon/Checkin.svg' },
+  { key: 'duplicate_key', name: 'Duplicate Key', icon: '/theme/cms/images/reservation/icon/Checkin.svg' },
+  { key: 'erase_key', name: 'Erase Key', icon: '/theme/cms/images/reservation/icon/Checkin.svg' },
+  { key: 'check_out_view', name: 'Check Out View', icon: '/theme/cms/images/reservation/icon/Checkout.svg' },
+  { key: 'confirmation_letter', name: 'Send Email Confirmation Letter', icon: '/theme/cms/images/reservation/icon/Checkout.svg' },
+  { key: 'guest_invoice_all_billing', name: 'Send Email Guest Invoice All Billing', icon: '/theme/cms/images/reservation/icon/Checkout.svg' },
+  { key: 'guest_invoice_ledger', name: 'Send Email Guest Invoice Ledger', icon: '/theme/cms/images/reservation/icon/Checkout.svg' },
+];
+
+// Rule map per status code (matching Laravel config/cms.php action_reservation.rule)
+const ACTION_RULE: Record<string, string[]> = {
+  reservation: ['fit', 'git', 'vr', 'edit', 'move_reservation', 'assign_room', 'un_assign_room', 'confirm_change_room', 'cancel_change_room', 'check_in', 'check_out_view', 'cancel_reservation', 'copy_reservation', 'add_message', 'view_message', 'add_remark', 'view_remark', 'confirmation_letter', 'guest_invoice_all_billing', 'guest_invoice_ledger'],
+  check_in: ['fit', 'git', 'vr', 'edit', 'confirm_change_room', 'cancel_change_room', 'check_in', 'un_check_in', 'check_out', 'check_out_view', 'copy_reservation', 'add_message', 'view_message', 'add_remark', 'view_remark', 'new_key', 'duplicate_key', 'erase_key', 'confirmation_letter', 'guest_invoice_all_billing', 'guest_invoice_ledger'],
+  check_out: ['fit', 'git', 'vr', 'edit', 'un_check_out', 'check_out_view', 'copy_reservation', 'add_message', 'view_message', 'add_remark', 'view_remark', 'confirmation_letter', 'guest_invoice_all_billing', 'guest_invoice_ledger'],
+  cancel_reservation: ['fit', 'git', 'vr', 'edit', 'copy_reservation', 'add_message', 'view_message', 'add_remark', 'view_remark'],
+  default: ['fit', 'git', 'vr', 'edit', 'move_reservation', 'assign_room', 'un_assign_room', 'confirm_change_room', 'cancel_change_room', 'check_in', 'un_check_in', 'cancel_reservation', 'check_out_view', 'copy_reservation', 'confirm_reservation', 'add_message', 'view_message', 'add_remark', 'view_remark', 'confirmation_letter', 'guest_invoice_all_billing', 'guest_invoice_ledger'],
+};
+
+function fmtLocalDate(d: any): string | null {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt.getTime())) return String(d).substring(0, 10);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -1033,6 +1085,7 @@ success(res, formatted, 'Success', 200, {
       const id = BigInt(idParam);
       const pid = req.user?.lastProperty ?? 0n;
       const businessDate = new Date();
+      const bdate = await AuthController.getBusinessDate(pid === 0n ? null : pid);
 
       const folio = await prisma.folios.findUnique({
         where: { id },
@@ -1071,6 +1124,10 @@ success(res, formatted, 'Success', 200, {
         });
         if (childFolio) reservations = childFolio.reservations;
       }
+      // Laravel Folio::formatAction check_in: parent GIT needs >=1 child folio with status reservation (3)
+      const childReservationCount = isParentGit
+        ? await prisma.folios.count({ where: { parent: id, deleted_at: null, status_reservation: 3 } })
+        : 0;
       const reservationsMeta = isParentGit && childFolio ? childFolio : folio;
 
       const [typeLinks, roomRows] = await Promise.all([
@@ -1324,6 +1381,49 @@ success(res, formatted, 'Success', 200, {
         ? { value: folio.status_reservation, label: 'Request Cancel' }
         : { value: folio.status_reservation ?? 3, label: STATUS_RESERVATION_MAP[folio.status_reservation ?? 3] ?? 'Reservation' };
 
+      // ---- actions (Laravel Folio::formatAction parity) ----
+      const appUrl = process.env.APP_URL ?? 'http://localhost:8000';
+      const actions = (() => {
+        const mapAction = (list: typeof ACTION_RESERVATION) =>
+          list.map((a) => ({ label: a.name, key: a.key, icon: appUrl + a.icon, line: a.line ?? false }));
+
+        if (String(req.query.night_audit) === '1') {
+          const nightKeys: Record<string, string[]> = {
+            'room-change': ['confirm_change_room', 'edit', 'cancel_change_room'],
+            'no-show': ['cancel_reservation', 'edit'],
+            'over-stay': ['check_out', 'edit'],
+          };
+          const keys = nightKeys[String(req.query.audit_type ?? '')] ?? [];
+          return mapAction(ACTION_RESERVATION.filter((a) => keys.includes(a.key)));
+        }
+
+        const statusCodeMap: Record<number, string> = { 0: 'check_in', 1: 'check_out', 2: 'cancel_reservation', 3: 'reservation', 4: 'in_house', 5: 'pending' };
+        const statusCode = statusCodeMap[folio.status_reservation ?? 3] ?? 'default';
+        const ruleKeys = ACTION_RULE[statusCode] ?? ACTION_RULE.default;
+        const isFit = String(folio.type_reservation ?? '') === 'fit';
+        const isGit = String(folio.type_reservation ?? '') === 'git';
+        const isParentGit = isGit && Number(folio.parent) === 0;
+        const isPending = folio.is_pending === true || folio.status_reservation === 5;
+        const ownRes: any[] = folio.reservations ?? [];
+
+        return mapAction(ACTION_RESERVATION.filter((a) => {
+          if ((a.key === 'confirm_change_room' || a.key === 'cancel_change_room') && !ownRes.some((r: any) => r.room_id_next != null)) return false;
+          if ((a.key === 'confirm_reservation' || a.key === 'cancel_reservation') && folio.status_reservation === 2) return false;
+          if (a.key === 'un_check_in' && fmtLocalDate(folio.check_in_date) !== bdate) return false;
+          if ((req.query.group === 'fit' || req.query.group === 'git') && ['check_in', 'check_out', 'un_check_in', 'un_check_out'].includes(a.key)) return false;
+          if (isParentGit && a.key === 'assign_room') return false;
+          if (a.key === 'move_reservation' && isGit) return false;
+          if (a.key === 'copy_reservation' && !isFit) return false;
+          if (a.key === 'check_in' && folio.status_reservation === 0) {
+            if (!isParentGit) return false;
+            if (childReservationCount === 0) return false;
+          }
+          if (isPending) return ['edit', 'cancel_reservation', 'confirm_reservation', 'copy_reservation', 'add_message', 'view_message'].includes(a.key);
+          if (a.key === 'vr' || a.key === 'git' || a.key === 'fit') return a.key.toLowerCase() === String(folio.type_reservation ?? '').toLowerCase();
+          return ruleKeys.includes(a.key);
+        }));
+      })();
+
       const data = {
         id: Number(folio.id),
         is_parent: Number(folio.parent) > 0 ? false : true,
@@ -1415,7 +1515,7 @@ success(res, formatted, 'Success', 200, {
         check_out_date: folio.check_out_date,
         guest_name: guestName(folio.first_name, folio.last_name, guestProfile?.account),
         company: (folio.company_name ?? '') !== '' ? folio.company_name : folio.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? null,
-        actions: [],
+        actions,
         guest_status: folioTypes('guest-status') || normalFallback,
         guest_status_color: [
           {
