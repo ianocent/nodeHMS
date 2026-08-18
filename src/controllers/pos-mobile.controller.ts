@@ -1,9 +1,10 @@
 import { Request, Response } from 'express';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { Pool } from 'pg';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { moneyFormat } from '../utils/cmsConfig';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -42,6 +43,151 @@ function money(value: any, decimal = 2, mode: 'half_up' | 'truncate' = 'half_up'
  * Public token-less (client_uid based).
  */
 export class PosMobileController {
+  // GET /map (Laravel MapsController@index parity — Blade view with Leaflet markers)
+  static async mapIndex(req: Request, res: Response): Promise<void> {
+    try {
+      const token = req.query.token as string | undefined;
+      if (!token) { res.status(400).json({ message: 'Token is required.' }); return; }
+
+      // Sanctum parity: "id|plainText", stored token = sha256(plainText)
+      const [idStr, plain] = token.split('|');
+      const hashed = createHash('sha256').update(plain ?? '').digest('hex');
+      const pat = await prisma.personal_access_tokens.findFirst({
+        where: { id: BigInt(Number(idStr)), token: hashed },
+      });
+      if (!pat) { res.status(404).json({ message: 'Token not found.' }); return; }
+
+      const user = await prisma.users.findUnique({ where: { id: pat.tokenable_id } });
+      const property = user?.last_property ? await prisma.properties.findUnique({ where: { id: user.last_property } }) : null;
+      if (!property) { res.status(404).json({ message: 'No data found.' }); return; }
+
+      const logAudit = await prisma.log_audits.findFirst({
+        where: { property_id: Number(property.id) },
+        orderBy: { date: 'desc' },
+      });
+      const date = logAudit ? new Date(new Date(logAudit.date).getTime() + 24 * 60 * 60 * 1000) : new Date();
+      const start = new Date(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}T00:00:00`);
+      const dayRange = { gte: start, lt: new Date(start.getTime() + 24 * 60 * 60 * 1000) };
+
+      const db = await prisma.hotel_competitors.findMany({ where: { date: dayRange, property_id: property.id } });
+      const master = await prisma.master_hotel_competitors.findMany({
+        where: { property_id: property.id, status: 1, deleted_at: null },
+      });
+
+      const reservationAgg = await prisma.reservations.aggregate({
+        _sum: { amount: true },
+        where: { property_id: property.id, date: dayRange, folios: { is: { status_reservation: { not: 2 } } } },
+      });
+      const reservation = Number(reservationAgg._sum.amount ?? 0);
+
+      const roomAvailable = await prisma.rooms.count({ where: { property_id: property.id, status: 1, deleted_at: null } });
+      const roomSold = await prisma.rooms.count({
+        where: { property_id: property.id, status: 1, deleted_at: null, room_status: { in: [1, 2] } },
+      });
+
+      const ownRevenue = roomSold * (reservation / (roomSold < 1 ? 1 : roomSold));
+      const data: any[] = [{
+        id: 0,
+        name: property.name,
+        room_revenue: ownRevenue,
+        longitude: property.longitude,
+        latitude: property.latitude,
+      }];
+
+      for (let i = 0; i < master.length; i++) {
+        const m = master[i];
+        const hc = db.find((d) => d.master_hotel_competitor_id === m.id);
+        if (hc) {
+          data[i + 1] = {
+            id: Number(m.id),
+            name: m.name,
+            latitude: m.latitude,
+            longitude: m.longitude,
+            room_revenue: Number(hc.room_sold) * Number(hc.arr),
+            room_available: hc.room_available,
+            room_sold: hc.room_sold,
+            arr: Number(hc.arr),
+            total_revenue: Number(hc.total_revenue),
+          };
+        } else {
+          data[i + 1] = {
+            id: Number(m.id),
+            name: m.name,
+            room_revenue: 0,
+            latitude: m.latitude,
+            longitude: m.longitude,
+          };
+        }
+      }
+
+      const localResults = data
+        .filter((item) => item.latitude && item.longitude)
+        .map((item) => ({
+          title: item.name,
+          price: moneyFormat(item.room_revenue),
+          gps_coordinates: { latitude: item.latitude, longitude: item.longitude },
+        }));
+
+      const markers = localResults.map((h: any) => {
+        const title = String(h.title).length > 10 ? String(h.title).slice(0, 7) + '...' : String(h.title);
+        return `addHotelMarker(${h.gps_coordinates.latitude}, ${h.gps_coordinates.longitude}, '${title.replace(/'/g, "\\'")}', '${h.price}');`;
+      }).join('\n            ');
+
+      const lat = property.latitude ?? '';
+      const lng = property.longitude ?? '';
+
+      res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Maps</title>
+</head>
+<body>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"></link>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+    <div id="map" style="height: 100vh;"></div>
+
+    <script>
+        var map = L.map('map').setView(["${lat}", "${lng}"], 16);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+        }).addTo(map);
+
+        function addHotelMarker(lat, lng, name, price) {
+            L.tooltip({
+                permanent: true,
+                direction: 'top',
+                opacity: 1,
+                size: [200, 100],
+            })
+            .setLatLng([lat, lng])
+            .setContent(
+                '<div style="width: auto; height: auto; background-color: #fff; align-items: center; gap:1px; padding:0; text-align: center">' +
+                '<i class="fas fa-hotel"></i>' +
+                '<div style="display: flex; flex-direction: column; gap: 1px;">' +
+                '<span style="font-weight: bold; font-size: 14px;">' + name + '</span>' +
+                '<span style="font-size: 12px;">Room Rev: ' + price + '</span>' +
+                '</div>'
+                + '</div>'
+            )
+            .addTo(map);
+        }
+
+        ${markers}
+    </script>
+    
+</body>
+</html>`);
+    } catch (err: any) {
+      console.error('Map index error:', err);
+      res.status(500).json({ message: 'Failed to load map' });
+    }
+  }
+
   // ── POST /pos/type-payment ──
   static async typePayment(req: Request, res: Response): Promise<void> {
     try {
