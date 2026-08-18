@@ -199,6 +199,7 @@ router.get('/get-dashboard/:code', authMiddleware, SystemController.getDashboard
 
 // Helper endpoints
 router.get('/helper/task-notification', authMiddleware, SystemController.helperTaskNotification);
+router.get('/notification', authMiddleware, requirePermission(1152, 'view'), SystemController.notificationList);
 router.get('/helper/total-cancel-booking-engine', authMiddleware, SystemController.helperTotalCancelBookingEngine);
 router.post('/helper/release-last-user-folio', authMiddleware, SystemController.helperReleaseLastUserFolio);
 

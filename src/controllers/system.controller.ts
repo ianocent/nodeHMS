@@ -9,6 +9,8 @@ import { encrypt } from '../utils/encryption';
 import { badRequest, error, notFound, success } from '../utils/response';
 import { crudPermission, laravelPaging, postCodeBudgetTable, setupTable } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
+import { getPermissionFlags } from '../middleware/permission.middleware';
+import { getColorReservation, getColorMaid, getColorRoom, STATUS_RESERVATION_MAP, ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 
 // Laravel storage/app/public parity — files served at /storage/{path}
 const STORAGE_DIR = path.join(process.cwd(), 'storage');
@@ -51,8 +53,52 @@ const LOG_TABLE = [
   { label: 'type', key: 'type', type: 'none', is_search: false },
   { label: 'Module', key: 'subject_type', type: 'select', is_search: true },
   { label: 'Activity', key: 'description', is_html: true, type: 'none', is_search: false },
-  { label: 'Action', key: 'action', type: 'action', is_search: false },
 ];
+
+// Laravel NightAuditController@roomChange/noShow/overStay table parity
+const NIGHT_AUDIT_TABLE = [
+  { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
+  { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
+  { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
+  { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
+];
+
+// Laravel Folio::formatTableOnline parity (NotificationController@index)
+const NOTIFICATION_TABLE = [
+  { label: 'Type', key: 'type_reservation', type: 'text', is_search: false },
+  { label: 'Status', key: 'status_reservation_color_custom', type: 'label', is_html: true, is_search: false },
+  { label: 'Folio No.', key: 'folio_number', type: 'text', is_html: true, is_search: true },
+  { label: 'Pre Check In', key: 'date_arrival', type: 'text', is_search: true },
+  { label: 'Guest Name', key: 'guest_name', type: 'text', is_search: false },
+  { label: 'Group Name/Company', key: 'company', type: 'text', is_search: false },
+  { label: 'Room Type', key: 'room_type', type: 'text', is_search: false },
+  { label: 'Room', key: 'room', type: 'text', is_search: true },
+  { label: 'Room Status', key: 'room_status_color_custom', type: 'text', is_html: true, is_search: false },
+  { label: 'Clean Status', key: 'room_clean_status_color_custom', type: 'text', is_html: true, is_search: false },
+  { label: 'Check In', key: 'check_in_date', type: 'date', is_search: true },
+  { label: 'Check out', key: 'check_out_date', type: 'date', is_search: true },
+];
+
+// GlobalResources row parity: formatData() + no
+async function formatNightAuditFolios(data: any[]): Promise<any[]> {
+  const guestIds = Array.from(new Set(data.map((f) => f.guest_profile_id).filter((v) => v !== null && v !== undefined))) as bigint[];
+  const guests = guestIds.length > 0
+    ? await getPrisma().guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, account: true } })
+    : [];
+  const guestMap = new Map(guests.map((g) => [g.id, g]));
+  const fmt = (d: Date | null | undefined): string => (d ? d.toISOString().slice(0, 10) : '');
+  return data.map((f, idx) => {
+    const gp = f.guest_profile_id !== null && f.guest_profile_id !== undefined ? guestMap.get(f.guest_profile_id) : null;
+    return {
+      id: Number(f.id),
+      folio_number: f.folio_number,
+      formated_guest_profile: gp ? `${gp.account ?? ''}, ${f.first_name ?? ''} ${f.last_name ?? ''}`.trim() : '',
+      check_in_date: fmt(f.check_in_date),
+      check_out_date: fmt(f.check_out_date),
+      no: idx + 1,
+    };
+  });
+}
 
 // Helper: coerce sort/status to number (matches Laravel int casting)
 function num(v: any, fallback = 0): number {
@@ -288,9 +334,29 @@ export class SystemController {
 
   static async nightAuditPost(req: Request, res: Response): Promise<void> {
     try {
-      const date = req.query.date as string;
+      const date = (req.body?.date as string) ?? (req.query.date as string);
+      if (!date) { badRequest(res, 'date is required'); return; }
 
-      success(res, { date, status: 'posted', message: 'Night audit posted successfully' }, 'Success');
+      const propertyId = Number(req.user?.lastProperty ?? 0);
+      const dateObj = new Date(date);
+      if (Number.isNaN(dateObj.getTime())) { badRequest(res, 'date must be a valid date'); return; }
+
+      // Laravel NightAuditController@postNightAudit: LogAudit upsert per property
+      // (HasProperties global scope → property-scoped where('date', ...))
+      const existing = await getPrisma().log_audits.findFirst({ where: { date: dateObj, property_id: propertyId } });
+      if (existing) {
+        await getPrisma().log_audits.update({ where: { id: existing.id }, data: { status: BigInt(1) } });
+      } else {
+        await getPrisma().log_audits.create({ data: { date: dateObj, property_id: propertyId, status: BigInt(1) } });
+      }
+
+      // Next business date = latest log_audits.date + 1 (parity LogAudit::getBusinessDate)
+      const latest = await getPrisma().log_audits.findFirst({ where: { property_id: propertyId }, orderBy: { date: 'desc' } });
+      const businessDate = latest
+        ? new Date(new Date(latest.date).getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+        : new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+      success(res, { date, business_date: businessDate, status: 'posted' }, 'Night audit posted successfully');
     } catch (err: any) {
       console.error('Night audit post error:', err);
       error(res, 'Failed to post night audit', 500);
@@ -476,52 +542,338 @@ const payload = formatSystemBalanceData(
 
   static async logList(req: Request, res: Response): Promise<void> {
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 10;
+      const page = Math.max(1, parseInt(req.query.page as string) || 1);
+      const limitRaw = parseInt(req.query.limit as string) || 10;
+      const limit = limitRaw > 0 ? Math.min(limitRaw, 50) : 10;
+      const search = (req.query.search as string) || '';
+      const searchField = (req.query.search_field as string) || '';
+      const searchValue = (req.query.search_value as string) || '';
       const module = req.query.module as string;
-      const id = req.query.id as string;
+      const idRaw = (req.query.id as string) || (req.query.data as string);
+      const dateStr = req.query.date as string;
+      const sort = (req.query.sort as string) || '';
+      const propertyId = req.user?.lastProperty ? Number(req.user.lastProperty) : null;
+
+      // Laravel: subject_type search_field → module headline; else module param
+      let subjectType: string | undefined;
+      let searchValueModule = '';
+      if (searchField && searchField.includes('subject_type') && searchValue) {
+        searchValueModule = searchValue.replace(/;/g, '').split('\\').pop() ?? '';
+      }
+      const moduleName = module || searchValueModule;
+      if (moduleName) {
+        const headline = String(moduleName).split('\\').pop() ?? '';
+        const pascal = headline.replace(/([A-Z])/g, (m, p) => (headline.indexOf(m) === 0 ? m : ' ' + m)).split(' ').filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join('');
+        subjectType = 'App\\Models\\' + (pascal || headline);
+      }
 
       const where: any = {};
-
-      if (module) {
-        where.subject_type = module;
+      if (subjectType) where.subject_type = subjectType;
+      if (idRaw && idRaw !== 'null' && idRaw !== 'undefined') where.subject_id = BigInt(idRaw);
+      if (dateStr) {
+        where.created_at = { gte: new Date(dateStr + 'T00:00:00.000Z'), lte: new Date(dateStr + 'T23:59:59.999Z') };
+      }
+      if (search) {
+        const nameUsers = await getPrisma().users.findMany({ where: { name: { contains: search, mode: 'insensitive' } }, select: { id: true } });
+        const nameIds = nameUsers.map((u) => u.id);
+        where.OR = [
+          { subject_type: { contains: search, mode: 'insensitive' } },
+          { description: { contains: search, mode: 'insensitive' } },
+          { properties: { contains: search, mode: 'insensitive' } },
+          ...(nameIds.length ? [{ causer_id: { in: nameIds } }] : []),
+        ];
+      }
+      if (searchField && searchValue && searchField !== 'subject_type') {
+        where[searchField] = { contains: searchValue, mode: 'insensitive' };
       }
 
-      if (id && id !== 'null' && id !== 'undefined') {
-        where.subject_id = BigInt(id);
-      }
+      let orderBy: any = { created_at: 'desc' };
+      if (sort === 'id') orderBy = { id: 'asc' };
+      else if (sort === '-id') orderBy = { id: 'desc' };
+      else if (sort === 'created_at') orderBy = { created_at: 'asc' };
+      else if (sort === '-created_at') orderBy = { created_at: 'desc' };
 
       const [data, total] = await Promise.all([
-        getPrisma().logs.findMany({
-          where,
-          orderBy: { id: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
+        getPrisma().logs.findMany({ where, orderBy, skip: (page - 1) * limit, take: limit }),
         getPrisma().logs.count({ where }),
       ]);
 
-      const formatted = bigintToNumber(data).map((row: any) => ({
-        ...row,
-        causer: row.name || row.causer || null,
-        type: row.event || row.log_name || null,
-      }));
+      // causer names (Laravel ->with('causer'))
+      const causerIds = Array.from(new Set(data.map((l) => l.causer_id).filter((v) => v !== null && v !== undefined))) as bigint[];
+      const causers = causerIds.length > 0
+        ? await getPrisma().users.findMany({ where: { id: { in: causerIds } }, select: { id: true, name: true } })
+        : [];
+      const causerMap = new Map(causers.map((u) => [u.id, u.name ?? 'System']));
 
-      success(res, formatted, 'Success', 200, {
+      // company names from properties (Laravel extractCompanyIds)
+      const companyIds = new Set<number>();
+      const parseProps = (raw: string | null): { attributes?: any; old?: any } => {
+        try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+      };
+      for (const log of data) {
+        const props = parseProps(log.properties);
+        for (const src of [props.attributes ?? {}, props.old ?? {}]) {
+          if (src && typeof src === 'object') {
+            if (src.company_id && Number.isFinite(Number(src.company_id))) companyIds.add(Number(src.company_id));
+            if (src.data && typeof src.data === 'object' && src.data.company_id && Number.isFinite(Number(src.data.company_id))) companyIds.add(Number(src.data.company_id));
+          }
+        }
+      }
+      const companies = companyIds.size > 0
+        ? await getPrisma().company_profiles.findMany({ where: { id: { in: [...companyIds] as any } }, select: { id: true, name: true } })
+        : [];
+      const companyMap = new Map(companies.map((c) => [Number(c.id), c.name ?? '']));
+
+      const EXCLUDE = ['id', 'updated_by', 'updated_at', 'created_by', 'created_at', 'deleted_by', 'deleted_at', 'property_id'];
+      const isKosong = (v: any): boolean => v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0) || (typeof v === 'string' && v.trim() === '') || String(v) === '→';
+
+      const hasRealChanges = (log: any): boolean => {
+        const props = parseProps(log.properties);
+        const attrs = props.attributes ?? {};
+        const old = props.old ?? {};
+        for (const key of Object.keys(attrs)) {
+          if (EXCLUDE.includes(key)) continue;
+          if (key === 'data') {
+            const oldData = old.data ?? {};
+            const newData = attrs[key] ?? {};
+            if (newData && typeof newData === 'object') {
+              for (const subKey of Object.keys(newData)) {
+                if (JSON.stringify(newData[subKey]) !== JSON.stringify(oldData[subKey])) return true;
+              }
+            }
+            continue;
+          }
+          const oldValue = old[key] ?? null;
+          if (isKosong(attrs[key]) && isKosong(oldValue)) continue;
+          if (attrs[key] != oldValue) return true;
+        }
+        return false;
+      };
+
+      const pick = (sources: any[], keys: string[]): string => {
+        for (const src of sources) {
+          for (const key of keys) {
+            let val: any = src;
+            for (const seg of key.split('.')) {
+              if (val && typeof val === 'object' && seg in val) val = val[seg];
+              else { val = undefined; break; }
+            }
+            if (typeof val === 'string' || typeof val === 'number') {
+              const s = String(val).trim();
+              if (s !== '') return s;
+            }
+          }
+        }
+        return '';
+      };
+
+      const headline = (t: string | null | undefined): string => {
+        const base = String(t ?? '').split('\\').pop() ?? '';
+        return base.replace(/([A-Z])/g, ' $1').replace(/^ /, '').replace(/ /g, ' ');
+      };
+
+      // Laravel property filter (whereJsonContains properties->attributes/old->property_id) — apply post-fetch (page-scoped)
+      const filtered = propertyId
+        ? data.filter((log) => {
+            const props = parseProps(log.properties);
+            const attrs = props.attributes ?? {};
+            const old = props.old ?? {};
+            return Number(attrs?.property_id) === propertyId || Number(old?.property_id) === propertyId;
+          })
+        : data;
+      const pageData = filtered;
+
+      const rows = pageData
+        .filter((log) => hasRealChanges(log))
+        .map((log) => {
+          const props = parseProps(log.properties);
+          const attrs = props.attributes ?? {};
+          const old = props.old ?? {};
+          const type = String(log.subject_type ?? '').split('\\').pop()?.toLowerCase() ?? '';
+
+          let displayName = `${pick([attrs, old, attrs.data ?? {}], ['guest.first_name', 'profile.first_name', 'customer.first_name', 'first_name'])} ${pick([attrs, old, attrs.data ?? {}], ['guest.last_name', 'profile.last_name', 'customer.last_name', 'last_name'])}`.trim();
+          if (displayName === '') {
+            displayName = pick([attrs, old, attrs.data ?? {}], ['guest_name', 'profile_name', 'customer_name', 'primary_guest_name', 'full_name', 'display_name', 'name', 'title']);
+          }
+
+          let extraInfo = '';
+          if (type === 'transaction') {
+            const tx = pick([attrs, old], ['trx_number', 'code', 'reference_no', 'number', 'no']);
+            if (tx !== '') displayName = tx;
+            const guestFull = `${pick([attrs, old], ['guest.first_name'])} ${pick([attrs, old], ['guest.last_name'])}`.trim();
+            if (guestFull !== '') extraInfo = guestFull.toUpperCase();
+          }
+
+          let companyName = pick([attrs, old, attrs.data ?? {}], ['company_name']);
+          if (companyName === '') {
+            const cid = pick([attrs, old, attrs.data ?? {}], ['company_id']);
+            if (cid !== '' && companyMap.has(Number(cid))) companyName = companyMap.get(Number(cid))!;
+          }
+
+          const rightTag = companyName !== '' ? companyName : pick([attrs, old, attrs.data ?? {}], ['profile_type', 'guest_type', 'type', 'source', 'category', 'segment', 'market']).toUpperCase();
+
+          let title = `${String(log.event ?? '').replace(/\b\w/g, (c) => c.toUpperCase())}. ${headline(log.subject_type)}`;
+          if (displayName !== '') title += ` ${displayName.toUpperCase()}`;
+          if (extraInfo !== '') title += ` (${extraInfo})`;
+          if (rightTag !== '') title += ` <span class="text-gray-500 font-normal">• ${rightTag.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] as string))}</span>`;
+
+          const html = `<div class="flex flex-col-reverse"><div class="grid grid-cols-2 gap-4 p-4 border-b border-gray-200"><div><div class="font-bold">${title}</div></div></div></div>`;
+
+          return {
+            id: Number(log.id),
+            log_name: log.log_name ?? null,
+            batch_uuid: log.batch_uuid ?? null,
+            event: log.event ?? null,
+            subject_type: { value: log.subject_type, label: headline(log.subject_type) },
+            description: html,
+            created_at: log.created_at ? new Date(log.created_at).toISOString().slice(0, 19).replace('T', ' ') : '',
+            causer: log.causer_id !== null && log.causer_id !== undefined ? causerMap.get(log.causer_id) ?? 'System' : 'System',
+            type: headline(log.subject_type),
+            is_view: false,
+            is_edit: false,
+            is_need_approval: false,
+          };
+        });
+
+      const permission = { view: true, add: false, edit: false, delete: false, active: false, approve: false, reject: false };
+      success(res, rows, 'Success', 200, {
         table: LOG_TABLE,
-        permission: { view: true, add: true, edit: true, delete: true },
-        pagination: {
-          current_page: page,
-          last_page: Math.ceil(total / limit),
-          per_page: limit,
-          total,
-          from: (page - 1) * limit + 1,
-          to: Math.min(page * limit, total),
-        },
+        permission,
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
       console.error('Log list error:', err);
       error(res, 'Failed to fetch logs', 500);
+    }
+  }
+
+  // ==================== NOTIFICATION (booking engine, menu 1152) ====================
+  // Replicates Laravel NotificationController@index
+  static async notificationList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = (req.query.search as string) || '';
+      const searchField = req.query.search_field as string;
+      const searchValue = req.query.search_value as string;
+
+      const where: any = { booking_engine_uuid: { not: null } };
+      if (search) {
+        where.OR = [
+          { first_name: { contains: search, mode: 'insensitive' } },
+          { last_name: { contains: search, mode: 'insensitive' } },
+        ];
+      }
+      if (searchField && searchValue) {
+        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+      }
+
+      const [data, total] = await Promise.all([
+        getPrisma().folios.findMany({
+          where,
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          include: {
+            reservations: { include: { room_types: true }, orderBy: { date: 'desc' } },
+            company_profiles_folios_company_profile_idTocompany_profiles: { select: { id: true, name: true } },
+          },
+        }),
+        getPrisma().folios.count({ where }),
+      ]);
+
+      const guestIds = Array.from(new Set(data.map((f) => f.guest_profile_id).filter((v) => v !== null && v !== undefined))) as bigint[];
+      const guests = guestIds.length > 0
+        ? await getPrisma().guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, account: true, first_name: true, last_name: true } })
+        : [];
+      const guestMap = new Map(guests.map((g) => [g.id, g]));
+
+      // balances per folio (Laravel getBalance: ledger sum by type_amount)
+      const folioIds = data.map((f) => f.id);
+      const trxRows = folioIds.length > 0
+        ? await getPrisma().transactions.findMany({ where: { folio_id: { in: folioIds } }, select: { folio_id: true, type_amount: true, total: true } })
+        : [];
+      const balanceMap = new Map<bigint, number>();
+      for (const t of trxRows) {
+        if (t.folio_id === null || t.folio_id === undefined) continue;
+        const upper = String(t.type_amount ?? '').toUpperCase();
+        const sign = upper === 'MINUS' || String(t.type_amount) === '-' ? -1 : 1;
+        balanceMap.set(t.folio_id, (balanceMap.get(t.folio_id) ?? 0) + sign * Number(t.total ?? 0));
+      }
+
+      const fmtD = (d: Date | null | undefined): string => (d ? d.toISOString().slice(0, 10) : '');
+      const statusIdByName = (map: Record<string, { id: number; name: string }>, name: string | null | undefined): number => {
+        if (!name) return 0;
+        return Object.values(map).find((s) => s.name === name)?.id ?? 0;
+      };
+      const rows = data.map((folio) => {
+        const lastRes = folio.reservations?.[0] ?? null;
+        const lastRoomId = lastRes?.room_id ?? null;
+        const lastRoomName = lastRes?.room_name ?? '';
+        const roomStatusId = statusIdByName(ROOM_STATUSES, lastRes?.room_status_name);
+        const maidStatusId = statusIdByName(MAID_STATUSES, lastRes?.maid_status_name);
+        const hasRoom = !!lastRoomId && (!!lastRoomName || roomStatusId > 0 || maidStatusId > 0);
+        const gp = folio.guest_profile_id !== null && folio.guest_profile_id !== undefined ? guestMap.get(folio.guest_profile_id) : null;
+        const isRequestCancel = folio.status_reservation === 3 && !!folio.is_request_cancel;
+        const statusLabel = isRequestCancel ? 'Request Cancel' : (STATUS_RESERVATION_MAP[folio.status_reservation ?? 3] ?? 'Reservation');
+        const statusColor = isRequestCancel ? 'bg-yellow' : getColorReservation(folio.status_reservation ?? 3);
+        const roomStatusLabel = lastRes?.room_status_name ?? '';
+        const cleanStatusLabel = lastRes?.maid_status_name ?? '';
+        const guestName = gp
+          ? ((gp.first_name ?? '') !== '' || (gp.last_name ?? '') !== '' ? `${gp.first_name ?? ''} ${gp.last_name ?? ''}`.trim() : gp.account ?? '')
+          : `${folio.first_name ?? ''} ${folio.last_name ?? ''}`.trim();
+        const company = (folio.company_name ?? '') !== '' ? folio.company_name : folio.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? '';
+        return {
+          id: Number(folio.id),
+          value: Number(folio.id),
+          name: folio.folio_number,
+          res_date: folio.res_date ? fmtD(folio.res_date) : '',
+          type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
+          message_bool: false,
+          ign: !!folio.is_incognito,
+          remark_bool: !!folio.remark,
+          is_do_not_disturb: !!folio.is_do_not_disturb,
+          status_reservation_color: [{ label: String(statusLabel).replace(/\s+/g, '-'), color: statusColor, is_color: true }],
+          room_clean_status_color: hasRoom ? [{ label: cleanStatusLabel.replace(/\s+/g, '-'), color: getColorMaid(maidStatusId), is_color: true }] : [],
+          room_status_color: hasRoom ? [{ label: roomStatusLabel.replace(/\s+/g, '-'), color: getColorRoom(roomStatusId), is_color: true }] : [],
+          folio_number: `<a href="/reservation/fit/reservation?parent=63&data=${Number(folio.id)}&group=folio" class="btn btn-primary" style="text-decoration: underline;">${folio.folio_number}</a>`,
+          guest_name: guestName,
+          guest_status: { value: folio.status_profile, label: folio.status_profile ? String(folio.status_profile) : 'Regular' },
+          guest_status_color: [{ label: String(folio.status_profile ?? 'Regular').replace(/\s+/g, '-'), color: ['VIP', 'VVIP', 'VVVIP'].includes(String(folio.status_profile ?? '').toUpperCase()) ? 'bg-yellow' : 'bg-green', is_color: true }],
+          date_arrival: folio.date_arrival ? fmtD(folio.date_arrival) : '',
+          stay: null,
+          room: lastRoomName,
+          room_next: null,
+          company,
+          room_type: lastRes?.room_type_name ?? lastRes?.room_types?.name ?? '',
+          check_in_date: fmtD(folio.check_in_date),
+          check_out_date: fmtD(folio.check_out_date),
+          balance: moneyFormat(balanceMap.get(folio.id) ?? 0),
+          sharer: '',
+          is_popup_other_guest: false,
+          aa: lastRes?.adult ?? null,
+          cc: lastRes?.child ?? null,
+          actions: [],
+          status_reservation_color_custom: `<div class=" "><div class="${statusColor} px-1 py-1 text-white rounded-md mt-1 text-center">${statusLabel}</div> </div>`,
+          room_clean_status_color_custom: hasRoom ? `<div class=" "> <div class="${getColorMaid(maidStatusId)} px-1 py-1 text-white rounded-md mt-1 text-center">${cleanStatusLabel}</div> </div>` : '',
+          room_status_color_custom: hasRoom ? `<div class=" "> <div class="${getColorRoom(roomStatusId)} px-1 py-1 text-white rounded-md mt-1 text-center">${roomStatusLabel}</div> </div>` : '',
+        };
+      });
+
+      // Laravel: mark cancelled booking-engine folios as notified
+      await getPrisma().folios.updateMany({
+        where: { is_notification: false, booking_engine_uuid: { not: null }, status_reservation: 2 },
+        data: { is_notification: true },
+      });
+
+      success(res, rows, 'Success', 200, {
+        table: NOTIFICATION_TABLE,
+        permission: getPermissionFlags(req.user, 1152),
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) {
+      console.error('Notification list error:', err);
+      error(res, 'Failed to fetch notifications', 500);
     }
   }
 
@@ -927,16 +1279,12 @@ const payload = formatSystemBalanceData(
         getPrisma().folios.count({ where }),
       ]);
 
-      const table = [
-        { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
-        { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
-        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
-        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
-      ];
+      const table = NIGHT_AUDIT_TABLE;
+      const rows = await formatNightAuditFolios(data);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      success(res, rows, 'Success', 200, {
         table,
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: [] as any,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
@@ -967,16 +1315,12 @@ const payload = formatSystemBalanceData(
         getPrisma().folios.count({ where }),
       ]);
 
-      const table = [
-        { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
-        { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
-        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
-        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
-      ];
+      const table = NIGHT_AUDIT_TABLE;
+      const rows = await formatNightAuditFolios(data);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      success(res, rows, 'Success', 200, {
         table,
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: [] as any,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
@@ -1007,16 +1351,12 @@ const payload = formatSystemBalanceData(
         getPrisma().folios.count({ where }),
       ]);
 
-      const table = [
-        { label: 'Folio No', key: 'folio_number', type: 'text', is_search: false },
-        { label: 'Name', key: 'formated_guest_profile', type: 'text', is_search: false },
-        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: false },
-        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: false },
-      ];
+      const table = NIGHT_AUDIT_TABLE;
+      const rows = await formatNightAuditFolios(data);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+      success(res, rows, 'Success', 200, {
         table,
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: [] as any,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) {
