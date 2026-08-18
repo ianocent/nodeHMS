@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { dataSearch } from '../utils/search';
 import { STATUSES } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { TABLES } from '../utils/tableMeta';
@@ -38,6 +39,24 @@ function parsePagination(query: any) {
   const sort = query.sort as string || 'id';
   const order = query.order === 'desc' ? 'desc' : 'asc';
   return { page, limit, search, sort, order };
+}
+
+function fmtDateOnly(d: any): string | null {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt.getTime())) return String(d).substring(0, 10);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const day = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function fmtDateTime(d: any): string | null {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt.getTime())) return String(d).replace('T', ' ').substring(0, 19);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
 }
 
 function num(v: any, fallback: any = 0): any {
@@ -573,20 +592,77 @@ export class HousekeepingController {
     } catch (err: any) { console.error('Stock list error:', err); error(res, 'Failed to list stocks', 500); }
   }
 
-  // ==================== SCHEDULE / ROSTER ====================
+// ==================== SCHEDULE / ROSTER ====================
+  // Replicates Laravel RostersController@index (date range, roster_list_id + AUTO-SERVICE-SCHEDULER,
+  // sort() macro, formatData rows, formatTable, permission 164, search_data)
   static async rosterList(req: Request, res: Response): Promise<void> {
     try {
-      const { page, limit } = parsePagination(req.query);
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const limit = Math.max(1, Number(req.query.limit) || 1000);
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const where: any = { property_id: pid, deleted_at: null };
+      const dateFrom = req.query.date_from as string | undefined;
+      const dateTo = req.query.date_to as string | undefined;
+      const rosterListId = req.query.roster_list_id as string | undefined;
+      const sort = String(req.query.sort ?? '').trim();
+
+      const where: Prisma.rostersWhereInput = { property_id: pid, deleted_at: null };
+      if (dateFrom && dateTo) {
+        where.date = { gte: new Date(dateFrom as string), lte: new Date(dateTo as string) };
+      }
+      if (rosterListId) {
+        // roster_list_id filter PLUS any roster from AUTO-SERVICE-SCHEDULER-* roster lists
+        const autoLists = await prisma.roster_list.findMany({
+          where: { property_id: pid, name: { contains: 'AUTO-SERVICE-SCHEDULER-%' }, deleted_at: null },
+          select: { id: true },
+        });
+        where.OR = [
+          { roster_list_id: Number(rosterListId) },
+          ...autoLists.map((l: { id: bigint | number }) => ({ roster_list_id: Number(l.id) })),
+        ];
+      }
+
+      // sort() macro parity: '-field' desc / 'field' asc; default orderByDesc(status), orderByDesc(id)
+      let orderBy: Prisma.rostersOrderByWithRelationInput | Prisma.rostersOrderByWithRelationInput[];
+      const allowedSort = ['id', 'property_id', 'user_id', 'shift_id', 'roster_list_id', 'date', 'is_assigned', 'status'];
+      if (sort) {
+        const desc = sort.startsWith('-');
+        const field = (desc ? sort.slice(1) : sort).trim();
+        orderBy = allowedSort.includes(field) ? { [field]: desc ? 'desc' : 'asc' } : [{ status: 'desc' }, { id: 'desc' }];
+      } else {
+        orderBy = [{ status: 'desc' }, { id: 'desc' }];
+      }
 
       const [data, total] = await Promise.all([
-        prisma.rosters.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.rosters.findMany({ where, orderBy, skip: (page - 1) * limit, take: limit }),
         prisma.rosters.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
-        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      const table = [
+        { label: 'No', key: 'no', type: 'none', is_search: false },
+        { label: 'name', key: 'name', type: 'text', is_search: true },
+      ];
+      const rows = data.map((r: any) => ({
+        id: Number(r.id),
+        property_id: r.property_id !== null ? Number(r.property_id) : null,
+        user_id: Number(r.user_id),
+        date: r.date ? fmtDateOnly(r.date) : null,
+        shift_id: r.shift_id,
+        roster_list_id: r.roster_list_id,
+        is_assigned: r.is_assigned,
+        created_at: r.created_at ? fmtDateTime(r.created_at) : null,
+        updated_at: r.updated_at ? fmtDateTime(r.updated_at) : null,
+        deleted_at: r.deleted_at ? fmtDateTime(r.deleted_at) : null,
+        created_by: r.created_by !== null ? Number(r.created_by) : null,
+        updated_by: r.updated_by !== null ? Number(r.updated_by) : null,
+        deleted_by: r.deleted_by !== null ? Number(r.deleted_by) : null,
+        status: r.status,
+      }));
+
+      success(res, rows, 'Success', 200, {
+        table,
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(total, page * limit) },
+        permission: getPermissionFlags(req.user as any, 164),
+        search_data: dataSearch(req, table) as any,
       });
     } catch (err: any) { console.error('Roster list error:', err); error(res, 'Failed to list rosters', 500); }
   }
@@ -1008,65 +1084,65 @@ success(res, bigintToNumber(data), 'Success', 200, {
     } catch (err: any) { console.error('Housekeeper history list error:', err); error(res, 'Failed to fetch housekeeper history', 500); }
   }
 
+  // Replicates Laravel ShiftUserListController@index mode=users:
+  // property-scoped users, optional type cleaning/inspection via role_menu_crud
+  // JSON_EXTRACT(transaction_actions, '$.perform_cleaning'|'$.perform_inspection') = true
   static async shiftUserList(req: Request, res: Response) {
     try {
-      const { mode, search = '', page = '1' } = req.query;
+      const { mode, type } = req.query;
       if (mode !== 'users') {
         success(res, [], 'Success', 200, { pagination: { current_page: 1, last_page: 1, per_page: 15, total: 0, from: 0, to: 0 } });
         return;
       }
-      const limit = 15;
-      const pageNum = Math.max(1, Number(page) || 1);
-      const skip = (pageNum - 1) * limit;
       const lastProperty = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
 
-      // users whose roles hold perform_cleaning=true on menu 172 (room-status)
-      const rmcs = await prisma.role_menu_crud.findMany({
-        where: { menu_id: BigInt(172) },
-        select: { role_id: true, transaction_actions: true },
-      });
-      const roleIds = rmcs.filter((r) => {
-        if (!r.transaction_actions) return false;
-        try {
-          const ta = JSON.parse(r.transaction_actions);
-          return ta.perform_cleaning === true || ta.perform_cleaning === 1 || ta.perform_cleaning === 'true';
-        } catch { return false; }
-      }).map((r) => r.role_id);
-
-      const userIds: bigint[] = [];
-      if (roleIds.length) {
-        const mhr = await prisma.model_has_roles.findMany({
-          where: { role_id: { in: roleIds }, model_type: 'App\\Models\\User' },
-          select: { model_id: true },
+      let userIds: bigint[] | null = null;
+      if (type === 'cleaning' || type === 'inspection') {
+        const flag = type === 'cleaning' ? 'perform_cleaning' : 'perform_inspection';
+        const rmcs = await prisma.role_menu_crud.findMany({
+          select: { role_id: true, transaction_actions: true },
         });
-        mhr.forEach((m) => userIds.push(m.model_id));
+        const roleIds = rmcs.filter((r) => {
+          if (!r.transaction_actions) return false;
+          try {
+            const ta = JSON.parse(r.transaction_actions);
+            return ta[flag] === true || ta[flag] === 1 || ta[flag] === 'true';
+          } catch { return false; }
+        }).map((r) => r.role_id);
+        if (roleIds.length) {
+          const mhr = await prisma.model_has_roles.findMany({
+            where: { role_id: { in: roleIds }, model_type: 'App\\Models\\User' },
+            select: { model_id: true },
+          });
+          userIds = mhr.map((m) => m.model_id);
+        } else {
+          userIds = [];
+        }
       }
-      let filteredIds = userIds;
+
+      const where: Prisma.usersWhereInput = {};
+      if (userIds) where.id = { in: userIds };
       if (lastProperty) {
         const userProp = await prisma.model_has_properties.findMany({
           where: { property_id: lastProperty, model_type: 'App\\Models\\User' },
           select: { model_id: true },
         });
         const userPropSet = new Set(userProp.map((p) => p.model_id));
-        filteredIds = userIds.filter((id) => userPropSet.has(id));
-      }
-
-      const where: Prisma.usersWhereInput = { id: { in: filteredIds } };
-      if (search) where.name = { contains: String(search) };
-      const [totalData, users] = await Promise.all([
-        prisma.users.count({ where }),
-        prisma.users.findMany({
+        const users = await prisma.users.findMany({
           where,
           orderBy: { name: 'asc' },
-          skip,
-          take: limit,
           select: { id: true, name: true },
-        }),
-      ]);
-      const result = users.map((u) => ({ id: Number(u.id), name: u.name }));
-      success(res, result, 'Success', 200, {
-        pagination: { current_page: pageNum, last_page: Math.ceil(totalData / limit), per_page: limit, total: totalData, from: totalData ? skip + 1 : 0, to: Math.min(totalData, skip + limit) },
+        });
+        const result = users.filter((u) => userPropSet.has(u.id)).map((u) => ({ id: Number(u.id), name: u.name }));
+        success(res, result, 'Success', 200);
+        return;
+      }
+      const users = await prisma.users.findMany({
+        where,
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true },
       });
+      success(res, users.map((u) => ({ id: Number(u.id), name: u.name })), 'Success', 200);
     } catch (err: any) { console.error('Shift user list error:', err); error(res, 'Failed to load shift user list', 500); }
   }
 }
