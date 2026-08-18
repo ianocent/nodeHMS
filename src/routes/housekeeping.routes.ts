@@ -40,11 +40,11 @@ router.delete('/housekeeping/work-orders/:id', authMiddleware, requirePermission
 router.get('/housekeeping/stocks', authMiddleware, requirePermission(158, 'view'), HousekeepingController.stockList);
 router.get('/housekeeping/rosters', authMiddleware, requirePermission(158, 'view'), HousekeepingController.rosterList);
 router.get('/housekeeping/rosters/create', authMiddleware, requirePermission(158, 'add'), (req, res) => { req.params.model = 'rosters'; generic.createForm(req, res); });
-router.post('/housekeeping/rosters', authMiddleware, requirePermission(158, 'add'), (req, res) => { req.params.model = 'rosters'; generic.create(req, res); });
+router.post('/housekeeping/rosters', authMiddleware, requirePermission(158, 'add'), HousekeepingController.rosterStore);
 router.get('/housekeeping/rosters/:id', authMiddleware, requirePermission(158, 'view'), (req, res) => { req.params.model = 'rosters'; generic.show(req, res); });
 router.get('/housekeeping/rosters/:id/update', authMiddleware, requirePermission(158, 'edit'), (req, res) => { req.params.model = 'rosters'; generic.editForm(req, res); });
-router.put('/housekeeping/rosters/:id', authMiddleware, requirePermission(158, 'edit'), (req, res) => { req.params.model = 'rosters'; generic.update(req, res); });
-router.delete('/housekeeping/rosters/:id', authMiddleware, requirePermission(158, 'delete'), (req, res) => { req.params.model = 'rosters'; generic.destroy(req, res); });
+router.put('/housekeeping/rosters/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.rosterUpdate);
+router.delete('/housekeeping/rosters/:id', authMiddleware, requirePermission(158, 'delete'), HousekeepingController.rosterDestroy);
 router.get('/housekeeping/checklist-history', authMiddleware, requirePermission(158, 'view'), HousekeepingController.checklistHistory);
 router.get('/housekeeping/housekeeper-history', authMiddleware, requirePermission(158, 'view'), HousekeepingController.housekeeperHistory);
 

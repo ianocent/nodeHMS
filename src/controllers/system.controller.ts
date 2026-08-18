@@ -2008,7 +2008,7 @@ const payload = formatSystemBalanceData(
           const v = byDate.get(key) || { rev: 0, sold: 0 };
           const dateLabel = fmtDMY(key);
           formatDate.push(dateLabel);
-          totalSeries.push({ name: dateLabel, data: v.rev, room_sold: v.sold });
+          totalSeries.push({ name: dateLabel, data: moneyFormat(v.rev), room_sold: v.sold });
           revenueSeries.push({ name: dateLabel, data: moneyFormat(v.rev) });
           roomAvailableSeries.push({ name: dateLabel, data: TotalroomAvailable });
           const roomSold = v.sold > 0 ? v.sold : 1;
@@ -2020,7 +2020,7 @@ const payload = formatSystemBalanceData(
           grandRev += v.rev;
           grandSold += v.sold;
         }
-        totalSeries.push({ name: 'Total', data: grandRev, room_sold: grandSold });
+        totalSeries.push({ name: 'Total', data: moneyFormat(grandRev), room_sold: grandSold });
 
         const chartAnalysis = [
           { name: 'Room Available', data: roomAvailableSeries },
@@ -2513,12 +2513,8 @@ const payload = formatSystemBalanceData(
         sales_cost: total / (reservation < 1 ? 1 : reservation),
       });
       const dbMap = new Map(db.map(d => [Number(d.master_hotel_competitor_id), d]));
-      // hotel_competitors.name not mapped in Prisma -> raw SQL (Laravel HotelCompetitor@formatData uses it)
-      const dbNameRows = await prisma.$queryRaw<Array<{ id: bigint; name: string | null }>>`
-        SELECT id, name FROM hotel_competitors
-        WHERE property_id = ${propertyId} AND deleted_at IS NULL AND date >= ${s} AND date < ${e}
-      `;
-      const dbNameMap = new Map(dbNameRows.map(r => [Number(r.id), r.name]));
+      // hotel_competitors.name is a MySQL-only column (not in Postgres/Prisma) ->
+      // name falls back to master_hotel_competitors.name via the include above
       for (const value of master) {
         const hc = dbMap.get(Number(value.id));
         if (hc) {
@@ -2530,7 +2526,7 @@ const payload = formatSystemBalanceData(
           data.push({
             master_hotel_competitor_id: { value: Number(hc.master_hotel_competitor_id), label: hc.master_hotel_competitors?.name ?? '' },
             id: Number(value.id),
-            name: dbNameMap.get(Number(hc.id)) ?? hc.master_hotel_competitors?.name ?? '',
+            name: hc.master_hotel_competitors?.name ?? '',
             date: hc.date instanceof Date ? hc.date.toISOString().substring(0, 10) : String(hc.date),
             master_hotel_competitor: { value: Number(value.id), label: value.name },
             room_available: Number(hc.room_available),

@@ -667,6 +667,134 @@ export class HousekeepingController {
     } catch (err: any) { console.error('Roster list error:', err); error(res, 'Failed to list rosters', 500); }
   }
 
+  // Replicates Laravel RostersController@store (array payload, skip existing user+date+shift,
+  // restore trashed, AUTO-SERVICE-SCHEDULER roster_list firstOrCreate)
+  static async rosterStore(req: Request, res: Response): Promise<any> {
+    try {
+      const body = req.body;
+      const items = Array.isArray(body) ? body : [body];
+      const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
+      if (!pid) { badRequest(res, 'Property not found'); return; }
+
+      const skipped: string[] = [];
+      const rostered: any[] = [];
+      for (const raw of items) {
+        const item = raw ?? {};
+        if (item.date == null || item.is_assigned == null || item.shift_id == null || item.user_id == null) {
+          return badRequest(res, 'date, is_assigned, shift_id and user_id are required');
+        }
+        const date = new Date(item.date as string);
+        if (isNaN(date.getTime())) return badRequest(res, 'date must be a valid date');
+
+        let rosterListId: number;
+        if (item.roster_list_id != null && String(item.roster_list_id) !== '') {
+          rosterListId = Number(item.roster_list_id);
+        } else {
+          const month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+          const name = `AUTO-SERVICE-SCHEDULER-${month}`;
+          let list = await prisma.roster_list.findFirst({ where: { property_id: pid, name, deleted_at: null } });
+          if (!list) {
+            list = await prisma.roster_list.create({
+              data: { property_id: pid, name, status: 1, created_by: req.user?.id ?? null, created_at: new Date(), updated_at: new Date() },
+            });
+          }
+          rosterListId = Number(list.id);
+        }
+
+        const existing = await prisma.rosters.findFirst({
+          where: { property_id: pid, user_id: BigInt(item.user_id), date, shift_id: Number(item.shift_id) },
+        });
+        if (existing) {
+          if (existing.deleted_at) {
+            await prisma.rosters.update({
+              where: { id: existing.id },
+              data: { deleted_at: null, is_assigned: item.is_assigned === true || item.is_assigned === 1 ? 1 : 0, updated_at: new Date() },
+            });
+            rostered.push(existing);
+          } else {
+            const u = await prisma.users.findUnique({ where: { id: existing.user_id }, select: { name: true } });
+            skipped.push(`${u?.name ?? 'User #' + item.user_id} has been registered on ${fmtDateOnly(date)} with the same shift`);
+          }
+          continue;
+        }
+
+        const record = await prisma.rosters.create({
+          data: {
+            property_id: pid,
+            roster_list_id: rosterListId,
+            user_id: BigInt(item.user_id),
+            shift_id: Number(item.shift_id),
+            date,
+            is_assigned: item.is_assigned === true || item.is_assigned === 1 ? 1 : 0,
+            status: 1,
+            created_by: req.user?.id ?? null,
+            created_at: new Date(),
+            updated_at: new Date(),
+          },
+        });
+        rostered.push(record);
+      }
+
+      if (rostered.length === 0 && skipped.length > 0) {
+        return res.status(409).json({ code: 409, message: 'Data is register: ' + skipped.join('; ') });
+      }
+      return res.status(200).json({
+        code: 200,
+        message: 'Data saved successfully' + (skipped.length ? '. Dilewati: ' + skipped.join('; ') : ''),
+        data: bigintToNumber(rostered),
+        skipped,
+      });
+    } catch (err: any) {
+      console.error('Roster store error:', err);
+      if (err?.code === 'P2002') return badRequest(res, 'Duplicate entry');
+      error(res, 'Failed to save rosters', 500);
+    }
+  }
+
+  // Replicates Laravel RostersController@update (shift_id required, is_assigned/roster_list_id optional)
+  static async rosterUpdate(req: Request, res: Response): Promise<any> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const existing = await prisma.rosters.findUnique({ where: { id } });
+      if (!existing) { notFound(res, 'Roster not found'); return; }
+      if (req.body.shift_id == null) { badRequest(res, 'shift_id is required'); return; }
+      await prisma.rosters.update({
+        where: { id },
+        data: {
+          shift_id: Number(req.body.shift_id),
+          is_assigned: req.body.is_assigned === undefined ? existing.is_assigned : (req.body.is_assigned === true || req.body.is_assigned === 1 ? 1 : 0),
+          roster_list_id: req.body.roster_list_id === undefined ? existing.roster_list_id : Number(req.body.roster_list_id),
+          updated_by: req.user?.id ?? null,
+          updated_at: new Date(),
+        },
+      });
+      const updated = await prisma.rosters.findUnique({ where: { id } });
+      success(res, bigintToNumber(updated), 'Data updated successfully', 200);
+    } catch (err: any) { console.error('Roster update error:', err); error(res, 'Failed to update roster', 500); }
+  }
+
+  // Replicates Laravel RostersController@destroy (hard-delete related housekeeper history + soft-delete roster)
+  static async rosterDestroy(req: Request, res: Response): Promise<any> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const existing = await prisma.rosters.findUnique({ where: { id } });
+      if (!existing) { notFound(res, 'Roster not found'); return; }
+
+      const pid = existing.property_id ?? BigInt(0);
+      const histories = await prisma.housekeeper_history.findMany({
+        where: { date: existing.date, property_id: pid },
+        select: { id: true },
+      });
+      const historyIds = histories.map((h) => h.id);
+      if (historyIds.length) {
+        await prisma.housekeeper_history_user.deleteMany({ where: { housekeeper_history_id: { in: historyIds } } });
+        await prisma.housekeeper_history.deleteMany({ where: { id: { in: historyIds } } });
+      }
+      await prisma.rosters.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id ?? null } });
+      success(res, [], 'Data and related entries deleted successfully.', 200);
+    } catch (err: any) { console.error('Roster destroy error:', err); error(res, 'Failed to delete roster', 500); }
+  }
+
   // ==================== CHECKLIST ====================
   static async checklistHistory(req: Request, res: Response): Promise<void> {
     try {

@@ -3,12 +3,13 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { requirePermission } from '../middleware/permission.middleware';
+import { requirePermission, getPermissionFlags } from '../middleware/permission.middleware';
 import { success, error, notFound } from '../utils/response';
 import { encrypt } from '../utils/encryption';
 import { GenericController } from '../controllers/generic.controller';
 import { RoomController } from '../controllers/room.controller';
 import { ApprovalMatrixController } from '../controllers/approval-matrix.controller';
+import { AuthController } from '../controllers/auth.controller';
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -191,53 +192,73 @@ router.delete('/master-hotel-competitors/:id', authMiddleware, requirePermission
 router.post('/master-hotel-competitors/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.restore(req, res); });
 
 // â”€â”€ Statistic Occupancy â”€â”€
+// Laravel parity: StatisticController@occupancy - grid Room Type x dates (start..end, default end=start+7),
+// cell = getOccupancyRoomType = ((check_in + room occupied) + (reservation/pending with room)) / total rooms * 100
 router.get('/statistic/occupancy', authMiddleware, requirePermission(80, 'view'), async (req: Request, res: Response) => {
   try {
     const propertyId = req.user?.lastProperty;
-    const dateParam = req.query.date as string;
-    const businessDate = dateParam ? new Date(dateParam) : new Date();
-    businessDate.setHours(0, 0, 0, 0);
-
     const pid = propertyId ? BigInt(propertyId) : undefined;
-    const nextDate = new Date(businessDate);
-    nextDate.setDate(nextDate.getDate() + 1);
+    const businessDate = await AuthController.getBusinessDate(pid ?? null);
+    let start = (req.query.start as string) || businessDate;
+    let end = (req.query.end as string) || '';
+    if (!end) end = new Date(new Date(start.substring(0, 10) + 'T00:00:00Z').getTime() + 7 * 86400000).toISOString().substring(0, 10);
+    start = start.substring(0, 10);
+    end = end.substring(0, 10);
 
-    const totalRooms = await prisma.rooms.count({
-      where: { property_id: pid, deleted_at: null, is_physical: true },
-    });
+    const s = new Date(start + 'T00:00:00Z');
+    const e = new Date(end + 'T00:00:00Z');
+    const NIGHT = Math.round((e.getTime() - s.getTime()) / 86400000);
 
-    const occupiedRooms = await prisma.folios.count({
-      where: {
-        property_id: pid,
-        deleted_at: null,
-        status_reservation: { in: [1, 2] },
-        check_in_date: { lt: nextDate },
-        check_out_date: { gte: nextDate },
-      },
-    });
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const table: any[] = [
+      { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+      { label: 'Total', key: 'total_room', type: 'none', is_search: false },
+    ];
+    const dayKeys: string[] = [];
+    for (let i = 0; i <= NIGHT; i++) {
+      const d = new Date(s.getTime() + i * 86400000);
+      const key = d.toISOString().substring(0, 10);
+      dayKeys.push(key);
+      table.push({ label: `${String(d.getUTCDate()).padStart(2, '0')} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`, key, type: 'none', is_search: false });
+    }
 
-    const occupancyPct = totalRooms > 0 ? Math.round((occupiedRooms / totalRooms) * 10000) / 100 : 0;
+    const [roomTypes, rooms, reservations] = await Promise.all([
+      prisma.room_types.findMany({ where: { property_id: pid, status: 1, deleted_at: null }, orderBy: { sort: 'asc' } }),
+      prisma.rooms.findMany({ where: { property_id: pid, is_physical: true, deleted_at: null }, select: { id: true, room_type_id: true, room_status: true } }),
+      prisma.reservations.findMany({
+        where: { property_id: pid, date: { gte: s, lte: e }, folios: { status_reservation: { not: 2 } } },
+        select: { date: true, room_type_id: true, room_id: true, folios: { select: { status_reservation: true } } },
+      }),
+    ]);
 
-    success(res, [
-      {
-        id: 0,
-        name: 'Occupancy',
-        date: businessDate,
-        total_rooms: totalRooms,
-        occupied_rooms: occupiedRooms,
-        occupancy_pct: occupancyPct,
-      },
-    ], 'Success', 200, {
-      table: [
-        { label: 'Name', key: 'name', type: 'none', is_search: false },
-        { label: 'Date', key: 'date', type: 'date', is_search: false },
-        { label: 'Total Rooms', key: 'total_rooms', type: 'none', is_search: false },
-        { label: 'Occupied Rooms', key: 'occupied_rooms', type: 'none', is_search: false },
-        { label: 'Occupancy %', key: 'occupancy_pct', type: 'none', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false },
-      ],
-      permission: { view: true, add: true, edit: true, delete: true },
-      pagination: { current_page: 1, last_page: 1, per_page: 10, total: 1, from: 1, to: 1 },
+    const roomStatusById = new Map<bigint, number>();
+    const totalByType = new Map<bigint, number>();
+    for (const rm of rooms) {
+      roomStatusById.set(rm.id, rm.room_status);
+      totalByType.set(rm.room_type_id, (totalByType.get(rm.room_type_id) ?? 0) + 1);
+    }
+
+    // getOccupancyRoomType parity: sold = status check_in(0) + room occupied(1); booked = reservation(3)/pending(5) with room_id
+    const soldFilter = (r: any) => r.folios?.status_reservation === 0 && roomStatusById.get(r.room_id) === 1;
+    const bookedFilter = (r: any) => (r.folios?.status_reservation === 3 || r.folios?.status_reservation === 5) && r.room_id != null;
+
+    const data: any[] = [];
+    for (const rt of roomTypes) {
+      const row: any = { id: Number(rt.id), room_type: rt.name, total_room: totalByType.get(rt.id) ?? 0 };
+      const total = row.total_room > 0 ? row.total_room : 1;
+      for (const key of dayKeys) {
+        const dayRes = reservations.filter((r: any) => r.date.toISOString().substring(0, 10) === key && Number(r.room_type_id) === Number(rt.id));
+        const sold = dayRes.filter(soldFilter).length;
+        const booked = dayRes.filter(bookedFilter).length;
+        row[key] = Number((((sold + booked) / total) * 100).toFixed(2));
+      }
+      data.push(row);
+    }
+
+    success(res, data, 'Data has been loaded', 200, {
+      table,
+      pagination: { current_page: 1, last_page: 1, per_page: 9999, total: data.length, from: data.length ? 1 : 0, to: data.length },
+      permission: getPermissionFlags(req.user as any, 80),
     });
   } catch (err: any) {
     error(res, err.message || 'Failed to fetch occupancy', 500);
