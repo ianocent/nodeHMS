@@ -1087,6 +1087,173 @@ async function generateCashDetailedExcel(res: Response, data: any, filename: str
   res.end();
 }
 
+// ── Cash Summary ──
+// Laravel parity: CashSummaryController + cash-summary.blade.php ("Payment Type Summary Report")
+
+async function getCashSummary(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const date = params.date || params.startDate || formatDate(new Date());
+
+  const rows = await prisma.transactions.groupBy({
+    where: {
+      property_id: pid,
+      deleted_at: null,
+      date: { gte: new Date(`${date}T00:00:00Z`), lte: new Date(`${date}T23:59:59Z`) },
+    },
+    by: ['type_payment_id'],
+    _sum: { total: true },
+  });
+  const ids: bigint[] = rows.map((r: any) => r.type_payment_id).filter(Boolean);
+  const tps = ids.length
+    ? await prisma.type_payments.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })
+    : [];
+  const nameById = new Map(tps.map((t: any) => [t.id, t.name]));
+
+  const cashSummaryData = rows.map((r: any) => {
+    const name = nameById.get(r.type_payment_id) || 'Unknown Payment Type';
+    return {
+      group: String(name).toUpperCase(),
+      transactions: [{ description: name, charge: Number(r._sum?.total ?? 0) }],
+      totalGroup: Number(r._sum?.total ?? 0),
+    };
+  });
+  const grandTotal = cashSummaryData.reduce((s: number, g: any) => s + g.totalGroup, 0);
+
+  return {
+    reportTitle: 'Payment Type Summary Report',
+    startDate: date,
+    endDate: date,
+    business_date: date,
+    cashSummaryData,
+    grandTotal,
+  };
+}
+
+async function generateCashSummaryExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Cash Summary');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 3);
+  const title = ws.getCell(1, 1);
+  title.value = String(data.reportTitle || 'Payment Type Summary Report').toUpperCase();
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 3);
+  const meta = ws.getCell(2, 1);
+  meta.value = `For Business Date: ${data.business_date || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+  for (let i = 1; i <= 3; i++) ws.getColumn(i).width = i === 1 ? 45 : 18;
+
+  ws.getRow(3).values = ['Description', 'Charge', 'Total'];
+  ws.getRow(3).font = { bold: true };
+  ws.getRow(3).eachCell((c: any) => { c.border = border; });
+
+  let rn = 4;
+  for (const g of data.cashSummaryData || []) {
+    ws.getRow(rn).values = [g.group];
+    ws.mergeCells(rn, 1, rn, 3);
+    ws.getRow(rn).font = { bold: true, size: 11 };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const t of g.transactions || []) {
+      ws.getRow(rn).values = [t.description, nf(t.charge), ''];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', `Total Charge For ${g.group}:`, nf(g.totalGroup)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="cash-summary.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Transaction Report By Staff ──
+// Laravel parity: TransactionReportByStaffController + transaction-report-by-staff.blade.php
+
+async function generateTransactionReportByStaffExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Transaction Report By Staff');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio', 'Room', 'Guest', 'Card Name', 'Last Digit Card', 'Post Date/Time', 'Description', 'Total'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+  const reportData = data.reportData || [];
+
+  ws.mergeCells(1, 1, 1, 8);
+  const title = ws.getCell(1, 1);
+  title.value = 'TRANSACTION REPORT BY STAFF';
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 8);
+  const meta = ws.getCell(2, 1);
+  meta.value = `NAME STAFF: ${data.staffName || ''}`;
+  meta.font = { bold: true, size: 11 };
+  meta.alignment = { horizontal: 'center' };
+  for (let i = 1; i <= 8; i++) ws.getColumn(i).width = i === 7 ? 40 : 16;
+
+  let rn = 3;
+  for (const billing of reportData) {
+    ws.getRow(rn).values = [String(billing.name || '').toUpperCase()];
+    ws.mergeCells(rn, 1, rn, 8);
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9D9D9' } };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const post of billing.transactions || []) {
+      ws.getRow(rn).values = [String(post.name || '').toUpperCase()];
+      ws.mergeCells(rn, 1, rn, 8);
+      ws.getRow(rn).font = { bold: true };
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+      if (post.shift) {
+        ws.getRow(rn).values = [`No Shift: ${post.shift}`, '', '', '', '', '', '', ''];
+        ws.mergeCells(rn, 1, rn, 8);
+        ws.getRow(rn).font = { bold: true };
+        rn++;
+      }
+      ws.getRow(rn).values = HEADERS;
+      ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+      for (const t of post.items || []) {
+        ws.getRow(rn).values = [t.folio, t.room, t.guest, t.card_name, t.last_digit_card, t.post_date, t.description, nf(t.total)];
+        ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+        rn++;
+      }
+      ws.getRow(rn).values = ['', '', '', '', '', '', `${String(post.name || '').toUpperCase()}:`, nf(post.total)];
+      ws.getRow(rn).font = { bold: true };
+      ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', '', '', '', '', '', `Total ${String(billing.name || '').toUpperCase()}:`, nf(billing.total)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn === 8 ? 'right' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="transaction-report-by-staff.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
 function parseReportParams(req: Request) {
   return {
     date: req.query.date as string || formatDate(new Date()),
@@ -1786,41 +1953,6 @@ async function getTransactionReport(params: any): Promise<any[]> {
     total: Number(t.total),
     type_amount: t.type_amount || '',
     type_payment: t.type_payments?.name || '',
-  }));
-}
-
-async function getCashSummary(params: any): Promise<any[]> {
-  const pid = params.propertyId;
-  const startDate = params.startDate || formatDate(new Date());
-  const endDate = params.endDate || startDate;
-
-  const transactions = await prisma.transactions.findMany({
-    where: {
-      property_id: pid,
-      deleted_at: null,
-      type: 'cash',
-      date: {
-        gte: new Date(`${startDate}T00:00:00Z`),
-        lte: new Date(`${endDate}T23:59:59Z`),
-      },
-    },
-    include: {
-      type_payments: { select: { name: true } },
-    },
-  });
-
-  const byPayment: Record<string, { count: number; total: number }> = {};
-  for (const t of transactions) {
-    const name = t.type_payments?.name || 'Other';
-    if (!byPayment[name]) byPayment[name] = { count: 0, total: 0 };
-    byPayment[name].count += 1;
-    byPayment[name].total += Number(t.total);
-  }
-
-  return Object.entries(byPayment).map(([paymentType, vals]) => ({
-    payment_type: paymentType,
-    transaction_count: vals.count,
-    total_amount: vals.total,
   }));
 }
 
@@ -5461,6 +5593,14 @@ export class ReportController {
               header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
               key: k,
             })), fileName);
+            return;
+          }
+          if (reportKey === 'account/cash-summary/view') {
+            await generateCashSummaryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/transaction-report-by-staff/view') {
+            await generateTransactionReportByStaffExcel(res, Array.isArray(data) ? data[0] : data);
             return;
           }
           if (reportKey === 'account/cash-detailed/view' || reportKey === 'account/payment-detailed/view') {
