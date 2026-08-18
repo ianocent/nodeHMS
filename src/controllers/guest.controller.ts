@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { getStatusLabel } from '../utils/cmsConfig';
+import { dataSearch } from '../utils/search';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -68,6 +69,18 @@ function paggingFn(total: number, limit: number, page: number) {
   return { current_page: page, last_page: lastPage, per_page: limit, total, from, to: Math.min(total, page * limit) };
 }
 
+// Laravel GuestProfile::calculateAge() parity (Carbon age = full years)
+function ageOf(date: any): number | null {
+  if (!date) return null;
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+  return age;
+}
+
 export class GuestController {
   /**
    * GET /api/guests
@@ -85,8 +98,8 @@ export class GuestController {
       const order = req.query.order === 'desc' ? 'desc' : 'asc';
       const hasFolioId = req.query.folio_id || req.query.reservation;
 
-      const trash = req.query.trash === '1' || req.query.trash === 'true';
-      const where: any = { deleted_at: trash ? { not: null } : null };
+      // Laravel GuestProfileController@index ignores trash param; always active scope
+      const where: any = { deleted_at: null };
 
       if (search) {
         where.OR = [
@@ -122,17 +135,26 @@ export class GuestController {
         prisma.guest_profiles.count({ where })
       ]);
 
-      // Get nationalities, types, folios separately
+      // Get nationalities + countries (Laravel relatedNationality/relatedCountry)
       const guestIds = guests.map(g => g.id);
-      
-      // Get nationalities
       const nationalityIds = guests
         .filter(g => g.nationality_id)
         .map(g => g.nationality_id!);
-      const nationalities = nationalityIds.length > 0
-        ? await prisma.countries.findMany({ where: { id: { in: nationalityIds } } })
+      const countryIds = guests
+        .filter((g: any) => g.country_id)
+        .map((g: any) => g.country_id!);
+      const allCountryIds = Array.from(new Set([...nationalityIds, ...countryIds]));
+      const countries = allCountryIds.length > 0
+        ? await prisma.countries.findMany({ where: { id: { in: allCountryIds as any } } })
         : [];
-      const nationalityMap = new Map(nationalities.map(n => [n.id, n]));
+      const nationalityMap = new Map(countries.map(n => [n.id, n]));
+
+      // Get cities (Laravel relatedCity)
+      const cityIds = guests.filter(g => g.city_id).map(g => g.city_id!);
+      const cities = cityIds.length > 0
+        ? await prisma.cities.findMany({ where: { id: { in: cityIds as any } } })
+        : [];
+      const cityMap = new Map(cities.map(c => [c.id, c]));
 
       // Get types via model_has_types
       const types = await prisma.model_has_types.findMany({
@@ -157,13 +179,17 @@ export class GuestController {
         }
       }
 
+      // Laravel GuestProfile::formatTable() parity (9 kolom)
       const table = [
-        { label: 'Account', key: 'account', type: 'none', is_search: true },
-        { label: 'Name', key: 'name', type: 'none', is_search: true },
-        { label: 'Phone', key: 'mobile_phone', type: 'none', is_search: true },
-        { label: 'Email', key: 'email', type: 'none', is_search: true },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false }
+        { label: 'Active', key: 'status', type: 'select', is_search: true },
+        { label: 'Account No.', key: 'account', type: 'text', is_search: true },
+        { label: 'Status', key: 'guest_status', type: 'select', is_search: true },
+        { label: 'Name', key: 'name_combine', type: 'text', is_search: false },
+        { label: 'Nationality', key: 'nationality_id', type: 'none', is_search: false },
+        { label: 'Telephone', key: 'telp', type: 'text', is_search: true },
+        { label: 'Mobile Phone', key: 'mobile_phone', type: 'text', is_search: true },
+        { label: 'NRIC', key: 'card_type', type: 'select', is_search: true },
+        { label: 'Card Number', key: 'card_number', type: 'text', is_search: true }
       ];
 
       const filteredTable = hasFolioId
@@ -174,13 +200,74 @@ export class GuestController {
       const permission = {
         view: true,
         add: req.user?.superUser || permFlags.add,
-        edit: req.user?.superUser || permFlags.edit,
-        delete: req.user?.superUser || permFlags.delete
+        edit: req.user?.superUser || permFlags.edit
       };
 
-      success(res, guests.map(g => GuestController.formatGuest(g, nationalityMap, typesMap, foliosMap)), 'Success', 200, {
+      // Laravel GuestProfile::formatData() parity rows
+      const rows = guests.map((g, idx) => {
+        const gTypes = typesMap.get(g.id) || [];
+        const gTitle = gTypes.find((t: any) => t.group === 'guest-title');
+        const gStatus = gTypes.find((t: any) => t.group === 'guest-status');
+        const nat = g.nationality_id ? nationalityMap.get(g.nationality_id as any) : null;
+        const city = g.city_id ? cityMap.get(g.city_id as any) : null;
+        const gFolios = foliosMap.get(g.id) || [];
+        const stay = gFolios.filter((f: any) =>
+          f.status_reservation === 1 &&
+          (String(f.folio_number || '').startsWith('F') ||
+            (f.type_reservation === 'git' && Number(f.parent) !== 0))
+        ).length;
+        const fullName = `${g.first_name || ''} ${g.last_name || ''}`.trim();
+        return {
+          id: Number(g.id),
+          property_id: g.property_id ? Number(g.property_id) : null,
+          guest_name: fullName,
+          card_type: g.card_type ? { value: g.card_type, label: g.card_type } : [],
+          stay,
+          guest_stay: stay,
+          card_number: g.card_number ?? ' ',
+          card_expiry: g.card_expiry ?? ' ',
+          email: g.email ?? ' ',
+          status_profile: gStatus ? { value: Number(gStatus.id), label: gStatus.name } : [],
+          guest_status: gStatus ? { value: Number(gStatus.id), label: gStatus.name } : [],
+          gender: g.gender ? { value: g.gender, label: g.gender } : [],
+          birth_of_date: g.birth_of_date ? new Date(g.birth_of_date).toISOString().slice(0, 10) : ' ',
+          age: ageOf(g.birth_of_date),
+          telp: g.telp ?? ' ',
+          mobile_phone: g.mobile_phone ?? ' ',
+          nationality_id: nat ? { value: Number(g.nationality_id), label: nat.name } : [],
+          is_subscribe: !!g.is_subscribe,
+          is_do_not_contact: !!g.is_subscribe,
+          address: g.address ?? ' ',
+          city_id: city ? { value: Number(g.city_id), label: city.name } : [],
+          country_id: (g as any).country_id ? { value: Number((g as any).country_id), label: nat?.name ?? Number((g as any).country_id) } : [],
+          postal_code: g.postal_code !== '' ? (g.postal_code ?? ' ') : ' ',
+          account: g.account ?? ' ',
+          short_code: g.short_code ?? ' ',
+          first_name: g.first_name ?? ' ',
+          last_name: g.last_name ?? ' ',
+          guest_title: gTitle ? { value: Number(gTitle.id), label: gTitle.name } : [],
+          title: gTitle ? { value: Number(gTitle.id), label: gTitle.name } : [],
+          region: g.region ? { value: g.region, label: REGIONS.find(r => r.name === g.region)?.name ?? g.region } : [],
+          nationality: nat ? nat.name : null,
+          fax: g.fax ?? ' ',
+          car_reg_number: g.car_reg_number ?? ' ',
+          name_combine: `${gTitle ? gTitle.name + ' ' : ''}${fullName}`.trim(),
+          image: g.image,
+          created_at: g.created_at,
+          updated_at: g.updated_at,
+          deleted_at: g.deleted_at,
+          updated_by: (g as any).updated_by ? Number((g as any).updated_by) : null,
+          deleted_by: (g as any).deleted_by ? Number((g as any).deleted_by) : null,
+          status: { value: !!g.status, label: getStatusLabel(g.status).label },
+          blacklist: g.blacklist,
+          no: (page - 1) * limit + idx + 1
+        };
+      });
+
+      success(res, bigintToNumber(rows), 'Success', 200, {
         table: filteredTable,
         permission,
+        search_data: dataSearch(req, table) as any,
         pagination: {
           current_page: page,
           last_page: Math.ceil(total / limit),

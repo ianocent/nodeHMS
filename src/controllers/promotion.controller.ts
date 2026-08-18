@@ -82,13 +82,18 @@ export class PromotionController {
         where.status = 1; // onlyActive
       }
 
-const table = [
-        { label: 'Code', key: 'promotion_code', type: 'none', is_search: true },
-        { label: 'Type', key: 'promotion_type', type: 'none', is_search: true },
-        { label: 'Description', key: 'description', type: 'none', is_search: true },
-        { label: 'Discount', key: 'discount_percentage', type: 'none', is_search: false },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false }
+      // Laravel Promotion::formatTable() parity (10 kolom)
+      const table = [
+        { label: 'No', key: 'no', type: 'none', is_search: false },
+        { label: 'Status', key: 'status_table', type: 'checkbox', is_search: true },
+        { label: 'Promotion Type', key: 'promotion_type', type: 'text', is_search: true },
+        { label: 'Promotion Code', key: 'promotion_code', type: 'text', is_search: true },
+        { label: 'Start Date', key: 'from_stay_date', type: 'date', is_search: true },
+        { label: 'End Date', key: 'to_stay_date', type: 'date', is_search: true },
+        { label: 'Discount Percentage', key: 'discount_percentage', type: 'text', is_search: true },
+        { label: 'Discount Flat', key: 'discount_flat', type: 'text', is_search: true },
+        { label: 'Minimum Night', key: 'min_night', type: 'text', is_search: true },
+        { label: 'Description', key: 'description', type: 'text', is_search: true },
       ];
 
       applySearchField(where, req, table);
@@ -111,7 +116,35 @@ const table = [
         delete: req.user?.superUser || permFlags.delete
       };
 
-      success(res, promotions.map((p: any) => ({ ...bigintToNumber(p), status: getStatusLabel(p.status) })), 'Success', 200, {
+      // Laravel Promotion::formatData() parity rows
+      const rows = promotions.map((p: any, idx: number) => ({
+        id: Number(p.id),
+        promotion_type: p.promotion_type,
+        promotion_code: p.promotion_code,
+        description: p.description,
+        from_stay_date: p.from_stay_date ? new Date(p.from_stay_date).toISOString().slice(0, 10) : null,
+        to_stay_date: p.to_stay_date ? new Date(p.to_stay_date).toISOString().slice(0, 10) : null,
+        from_validity_date: p.from_validity_date ? new Date(p.from_validity_date).toISOString().slice(0, 10) : null,
+        to_validity_date: p.to_validity_date ? new Date(p.to_validity_date).toISOString().slice(0, 10) : null,
+        discount_percentage: Number(p.discount_percentage) || 0,
+        discount_flat: Number(p.discount_flat) || 0,
+        no_of_night_discount: Number(p.no_of_night_discount) || 0,
+        min_night: Number(p.min_night) || 0,
+        rules: p.rules,
+        apply_to_every_min_night: { value: !!p.apply_to_every_min_night, label: p.apply_to_every_min_night ? 'Yes' : 'No' },
+        created_at: p.created_at,
+        created_by: p.created_by ? Number(p.created_by) : null,
+        status: { value: p.status, label: getStatusLabel(p.status).label },
+        status_table: !!p.status,
+        sort: p.sort,
+        is_view: permFlags.view,
+        is_edit: permFlags.edit,
+        is_need_approval: false,
+        relation: {},
+        no: (page - 1) * limit + idx + 1,
+      }));
+
+      success(res, bigintToNumber(rows), 'Success', 200, {
         table,
         permission,
         search_data: dataSearch(req, table) as any,

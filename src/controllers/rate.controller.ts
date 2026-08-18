@@ -160,7 +160,26 @@ const allCodePosts = await prisma.code_posts.findMany({
         prisma.rates.count({ where }),
       ]);
 
-      const formatted = rates.map((r: any) => ({
+      // Types: cancellation-reservation / company-type / comm-code (Laravel Rate::formatData() keys)
+      const rateIds = rates.map(r => r.id);
+      const modelTypes = await prisma.model_has_types.findMany({
+        where: { model_id: { in: rateIds }, model_type: 'App\\Models\\Rate' },
+        include: { types: { select: { id: true, name: true, group: true } } },
+      });
+      const typesByRate = new Map<bigint, any[]>();
+      for (const mt of modelTypes) {
+        if (!typesByRate.has(mt.model_id)) typesByRate.set(mt.model_id, []);
+        typesByRate.get(mt.model_id)!.push(bigintToNumber(mt.types));
+      }
+
+      const permFlags = getPermissionFlags(req.user, MENU_ID);
+
+      const formatted = rates.map((r: any) => {
+        const rTypes = typesByRate.get(r.id) || [];
+        const cancelation = rTypes.find((t: any) => t.group === 'cancellation-reservation');
+        const companyType = rTypes.find((t: any) => t.group === 'company-type');
+        const commCode = rTypes.find((t: any) => t.group === 'comm-code');
+        return {
         id: Number(r.id),
         name: r.module == 'rate' ? r.name : 'BAR',
         description: r.description,
@@ -172,12 +191,16 @@ const allCodePosts = await prisma.code_posts.findMany({
         is_day_use: r.is_day_use === true,
         min_advance_booking: r.min_advance_booking,
         max_advance_booking: r.max_advance_booking,
+        cancelation: cancelation ? { value: Number(cancelation.id), label: cancelation.name } : [],
+        company_type: companyType ? { value: Number(companyType.id), label: companyType.name } : [],
+        comm_code: commCode ? { value: Number(commCode.id), label: commCode.name } : [],
         code: r.code,
         contract_rate: { value: Number(r.id), label: r.code },
         code_color: [{ value: r.code, label: r.code }],
         is_color: true,
         sort_by_company: r.module == 'rate' ? 2 : 3,
         color: r.module == 'rate' ? 'bg-primary' : 'bg-secondary',
+        companyProfile: [],
         start_date: r.start_date ? formatDate(r.start_date) : null,
         end_date: r.end_date ? formatDate(r.end_date) : null,
         term_condition: r.term_condition,
@@ -191,13 +214,16 @@ const allCodePosts = await prisma.code_posts.findMany({
           value: r.code_post_extra_bed_id ? Number(r.code_post_extra_bed_id) : null,
           label: codePostById.get(r.code_post_extra_bed_id) || '',
         },
-sort: r.sort,
+        sort: r.sort,
         status: getStatusLabel(r.status),
         created_at: r.created_at,
         updated_at: r.updated_at,
-}));
+        is_view: permFlags.view,
+        is_edit: permFlags.edit,
+        is_need_approval: false,
+        relation: { code_post: null, type: rTypes },
+      }});
 
-const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
         view: true,
         add: req.user?.superUser || permFlags.add,

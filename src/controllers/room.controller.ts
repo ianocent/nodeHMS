@@ -655,9 +655,11 @@ export class RoomController {
         where.name = { contains: search, mode: 'insensitive' };
       }
 
+      // Laravel RoomController@index sort parity: sort param -> orderBy, NOT where
+      const order = req.query.order === 'desc' ? 'desc' : 'asc';
+      let orderBy: any = { sort: 'asc' };
       if (sort) {
-        const order = req.query.order === 'desc' ? 'desc' : 'asc';
-        where.sort = order;
+        orderBy = { [sort]: order };
       }
 
       const table = group === 'room'
@@ -669,13 +671,25 @@ export class RoomController {
             { label: 'Action', key: 'action', type: 'action', is_search: false },
           ]
         : [
+            // Laravel Room::formatTable() parity (room-setup)
             { label: 'No', key: 'no', type: 'none', is_search: false },
-            { label: 'Room Name', key: 'name', type: 'none', is_search: true },
-            { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
-            { label: 'Parent Room', key: 'parent_room_name', type: 'none', is_search: false },
-            { label: 'Sort', key: 'sort', type: 'none', is_search: false },
-            { label: 'Status', key: 'status', type: 'badge', is_search: false },
-            { label: 'Action', key: 'action', type: 'action', is_search: false },
+            { label: 'Status', key: 'status', type: 'checkbox', options: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }], is_search: true },
+            { label: 'Status Room', key: 'room_status_color', type: 'text', is_search: true },
+            { label: 'Maid Status', key: 'room_clean_status_color', type: 'text', is_search: true },
+            { label: 'Unit', key: 'name_html', type: 'text', is_html: true, is_search: true },
+            { label: 'Type', key: 'room_type_id', type: 'select', is_search: true },
+            { label: 'Max Pax', key: 'max_pax', type: 'text', is_search: true },
+            { label: 'Bed', key: 'total_bed', type: 'text', is_search: true },
+            { label: 'TV', key: 'with_tv', type: 'checkbox', is_search: true },
+            { label: 'Shower', key: 'with_shower', type: 'checkbox', is_search: true },
+            { label: 'Floor', key: 'floor', type: 'select', is_search: true },
+            { label: 'Building', key: 'building', type: 'select', is_search: true },
+            { label: 'Cleaning Time', key: 'cleaning_time', type: 'text', is_search: true },
+            { label: 'Linen Days', key: 'linen_days', type: 'text', is_search: true },
+            { label: 'Phone Ext', key: 'phone_ext', type: 'text', is_search: true },
+            { label: 'Interconnecting Room', key: 'room_id', type: 'select', is_search: true },
+            { label: 'Room Configuration', key: 'room_configuration', type: 'select_multiple', is_search: true },
+            { label: 'Description', key: 'description', type: 'text', is_search: true },
           ];
 
       applySearchField(where, req, table);
@@ -683,7 +697,7 @@ export class RoomController {
       const [rooms, total] = await Promise.all([
         prisma.rooms.findMany({
           where,
-          orderBy: { sort: 'asc' },
+          orderBy,
           skip: (page - 1) * limit,
           take: limit,
           include: {
@@ -712,14 +726,64 @@ export class RoomController {
         configMap.get(mt.model_id)!.push(bigintToNumber(mt.types));
       }
 
-      const formatted = rooms.map((r: any) => ({
-        ...bigintToNumber(r),
-        room_type_name: r.room_types?.name || null,
-        parent_room_name: r.rooms?.name || null,
-        room_types: undefined,
-        rooms: undefined,
-        room_configurations: configMap.get(r.id) || [],
-      }));
+      // Property names (Laravel Room::formatData() property key)
+      const propertyIds = Array.from(new Set(rooms.map((r: any) => Number(r.property_id))));
+      const properties = propertyIds.length > 0
+        ? await prisma.properties.findMany({ where: { id: { in: propertyIds as any } }, select: { id: true, name: true } })
+        : [];
+      const propertyMap = new Map(properties.map(p => [p.id, p]));
+
+      const formatted = rooms.map((r: any, idx: number) => {
+        const rTypes = configMap.get(r.id) || [];
+        const floor = rTypes.find((t: any) => t.group === 'floor');
+        const building = rTypes.find((t: any) => t.group === 'building');
+        const roomConfigs = rTypes.filter((t: any) => t.group === 'room-configuration');
+        const property = propertyMap.get(r.property_id);
+        const roomStatusLabel = (Object.values(ROOM_STATUSES).find((s: any) => s.id === r.room_status) as any)?.name ?? r.room_status;
+        const maidStatusLabel = (Object.values(MAID_STATUSES).find((s: any) => s.id === r.maid_status) as any)?.name ?? r.maid_status;
+        return {
+          // Laravel Room::formatData() parity
+          id: Number(r.id),
+          name: r.name,
+          name_html: `<div class="text-center p-4 bg-gray-100 rounded-lg shadow-md" style="text-decoration: underline;">
+                <a href="/master-setup/room?parent=1150&add=1&data=${r.id}&datetbl=${r.id}" class="text-md font-semibold mb-2" style="cursor: not-allowed;">${r.name}</a>
+              </div>`,
+          floor_plan_name: `Room ${r.name}`,
+          description: r.description,
+          phone_ext: r.phone_ext,
+          max_pax: r.max_pax,
+          total_bed: r.total_bed,
+          with_tv: !!r.with_tv,
+          with_shower: !!r.with_shower,
+          floor: floor ? { value: Number(floor.id), label: floor.name } : [],
+          building: building ? { value: Number(building.id), label: building.name } : [],
+          building_name: building ? building.name : '',
+          floor_name: floor ? floor.name : '',
+          cleaning_time: r.cleaning_time,
+          linen_days: r.linen_days,
+          remark: r.remark,
+          created_at: r.created_at,
+          created_by: r.created_by ? Number(r.created_by) : null,
+          sort: r.sort,
+          room_status: { value: r.room_status, label: roomStatusLabel, color: getColorRoom(r.room_status), colorCode: getColorCodeRoom(r.room_status) },
+          maid_status: { value: r.maid_status, colorCode: getColorCodeMaid(r.maid_status), color: getColorMaid(r.maid_status), label: maidStatusLabel },
+          status: { value: !!r.status, label: getStatusLabel(r.status).label },
+          room_type_id: { value: Number(r.room_type_id), label: r.room_types?.name ?? null },
+          room_clean_status_color: { label: String(maidStatusLabel).replace(/ /g, '-'), color: getColorMaid(r.maid_status), is_color: true },
+          room_status_color: { label: String(roomStatusLabel).replace(/ /g, '-'), color: getColorRoom(r.room_status), colorCode: getColorCodeRoom(r.room_status), is_color: true },
+          property: property ? { value: Number(property.id), label: property.name } : [],
+          room_id: r.room_id ? { value: Number(r.room_id), label: r.rooms?.name ?? null } : [],
+          room_configuration: roomConfigs.map((t: any) => ({ value: Number(t.id), label: t.name })),
+          housekeeper: '',
+          guest: '',
+          is_do_not_disturb: false,
+          map_id: r.map_id ? ucfirst(r.map_id) : null,
+          address_code: r.address_code,
+          room_type_name: r.room_types?.name || null,
+          parent_room_name: r.rooms?.name || null,
+          no: (page - 1) * limit + idx + 1,
+        };
+      });
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {

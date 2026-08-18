@@ -8,6 +8,7 @@ import { STATUSES } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { TABLES } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
+import { firebaseService } from '../services/firebase.service';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -673,6 +674,37 @@ success(res, bigintToNumber(data), 'Success', 200, {
     } catch (err: any) { console.error('Room status checklist error:', err); error(res, 'Failed to load checklist', 500); }
   }
 
+  // ==================== ROOM STATUS: SAVE CHECKLIST ====================
+  // Replicates Laravel HouseKeepingRoomStatusController@saveChecklist
+  static async roomStatusSaveChecklist(req: Request, res: Response): Promise<void> {
+    try {
+      const { history_id, type, checklist, reclean_notes } = req.body;
+      if (!history_id) { badRequest(res, 'history_id is required'); return; }
+
+      const history = await prisma.housekeeper_history.findUnique({ where: { id: BigInt(history_id) } });
+      if (!history) { notFound(res, 'History not found'); return; }
+
+      const items = checklist ?? [];
+      const data: any = {};
+
+      if (type === 'hk') {
+        data.hk_checklist = JSON.stringify(items);
+      } else {
+        data.hkspv_checklist = JSON.stringify(items);
+        const hasUnchecked = Object.values(items).some((v) => !v);
+        data.need_rec_cleaning = hasUnchecked;
+        data.reclean_notes = reclean_notes ?? null;
+
+        if (hasUnchecked && history.room_id) {
+          await prisma.rooms.update({ where: { id: history.room_id }, data: { maid_status: 0 } });
+        }
+      }
+
+      await prisma.housekeeper_history.update({ where: { id: history.id }, data });
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Room status save checklist error:', err); error(res, 'Failed to save checklist', 500); }
+  }
+
   // ==================== ROOM STATUS: BATCH UPDATE ====================
   // Replicates Laravel HouseKeepingRoomStatusController@batchUpdate
   static async roomStatusBatch(req: Request, res: Response): Promise<void> {
@@ -784,6 +816,40 @@ success(res, bigintToNumber(data), 'Success', 200, {
         data.hk_checklist = JSON.stringify(checklist ?? []);
         data.need_rec_cleaning = false;
         maidStatus = MAID_STATUSES.inspection_required.id;
+
+        // Notif ke semua HKSPV yang punya permission perform_inspection (Laravel FcmNotificationService parity)
+        try {
+          const inspectRoles = await prisma.role_permissions.findMany({
+            where: { permissions: { name: 'perform_inspection' } },
+            select: { role_id: true },
+          });
+          const roleIds = inspectRoles.map((rp) => rp.role_id);
+          const assigned = roleIds.length > 0
+            ? await prisma.model_has_roles.findMany({
+                where: { role_id: { in: roleIds }, model_type: 'App\\Models\\User' },
+                select: { model_id: true },
+              })
+            : [];
+          const userIds = assigned.map((a) => a.model_id);
+          const hkspvUsers = userIds.length > 0
+            ? await prisma.users.findMany({ where: { id: { in: userIds }, fcm_token: { not: null } }, select: { fcm_token: true } })
+            : [];
+          const tokens = hkspvUsers.map((u) => u.fcm_token!).filter(Boolean);
+          if (tokens.length > 0) {
+            const roomName = room.name ?? `Room #${room.id}`;
+            await firebaseService.sendToMultipleTokens(tokens, {
+              title: '🔍 Inspection Required',
+              body: `Kamar ${roomName} sudah selesai dibersihkan, silakan lakukan inspeksi.`,
+              data: {
+                type: 'inspection_required',
+                room_id: String(Number(roomId)),
+                date: dateObj.toISOString().slice(0, 10),
+              },
+            });
+          }
+        } catch (fcmErr: any) {
+          console.error('Notif inspection error:', fcmErr?.message ?? fcmErr);
+        }
       } else if (type === 'done_inspection') {
         data.done_inspection = now;
         data.hkspv_checklist = JSON.stringify(checklist ?? []);

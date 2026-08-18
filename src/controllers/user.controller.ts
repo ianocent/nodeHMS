@@ -7,6 +7,7 @@ import { success, error, badRequest, notFound, validationError } from '../utils/
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
 import { getStatusLabel } from '../utils/cmsConfig';
+import { TABLES } from '../utils/tableMeta';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -37,13 +38,13 @@ export class UserController {
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
-      const search = req.query.search as string;
-      const sort = req.query.sort as string || 'id';
+      // Laravel UserController@index: ->search($request->query('name'), ['name','username','email'])
+      const search = (req.query.name as string) || (req.query.search as string);
+      const sort = (req.query.sort as string) || 'id';
       const order = req.query.order === 'desc' ? 'desc' : 'asc';
       const propertyId = req.user?.lastProperty;
 
-      const trash = req.query.trash === '1' || req.query.trash === 'true';
-      const where: any = { deleted_at: trash ? { not: null } : null };
+      const where: any = { deleted_at: null };
 
       if (search) {
         where.OR = [
@@ -53,20 +54,24 @@ export class UserController {
         ];
       }
 
+      // Laravel: whereHas('properties', id = last_property); dev/anyaman roles bypass scope
       const isSuperUser = req.user?.superUser || false;
       if (!isSuperUser && propertyId) {
-        where.last_property = propertyId;
+        const links = await prisma.model_has_properties.findMany({
+          where: { property_id: propertyId, model_type: 'App\\Models\\User' },
+          select: { model_id: true }
+        });
+        where.id = { in: links.map((l: any) => l.model_id) };
       }
 
-      const table = [
-        { label: 'Name', key: 'name', type: 'none', is_search: true },
-        { label: 'Username', key: 'username', type: 'none', is_search: true },
-        { label: 'Email', key: 'email', type: 'none', is_search: true },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Role', key: 'roles', type: 'none', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false }
-      ];
+      const permFlags = getPermissionFlags(req.user, 1116);
+      const permission = {
+        view: true,
+        add: req.user?.superUser || permFlags.add,
+        edit: req.user?.superUser || permFlags.edit
+      };
 
+      const table = TABLES.user;
       applySearchField(where, req, table);
 
       const [users, total] = await Promise.all([
@@ -79,48 +84,95 @@ export class UserController {
         prisma.users.count({ where })
       ]);
 
-      // Get roles for each user via model_has_roles
+      const pagination = {
+        current_page: page,
+        last_page: Math.ceil(total / limit),
+        per_page: limit,
+        total,
+        from: users.length ? (page - 1) * limit + 1 : 0,
+        to: users.length ? Math.min(page * limit, total) : 0
+      };
+
+      if (users.length === 0) {
+        success(res, [], 'Success', 200, { table, permission, search_data: dataSearch(req, table) as any, pagination });
+        return;
+      }
+
       const userIds = users.map(u => u.id);
-      const modelRoles = await prisma.model_has_roles.findMany({
-        where: { model_id: { in: userIds }, model_type: 'App\\Models\\User' },
-        include: { roles: true }
-      });
+      const [modelRoles, modelProps, modelComps, tokens] = await Promise.all([
+        prisma.model_has_roles.findMany({
+          where: { model_id: { in: userIds }, model_type: 'App\\Models\\User' },
+          include: { roles: true }
+        }),
+        prisma.model_has_properties.findMany({
+          where: { model_id: { in: userIds }, model_type: 'App\\Models\\User' },
+          include: { properties: { select: { id: true, name: true } } }
+        }),
+        prisma.model_has_companies.findMany({
+          where: { model_id: { in: userIds }, model_type: 'App\\Models\\User' },
+          include: { companies: { select: { id: true, name: true } } }
+        }),
+        prisma.personal_access_tokens.findMany({
+          where: { tokenable_id: { in: userIds }, tokenable_type: 'App\\Models\\User' },
+          select: { tokenable_id: true }
+        })
+      ]);
 
       const rolesMap = new Map<bigint, any[]>();
       for (const mr of modelRoles) {
         if (!rolesMap.has(mr.model_id)) rolesMap.set(mr.model_id, []);
         rolesMap.get(mr.model_id)!.push(mr.roles);
       }
+      const propsMap = new Map<bigint, any[]>();
+      for (const mp of modelProps) {
+        if (!propsMap.has(mp.model_id)) propsMap.set(mp.model_id, []);
+        propsMap.get(mp.model_id)!.push({ id: mp.properties.id, name: mp.properties.name });
+      }
+      const compsMap = new Map<bigint, any[]>();
+      for (const mc of modelComps) {
+        if (!compsMap.has(mc.model_id)) compsMap.set(mc.model_id, []);
+        compsMap.get(mc.model_id)!.push({ id: mc.companies.id, name: mc.companies.name });
+      }
+      const onlineIds = new Set<bigint>(tokens.map(t => t.tokenable_id));
 
-      // Format users with roles
-      const formattedUsers = users.map(u => ({
-        ...u,
-        id: Number(u.id),
-        roles: rolesMap.get(u.id) || [],
-        last_property: u.last_property ? Number(u.last_property) : null,
-        status: getStatusLabel(u.status),
-      }));
-
-      const permFlags = getPermissionFlags(req.user, 1116);
-      const permission = {
-        view: true,
-        add: req.user?.superUser || permFlags.add,
-        edit: req.user?.superUser || permFlags.edit,
-        delete: req.user?.superUser || permFlags.delete
-      };
+      // Laravel User::formatData() parity rows
+      const formattedUsers = users.map((u, idx) => {
+        const roleList = rolesMap.get(u.id) || [];
+        const props = propsMap.get(u.id) || [];
+        const comps = compsMap.get(u.id) || [];
+        const roleSel = roleList.length ? { value: Number(roleList[0].id), label: roleList[0].name } : null;
+        const propsSel = props.map((p: any) => ({ value: Number(p.id), label: p.name }));
+        const compSel = comps.length ? { value: Number(comps[0].id), label: comps[0].name } : null;
+        return {
+          id: Number(u.id),
+          name: u.name,
+          username: u.username,
+          email: u.email,
+          phone: u.phone,
+          roles: roleSel,
+          properties: propsSel,
+          companies: compSel,
+          force_logout: 'string',
+          is_online: onlineIds.has(u.id),
+          pin_enshift: u.pin_enshift != null ? Number(u.pin_enshift) : null,
+          status: { value: !!u.status, label: getStatusLabel(u.status).label },
+          is_view: permFlags.view,
+          is_edit: permFlags.edit,
+          is_need_approval: false,
+          relation: {
+            roles: roleList.map((r: any) => ({ value: Number(r.id), label: r.name })),
+            properties: propsSel,
+            companies: compSel
+          },
+          no: (page - 1) * limit + idx + 1
+        };
+      });
 
       success(res, bigintToNumber(formattedUsers), 'Success', 200, {
         table,
         permission,
         search_data: dataSearch(req, table) as any,
-        pagination: {
-          current_page: page,
-          last_page: Math.ceil(total / limit),
-          per_page: limit,
-          total,
-          from: (page - 1) * limit + 1,
-          to: Math.min(page * limit, total)
-        }
+        pagination
       });
     } catch (err: any) {
       console.error('User list error:', err);

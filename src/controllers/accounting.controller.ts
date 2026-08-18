@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { dataSearch, applySearchField } from '../utils/search';
 import { getStatusLabel } from '../utils/cmsConfig';
+import { getPermissionFlags } from '../middleware/permission.middleware';
 
 const ACCOUNTING_STATUSES = [
   { value: 1, label: 'Processed' },
@@ -16,6 +17,35 @@ function getAccountingStatusLabel(statusId: number | null | undefined): { value:
   const s = ACCOUNTING_STATUSES.find((x) => x.value === statusId);
   return { value: statusId ?? 0, label: s?.label ?? 'Unknown' };
 }
+
+// Laravel Global::moneyFormat() parity: number_format(v, 2, ',', '.')
+function moneyFormat(v: number): string {
+  const n = Number(v) || 0;
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  const [int, dec] = abs.toFixed(2).split('.');
+  return `${sign}${int.replace(/\B(?=(\d{3})+(?!\d))/g, '.')},${dec}`;
+}
+
+// Laravel AccountingController per-type menuId (invoice 1039 .. refund 1044)
+const ACCOUNTING_MENU: Record<string, number> = {
+  invoice: 1039,
+  'credit-note': 1040,
+  'debit-note': 1041,
+  adjustment: 1042,
+  payment: 1043,
+  refund: 1044,
+};
+
+// Laravel Accounting::getNumberNote()/getTypeAccounting() prefix
+const ACCOUNTING_PREFIX: Record<string, string> = {
+  invoice: 'INV',
+  'credit-note': 'CN',
+  'debit-note': 'DN',
+  adjustment: 'ADJ',
+  payment: 'PMT',
+  refund: 'RFND',
+};
 
 const ACCOUNTING_TABLE = [
   { label: 'Date', key: 'date', type: 'date', is_search: true },
@@ -99,7 +129,7 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
 
       applySearchField(where, req, ACCOUNTING_TABLE);
 
-const [records, total] = await Promise.all([
+      const [records, total] = await Promise.all([
         prisma.accountings.findMany({
           where,
           orderBy: { id: 'desc' },
@@ -107,20 +137,99 @@ const [records, total] = await Promise.all([
           take: limit,
           include: {
             type_payments: { select: { id: true, name: true } },
-            folios: { select: { id: true, folio_number: true } },
+            folios: { select: { id: true, folio_number: true, guest_profile_id: true } },
           },
         }),
         prisma.accountings.count({ where }),
       ]);
 
-      const formatted = records.map((r: any) => ({
-        ...bigintToNumber(r),
-        status_accounting: getAccountingStatusLabel(r.status_accounting),
-      }));
+      const recordIds = records.map(r => r.id);
 
-success(res, formatted, 'Success', 200, {
+      // allocated sums (Laravel Accounting::allocatedAmount())
+      const allocRows = recordIds.length > 0
+        ? await prisma.allocation_accountings.groupBy({
+            by: ['accounting_id'],
+            where: { accounting_id: { in: recordIds } },
+            _sum: { allocated: true },
+          })
+        : [];
+      const allocMap = new Map<bigint, number>();
+      for (const a of allocRows) allocMap.set(a.accounting_id, Number(a._sum.allocated) || 0);
+
+      // company names (Laravel getDescriptionAccounting + company_profile_id)
+      const companyIds = Array.from(new Set(records.map(r => Number(r.company_profile_id))));
+      const companies = companyIds.length > 0
+        ? await prisma.company_profiles.findMany({ where: { id: { in: companyIds as any } }, select: { id: true, name: true } })
+        : [];
+      const companyMap = new Map(companies.map(c => [c.id, c.name]));
+
+      // folio guest names (folios model has no guest_profiles relation in prisma)
+      const folioGuestIds = Array.from(new Set(records.map(r => r.folios?.guest_profile_id).filter(Boolean)));
+      const folioGuests = folioGuestIds.length > 0
+        ? await prisma.guest_profiles.findMany({ where: { id: { in: folioGuestIds as any } }, select: { id: true, first_name: true, last_name: true } })
+        : [];
+      const folioGuestMap = new Map(folioGuests.map(g => [g.id, g]));
+
+      // Laravel AccountingController@index parity: crud permission per type menu
+      const permFlags = getPermissionFlags(req.user, ACCOUNTING_MENU[mappedType] ?? 1039);
+      const permission = {
+        view: true,
+        add: req.user?.superUser || permFlags.add,
+        edit: req.user?.superUser || permFlags.edit,
+      };
+
+      // Laravel Accounting::formatData() parity rows
+      const formatted = records.map((r: any, idx: number) => {
+        const allocated = allocMap.get(r.id) || 0;
+        const amount = Number(r.amount) || 0;
+        const prefix = ACCOUNTING_PREFIX[r.type_accounting] || '';
+        const folioGuest = r.folios?.guest_profile_id ? folioGuestMap.get(r.folios.guest_profile_id) : null;
+        const guestName = folioGuest ? `${folioGuest.first_name || ''} ${folioGuest.last_name || ''}`.trim() : '';
+        const desc = [companyMap.get(r.company_profile_id), r.folios ? guestName : '', r.type_payments?.name].filter(Boolean).join(' - ');
+        const created = r.created_at ? new Date(r.created_at) : null;
+        const pad = (x: number) => String(x).padStart(2, '0');
+        return {
+          id: Number(r.id),
+          trans_type: prefix,
+          no_docs: prefix + (r.number_note || ''),
+          number_note: prefix + (r.number_note || ''),
+          date: r.doc_date,
+          folio_id: r.folio_id ? Number(r.folio_id) : null,
+          folio_number: r.folios?.folio_number ?? null,
+          source: r.source,
+          booking: '',
+          description_accounting: desc,
+          type: r.type,
+          type_accounting: r.type_accounting,
+          amount,
+          amount_already_allocated: moneyFormat(allocated),
+          allocated_amount: '0',
+          outstanding: moneyFormat(amount - allocated),
+          type_payment_id: r.type_payments?.name ?? null,
+          remark: r.is_void === 1 || r.is_split === 1 ? r.remark : '',
+          time: created ? `${created.getFullYear()}-${pad(created.getMonth() + 1)}-${pad(created.getDate())} ${pad(created.getHours())}:${pad(created.getMinutes())}:${pad(created.getSeconds())}` : null,
+          company_profile_id: { value: Number(r.company_profile_id), label: companyMap.get(r.company_profile_id) ?? null },
+          reference: r.source,
+          pos: r.pos,
+          receipt: r.receipt,
+          created_at: r.created_at,
+          created_by: r.created_by ? Number(r.created_by) : null,
+          is_void: r.is_void === 1,
+          is_transfer: r.is_transfer === 1,
+          is_consolidate: r.is_consolidate === 1,
+          is_split: r.is_split === 1,
+          debtor: null,
+          status_accounting: getAccountingStatusLabel(r.status_accounting),
+          is_view: permFlags.view,
+          is_edit: permFlags.edit,
+          is_need_approval: false,
+          no: (page - 1) * limit + idx + 1,
+        };
+      });
+
+      success(res, bigintToNumber(formatted), 'Success', 200, {
         table: ACCOUNTING_TABLE,
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission,
         search_data: dataSearch(req, ACCOUNTING_TABLE) as any,
         pagination: {
           current_page: page,
