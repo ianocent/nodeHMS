@@ -345,7 +345,7 @@ export class FolioController {
     try {
       const id = idParam(req.params.folio);
       const userId = req.user?.id;
-      const { status_reservation, check_in_date, check_out_date, reason } = req.body;
+      const { status_reservation, check_in_date, check_out_date, reason, to_virtual } = req.body;
 
       const folio: any = await prisma.folios.findUnique({ where: { id } });
       if (!folio) {
@@ -355,18 +355,33 @@ export class FolioController {
 
       const updateData: any = { updated_at: new Date() };
 
+      // Map action keys to actual status codes (Laravel parity)
+      let targetStatus: number | null = null;
+      let targetStatusCode: string | null = null;
+
       if (status_reservation) {
-        const found = Object.values(STATUS_RESERVATION).find((s) => s.code === status_reservation);
+        // Handle special action keys that map to status codes
+        if (status_reservation === 'un_check_in') {
+          targetStatusCode = 'reservation';
+        } else if (status_reservation === 'un_check_out') {
+          targetStatusCode = 'check_in';
+        } else {
+          targetStatusCode = status_reservation;
+        }
+
+        const found = Object.values(STATUS_RESERVATION).find((s) => s.code === targetStatusCode);
         if (!found) {
           badRequest(res, `Invalid status: ${status_reservation}`);
           return;
         }
-        updateData.status_reservation = found.id;
+        targetStatus = found.id;
+        updateData.status_reservation = targetStatus;
       }
 
       if (check_in_date) updateData.check_in_date = new Date(check_in_date);
       if (check_out_date) updateData.check_out_date = new Date(check_out_date);
 
+      // Laravel parity: handle special actions
       if (status_reservation === 'cancel_reservation') {
         updateData.data = JSON.stringify({
           ...(folio.data ? JSON.parse(folio.data as string) : {}),
@@ -374,6 +389,48 @@ export class FolioController {
           cancelled_at: new Date().toISOString(),
           cancelled_by: Number(userId),
         });
+      }
+
+      if (status_reservation === 'un_check_in') {
+        // Validate: can only un_check_in if check_in_date == business date
+        const businessDate = new Date();
+        const bdate = businessDate.toISOString().slice(0, 10);
+        const folioCheckIn = folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : '';
+        if (folioCheckIn !== bdate) {
+          badRequest(res, 'Unable to un check-in');
+          return;
+        }
+        if (reason) {
+          updateData.data = JSON.stringify({
+            ...(folio.data ? JSON.parse(folio.data as string) : {}),
+            remark_un_check_in: reason,
+          });
+        }
+      }
+
+      if (status_reservation === 'un_check_out') {
+        // Validate: must be in check_out status
+        if (folio.status_reservation !== STATUS_RESERVATION.check_out.id) {
+          badRequest(res, 'Status reservation is not check out');
+          return;
+        }
+        if (!reason) {
+          badRequest(res, 'Remark required');
+          return;
+        }
+        if (folio.check_out_date && folio.check_out_date < new Date()) {
+          updateData.check_out_date = new Date();
+          updateData.type_reservation = 'vr';
+        }
+        if (to_virtual) {
+          updateData.type_reservation = 'vr';
+        }
+        if (reason) {
+          updateData.data = JSON.stringify({
+            ...(folio.data ? JSON.parse(folio.data as string) : {}),
+            remark_un_check_out: reason,
+          });
+        }
       }
 
       if (status_reservation === 'check_in' && !check_in_date) {
