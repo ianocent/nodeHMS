@@ -309,14 +309,15 @@ async function calcDailyRevPeriod(
   s: string,
   e: string,
   roomTypes: any[],
-  exclRateIds: bigint[],
+  complimentRateIds: bigint[],
+  houseUseRateIds: bigint[],
   yearBudgets: any[],
   ongoingDay: number,
   ongoingMonth: number,
   totalDaysInMonth: number
 ): Promise<any> {
   const start = new Date(`${s}T00:00:00Z`);
-  const end = new Date(`${e}T23:59:59Z`);
+  const end = new Date(`${e}T00:00:00Z`);
   const days = Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
   const y = Number(s.slice(0, 4));
   const m = Number(s.slice(5, 7));
@@ -388,19 +389,36 @@ async function calcDailyRevPeriod(
     const cin = f.check_in_date ? f.check_in_date.toISOString().slice(0, 10) : '';
     const cout = f.check_out_date ? f.check_out_date.toISOString().slice(0, 10) : '';
     const isDayUse = cin !== '' && cin === cout;
-    if (f.is_house_use) { totalHouseUse++; continue; }
-    if (f.complimentary || (r.rate_id && exclRateIds.includes(r.rate_id))) { totalComplimentary++; continue; }
+    // Laravel houseUse: folio is_house_use OR rate type %house use%; comp: folio complimentary OR rate type %compliment%; independent counts
+    if (f.is_house_use || (r.rate_id && houseUseRateIds.includes(r.rate_id))) totalHouseUse++;
+    if (f.complimentary || (r.rate_id && complimentRateIds.includes(r.rate_id))) totalComplimentary++;
+    if (f.is_house_use || (r.rate_id && houseUseRateIds.includes(r.rate_id))) continue;
+    // Laravel in-house guests excludes house use only; includes complimentary + day use
+    totalInHouseGuests += (r.adult || 0) + (r.child || 0);
+    if (f.complimentary || (r.rate_id && complimentRateIds.includes(r.rate_id))) continue;
     if (isDayUse) { totalDayUse++; dayUseNights++; dayUseFolioIds.add(f.id); }
     else { totalSold++; const rt = roomTypes.find((t: any) => t.id === r.room_type_id); if (rt) roomTypeSales[rt.name] = (roomTypeSales[rt.name] || 0) + 1; }
-    totalInHouseGuests += (r.adult || 0) + (r.child || 0);
   }
 
+  // Laravel avg LOS: status in [check_in, check_out], house use 0, comp 0, day use, not rate compliment
+  const losResvs = resvs.filter((r: any) => {
+    const f = r.folios as any;
+    if (!f || !isFitGit(f)) return false;
+    if (![STATUS_RESERVATION_CHECK_IN, 1].includes(f.status_reservation)) return false;
+    if (f.is_house_use || f.complimentary || (r.rate_id && (complimentRateIds.includes(r.rate_id) || houseUseRateIds.includes(r.rate_id)))) return false;
+    const cin = f.check_in_date ? f.check_in_date.toISOString().slice(0, 10) : '';
+    const cout = f.check_out_date ? f.check_out_date.toISOString().slice(0, 10) : '';
+    return cin !== '' && cin === cout;
+  });
+  const losFolioIds = new Set(losResvs.map((r: any) => Number(r.folios.id)));
+
   const budgetOf = (type: string) => {
-    const posts = yearBudgets.filter((b: any) => b.type === type);
-    const monthly = posts.reduce((sum: number, b: any) => sum + Number(b.budget), 0);
+    const sm = Number(s.slice(5, 7));
     const em = Number(e.slice(5, 7));
+    const posts = yearBudgets.filter((b: any) => b.type === type && b.month >= sm && b.month <= em);
+    const monthly = posts.reduce((sum: number, b: any) => sum + Number(b.budget), 0);
     if (s === e) return monthly / totalDaysInMonth;
-    if (Number(s.slice(5, 7)) === em) return (monthly / totalDaysInMonth) * days;
+    if (sm === em) return (monthly / totalDaysInMonth) * days;
     let tot = 0;
     for (const b of posts) {
       if (b.month === em) tot += (Number(b.budget) / totalDaysInMonth) * ongoingDay;
@@ -460,18 +478,19 @@ async function calcDailyRevPeriod(
     roomAvailableOccupancyWithCOM: Math.round(roomAvailOccWithCom * 100) / 100,
     roomAvailableOccupancyWithCOMDayUse: Math.round(roomAvailOccWithComDayUse * 100) / 100,
     doubleOccupancy: Math.round(doubleOcc * 100) / 100,
-    averageLengthOfStay: dayUseFolioIds.size > 0 ? Math.round((dayUseNights / dayUseFolioIds.size) * 100) / 100 : 0,
+    averageLengthOfStay: losFolioIds.size > 0 ? Math.round((losResvs.length / losFolioIds.size) * 100) / 100 : 0,
   };
 }
 
 async function calcRoomRevenueNett(pid: bigint, s: string, e: string): Promise<number> {
+  // Laravel summaryTransactionTotal(): signed TOTAL (PLUS ? total : -total)
   const rows: any = await prisma.$queryRaw`
-    SELECT COALESCE(SUM(tb.amount), 0)::float8 AS total
+    SELECT COALESCE(SUM(CASE WHEN tb.type_amount = 'PLUS' THEN tb.total ELSE tb.total * -1 END), 0)::float8 AS total
     FROM transaction_breakdowns tb
     JOIN code_posts p ON tb.code = p.id::text
     JOIN code_billings cb ON cb.id = p.code_billing_id
     WHERE tb.property_id = ${pid}
-      AND tb.date BETWEEN ${new Date(`${s}T00:00:00Z`)} AND ${new Date(`${e}T23:59:59Z`)}
+      AND tb.date BETWEEN ${new Date(`${s}T00:00:00Z`)} AND ${new Date(`${e}T00:00:00Z`)}
       AND tb.type NOT IN ('payment', 'paidout', 'refund')
       AND LOWER(cb.name) LIKE '%room revenue%'`;
   return Number(rows[0]?.total || 0);
@@ -479,7 +498,7 @@ async function calcRoomRevenueNett(pid: bigint, s: string, e: string): Promise<n
 
 async function calcRoomRevenueTransactions(pid: bigint, s: string, e: string): Promise<number> {
   const agg = await prisma.transactions.aggregate({
-    where: { property_id: pid, date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`), }, type: 'room_revenue' },
+    where: { property_id: pid, date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T00:00:00Z`), }, type: 'room_revenue' },
     _sum: { amount: true },
   });
   return Number(agg._sum?.amount || 0);
@@ -502,25 +521,24 @@ async function getAccountDailyRevenueReport(params: any): Promise<any> {
     orderBy: { id: 'asc' },
   })).filter((t: any) => !String(t.name || '').toUpperCase().includes('VIRTUAL'));
 
-  const [exclRates, budgets, codePostRoomRevenue, codeBillingRoomRevenue, codePostPayment, codeBillingPayment] = await Promise.all([
-    prisma.rates.findMany({
-      where: {
-        property_id: pid,
-        deleted_at: null,
-        OR: [
-          { name: { contains: 'compliment', mode: 'insensitive' } },
-          { name: { contains: 'house use', mode: 'insensitive' } },
-        ],
-      },
-      select: { id: true },
-    }),
-    prisma.post_code_budgets.findMany({ where: { property_id: pid, year: y } }),
-    prisma.code_posts.findMany({ where: { property_id: pid, type: 'DEFAULT', deleted_at: null } }),
-    prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null } }),
+  const [budgets, codePostRoomRevenue, codeBillingRoomRevenue, codePostPayment, codeBillingPayment, rateRows] = await Promise.all([
+    // Laravel index(): PostCodeBudget year only, withoutGlobalScope('property') (all properties)
+    prisma.post_code_budgets.findMany({ where: { year: y } }),
+    prisma.code_posts.findMany({ where: { property_id: pid, type: 'DEFAULT', deleted_at: null }, orderBy: { name: 'asc' } }),
+    prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { name: 'asc' } }),
     prisma.code_posts.findMany({ where: { property_id: pid, type: { not: 'STATISTIC' }, deleted_at: null } }),
     prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null } }),
+    prisma.rates.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true } }),
   ]);
-  const exclRateIds = exclRates.map((r: any) => r.id);
+  // Laravel excl rates = rate whose TYPE (model_has_types group company-type) name like compliment/house use
+  const rateIdArr = rateRows.map((r: any) => r.id);
+  const rateMht = rateIdArr.length ? await prisma.model_has_types.findMany({ where: { model_type: 'App\\Models\\Rate', model_id: { in: rateIdArr } }, select: { type_id: true, model_id: true } }) : [];
+  const mhtTypeIds = [...new Set(rateMht.map((m: any) => Number(m.type_id)))];
+  const rateTypes = mhtTypeIds.length ? await prisma.types.findMany({ where: { id: { in: mhtTypeIds }, group: 'company-type' }, select: { id: true, name: true } }) : [];
+  const rateTypeName = new Map(rateTypes.map((t: any) => [Number(t.id), String(t.name || '').toLowerCase()]));
+  // Laravel complimentary calc: rate type %compliment% only; house use calc: rate type %house use% only
+  const complimentRateIds = [...new Set(rateMht.filter((m: any) => (rateTypeName.get(Number(m.type_id)) || '').includes('compliment')).map((m: any) => m.model_id))];
+  const houseUseRateIds = [...new Set(rateMht.filter((m: any) => (rateTypeName.get(Number(m.type_id)) || '').includes('house use')).map((m: any) => m.model_id))];
 
   const billingName = (b: any) => String(b.name || '').toLowerCase();
   const revBillings = codeBillingRoomRevenue.filter((b: any) => !billingName(b).includes('payment') && !billingName(b).includes('statistic'));
@@ -531,7 +549,8 @@ async function getAccountDailyRevenueReport(params: any): Promise<any> {
   const payPosts = codePostPayment.filter((p: any) => p.code_billing_id && payBillIds.has(p.code_billing_id));
 
   const budgetPosts = new Map<bigint, { type: string }>();
-  const allPosts = await prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true } });
+  const budgetPostIds = [...new Set(budgets.map((b: any) => b.code_post_id).filter(Boolean))];
+  const allPosts = budgetPostIds.length ? await prisma.code_posts.findMany({ where: { id: { in: budgetPostIds } }, select: { id: true, name: true } }) : [];
   const postNameById = new Map(allPosts.map((p: any) => [p.id, String(p.name || '').toLowerCase()]));
   budgets.forEach((b: any) => {
     const nm = postNameById.get(b.code_post_id) || '';
@@ -540,14 +559,14 @@ async function getAccountDailyRevenueReport(params: any): Promise<any> {
     }
   });
 
-  const periodData = (s: string, e: string) => calcDailyRevPeriod(pid, s, e, roomTypes, exclRateIds, budgets, ongoingDay, ongoingMonth, totalDaysInMonth);
+  const periodData = (s: string, e: string) => calcDailyRevPeriod(pid, s, e, roomTypes, complimentRateIds, houseUseRateIds, budgets, ongoingDay, ongoingMonth, totalDaysInMonth);
   const [todayData, mtdData, ytdData] = await Promise.all([periodData(date, date), periodData(startOfMonth, date), periodData(startOfYear, date)]);
 
   // room revenue / payment transactions
   const fetchTb = (s: string, e: string, isPayment: boolean) => prisma.transaction_breakdowns.findMany({
     where: {
       property_id: pid,
-      date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) },
+      date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T00:00:00Z`) },
       type: isPayment ? { in: ['payment', 'paidout', 'refund'] } : { notIn: ['payment', 'paidout', 'refund'] },
     },
     select: { code: true, amount: true, pb1: true, svr_chrg: true, surcharge: true, total: true, type_amount: true },
@@ -561,7 +580,7 @@ async function getAccountDailyRevenueReport(params: any): Promise<any> {
 
   const sysBal = async (s: string, e: string, name: string) => {
     const rows = await prisma.system_balances.findMany({
-      where: { property_id: pid, date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`), }, name },
+      where: { property_id: pid, date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T00:00:00Z`), }, name },
       select: { debit: true, credit: true },
     });
     return rows.reduce((sum: number, r: any) => sum + Number(r.debit || 0) + Number(r.credit || 0), 0);
@@ -603,29 +622,62 @@ async function getAccountDailyRevenueReport(params: any): Promise<any> {
 
 async function calcRoomActivities(pid: bigint, date: string, startOfMonth: string, startOfYear: string, budgets: any[], totalDaysInMonth: number, ongoingDay: number, ongoingMonth: number): Promise<any> {
   const tomorrow = addDays(date, 1);
-  const folios = await prisma.folios.findMany({
-    where: { property_id: pid, deleted_at: null, status_reservation: STATUS_RESERVATION_CANCEL },
-    select: { id: true, data: true, res_date: true, check_in_date: true, check_out_date: true, type_reservation: true, folio_number: true, parent: true },
+  // Laravel noShow/cancellation query RESERVATION.date (not folio res_date); git requires parent != 0
+  const cancelResvs = await prisma.reservations.findMany({
+    where: {
+      property_id: pid,
+      deleted_at: null,
+      folios: { is: { status_reservation: STATUS_RESERVATION_CANCEL, deleted_at: null } },
+    },
+    select: { date: true, folios: { select: { data: true, type_reservation: true, folio_number: true, parent: true } } },
   });
   const reasonOf = (f: any) => {
     try { const d = JSON.parse(f.data || '{}'); return String(d.reason_cancel_reservation || '').toUpperCase(); } catch { return ''; }
   };
-  const isFitGit = (f: any) => ['fit', 'git'].includes(f.type_reservation) || (f.type_reservation === 'vr' && String(f.folio_number || '').startsWith('F'));
+  const isFitGitCancel = (f: any) => ['fit', 'git'].includes(f.type_reservation) || (f.type_reservation === 'vr' && String(f.folio_number || '').startsWith('F'));
+  const gitNotParent = (f: any) => f.type_reservation === 'git' && Number(f.parent || 0) !== 0;
   const dayOf = (d: any) => (d ? new Date(d).toISOString().slice(0, 10) : '');
-  const noShow = (s: string, e?: string) => folios.filter((f: any) => isFitGit(f) && (!e ? dayOf(f.res_date) === s : dayOf(f.res_date) >= s && dayOf(f.res_date) <= e) && reasonOf(f) === 'NO SHOW').length;
-  const cancelNotShow = (s: string, e?: string) => folios.filter((f: any) => isFitGit(f) && (!e ? dayOf(f.res_date) === s : dayOf(f.res_date) >= s && dayOf(f.res_date) <= e) && reasonOf(f) !== 'NO SHOW').length;
+  const cancelFilter = (f: any) => isFitGitCancel(f) && !(gitNotParent(f));
+  const noShow = (s: string, e?: string) => cancelResvs.filter((r: any) => {
+    const f = r.folios as any;
+    if (!f || !cancelFilter(f)) return false;
+    const dd = dayOf(r.date);
+    const inRange = !e ? dd === s : dd >= s && dd <= e;
+    return inRange && reasonOf(f) === 'NO SHOW';
+  }).length;
+  const cancelNotShow = (s: string, e?: string) => cancelResvs.filter((r: any) => {
+    const f = r.folios as any;
+    if (!f || !cancelFilter(f)) return false;
+    const dd = dayOf(r.date);
+    const inRange = !e ? dd === s : dd >= s && dd <= e;
+    return inRange && reasonOf(f) !== 'NO SHOW';
+  }).length;
 
+  // Laravel type filter: fit | git | (vr AND folio_number LIKE F%)
+  const typeFilter = {
+    OR: [
+      { type_reservation: { in: ['fit', 'git'] } },
+      { type_reservation: 'vr', folio_number: { startsWith: 'F' } },
+    ],
+  };
+  // Laravel whereBetween('date',[s,e]) on DATETIME strings = end-day 00:00 exclusive; single date = equality
+  const rangeOrEq = (s: string, e: string, key: string) => (s === e
+    ? { [key]: new Date(`${s}T00:00:00Z`) }
+    : { [key]: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T00:00:00Z`) } });
   const countFolios = async (where: any) => prisma.folios.count({ where: { property_id: pid, deleted_at: null, ...where } });
-  const resMade = (s: string, e: string) => countFolios({ res_date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) }, status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } });
-  const arrivals = (s: string, e: string) => countFolios({ check_in_date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) }, status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } });
-  const departures = (s: string, e: string) => countFolios({ check_out_date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) }, status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } });
+  // Laravel reservationMade: type filter only, NO status filter
+  const resMade = (s: string, e: string) => countFolios({ ...rangeOrEq(s, e, 'res_date'), ...typeFilter });
+  const statusLive = { status_reservation: { notIn: [STATUS_RESERVATION_CANCEL, STATUS_RESERVATION_PENDING] } };
+  const arrivals = (s: string, e: string) => countFolios({ ...rangeOrEq(s, e, 'check_in_date'), ...statusLive, ...typeFilter });
+  const departures = (s: string, e: string) => countFolios({ ...rangeOrEq(s, e, 'check_out_date'), ...statusLive, ...typeFilter });
 
   const budgetOf = (type: string, s: string, e: string) => {
-    const posts = budgets.filter((b: any) => b.type === type);
+    const sm = Number(s.slice(5, 7));
+    const em = Number(e.slice(5, 7));
+    const posts = budgets.filter((b: any) => b.type === type && b.month >= sm && b.month <= em);
     const monthly = posts.reduce((sum: number, b: any) => sum + Number(b.budget), 0);
     if (s === e) return monthly / totalDaysInMonth;
-    const em = Number(e.slice(5, 7));
-    if (Number(s.slice(5, 7)) === em) return (monthly / totalDaysInMonth) * ongoingDay;
+    if (sm === em) return (monthly / totalDaysInMonth) * ongoingDay;
     let tot = 0;
     for (const b of posts) {
       if (b.month === em) tot += (Number(b.budget) / totalDaysInMonth) * ongoingDay;
@@ -906,7 +958,7 @@ async function getTaxBreakdownDetail(params: any): Promise<any> {
       lr.room_name AS room_no,
       CONCAT(f.first_name, ' ', f.last_name) AS "Guest_Name",
       f.company_name,
-      COALESCE(tb.description, CONCAT(INITCAP(REPLACE(COALESCE(tb.type, ''), '_', ' ')), ' - ', COALESCE(f.folio_number, ''), ' ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, ''))))) AS description,
+      CONCAT(COALESCE(tb.type, ''), ' - ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, '')))) AS description,
       tb.created_at AS "Posting_date",
       CASE WHEN tb.type = 'Room_Revenue' THEN 'SYSTEM' WHEN tb.receipt IS NOT NULL THEN 'POS SYSTEM' ELSE u.name END AS "STAFF",
       CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.amount AS DECIMAL(18,2)) ELSE CAST(tb.amount AS DECIMAL(18,2)) END AS "Charge",
@@ -921,7 +973,7 @@ async function getTaxBreakdownDetail(params: any): Promise<any> {
     LEFT JOIN type_payments tp ON tp.id = tb.type_payment_id
     LEFT JOIN last_room lr ON lr.folio_id = f.id
     WHERE f.property_id = ${pid}
-      AND tb.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T23:59:59Z`)}
+      AND tb.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T00:00:00Z`)}
       AND p.type IN ('DEFAULT', 'IS_PAYMENT')
     ORDER BY p.type, p.id, tb.created_at`;
 
@@ -1039,7 +1091,8 @@ async function generateTaxBreakdownDetailExcel(res: Response, data: any, filenam
 
 // ── Tax Breakdown Summary Excel ──
 async function generateTaxBreakdownSummaryExcel(res: Response, data: any): Promise<void> {
-  const rows = data.reportData;
+  const payload = Array.isArray(data) ? data[0] : data;
+  const rows = payload.reportData;
   const workbook = new ExcelJS.Workbook();
   const ws = workbook.addWorksheet('Tax Breakdown Summary');
 
@@ -1073,7 +1126,7 @@ async function generateTaxBreakdownSummaryExcel(res: Response, data: any): Promi
   });
 
   // Grand total row
-  ws.addRow(['Grand Total', nf(data.grandTotals.amount), nf(data.grandTotals.pb1), nf(data.grandTotals.svc), nf(data.grandTotals.surcharge), nf(data.grandTotals.total)]);
+  ws.addRow(['Grand Total', nf(payload.grandTotals.amount), nf(payload.grandTotals.pb1), nf(payload.grandTotals.svc), nf(payload.grandTotals.surcharge), nf(payload.grandTotals.total)]);
 
   // Payment summary section
   const paymentSectionHdr = ws.addRow(['Payment Summary', 'Total']);
@@ -1081,7 +1134,7 @@ async function generateTaxBreakdownSummaryExcel(res: Response, data: any): Promi
     c.font = { bold: true };
     c.fill = { fgColor: { argb: 'FFE0E0E0' } };
   });
-  const paymentTotalRow = ws.addRow(['Total Payments', nf(data.totalPayment)]);
+  const paymentTotalRow = ws.addRow(['Total Payments', nf(payload.totalPayment)]);
   paymentTotalRow.eachCell((c: any) => {
     c.font = { bold: true };
   });
@@ -1133,7 +1186,7 @@ async function getAccountTransactionReportDetail(params: any): Promise<any> {
     LEFT JOIN type_payments tp ON tp.id = tb.type_payment_id
     LEFT JOIN last_room lr ON lr.folio_id = f.id
     WHERE f.property_id = ${pid}
-      AND tb.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T23:59:59Z`)}
+      AND tb.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T00:00:00Z`)}
       AND p.type IN ('DEFAULT', 'IS_PAYMENT')
     ORDER BY p.type, p.id, tb.created_at`;
 
@@ -1316,22 +1369,24 @@ async function getTaxBreakdownAfterNA(params: any): Promise<any> {
   const pid = params.propertyId;
   const date = params.date || params.startDate || formatDate(new Date());
   const start = new Date(`${date}T00:00:00Z`);
-  const end = new Date(`${date}T23:59:59Z`);
 
   const transactions = await prisma.transactions.findMany({
-    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null },
+    // Laravel: Transaction::where('date', $date) equality (business date midnight)
+    where: { property_id: pid, date: start, deleted_at: null },
     select: { id: true, folio_id: true, code_name: true, code_item_name: true, description: true, type_payment_name: true, amount: true, pb1: true, svr_chrg: true, total: true, created_at: true, created_by: true },
     orderBy: { id: 'asc' },
   });
 
   const folioIds = transactions.map((t: any) => t.folio_id);
-  const [folios, gps, companies, reservations, users] = await Promise.all([
-    prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, folio_number: true, guest_profile_id: true, company_profile_id: true, booking_agent_id: true } }),
-    prisma.guest_profiles.findMany({ where: { id: { in: folioIds } }, select: { id: true, first_name: true, last_name: true } }),
-    prisma.company_profiles.findMany({ where: { id: { in: folioIds } }, select: { id: true, name: true } }),
-    prisma.reservations.findMany({ where: { folio_id: { in: folioIds } }, select: { id: true, folio_id: true, room_name: true }, orderBy: { id: 'asc' } }),
-    prisma.users.findMany({ where: { id: { in: transactions.map((t: any) => t.created_by).filter(Boolean) } }, select: { id: true, name: true } }),
+  const folios = await prisma.folios.findMany({ where: { id: { in: folioIds }, deleted_at: null }, select: { id: true, folio_number: true, guest_profile_id: true, company_profile_id: true, booking_agent_id: true } });
+  const gpIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter(Boolean))];
+  const companyIds = [...new Set(folios.flatMap((f: any) => [f.company_profile_id, f.booking_agent_id]).filter(Boolean))];
+  const [gps, companies] = await Promise.all([
+    prisma.guest_profiles.findMany({ where: { id: { in: gpIds }, deleted_at: null }, select: { id: true, first_name: true, last_name: true } }),
+    prisma.company_profiles.findMany({ where: { id: { in: companyIds }, deleted_at: null }, select: { id: true, name: true } }),
   ]);
+  const reservations = await prisma.reservations.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { id: true, folio_id: true, room_name: true }, orderBy: { id: 'asc' } });
+  const users = await prisma.users.findMany({ where: { id: { in: transactions.map((t: any) => t.created_by).filter(Boolean) } }, select: { id: true, name: true } });
 
   const folioMap = new Map(folios.map((f: any) => [f.id, f]));
   const gpMap = new Map(gps.map((g: any) => [g.id, g]));
@@ -1566,10 +1621,10 @@ async function getTransferTransaction(params: any): Promise<any> {
   const startDate = params.startDate || params.date || formatDate(new Date());
   const endDate = params.endDate || startDate;
   const start = new Date(`${startDate}T00:00:00Z`);
-  const end = new Date(`${endDate}T23:59:59Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
 
   const transactions = await prisma.transactions.findMany({
-    where: { property_id: pid, date: { gte: start, lte: end }, is_transfer: 1, deleted_at: null },
+    where: { property_id: pid, date: { gte: start, lte: end }, is_transfer: 1, type_amount: 'MINUS', deleted_at: null },
     select: { id: true, folio_id: true, remark: true, code_name: true, total: true, date: true, created_by: true },
     orderBy: { id: 'asc' },
   });
@@ -1578,35 +1633,40 @@ async function getTransferTransaction(params: any): Promise<any> {
   const cleanedNumbers = Array.from(new Set(transactions.map((t: any) => (t.remark || '').replace('To - ', '')))).filter(Boolean) as string[];
 
   const [folios, toFolios, users] = await Promise.all([
-    prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, folio_number: true } }),
-    prisma.folios.findMany({ where: { folio_number: { in: cleanedNumbers } }, select: { id: true, folio_number: true } }),
+    prisma.folios.findMany({ where: { id: { in: folioIds }, deleted_at: null }, select: { id: true, folio_number: true } }),
+    prisma.folios.findMany({ where: { folio_number: { in: cleanedNumbers }, deleted_at: null }, select: { id: true, folio_number: true } }),
     prisma.users.findMany({ where: { id: { in: transactions.map((t: any) => t.created_by).filter(Boolean) } }, select: { id: true, name: true } }),
   ]);
 
   const allFolioIds = Array.from(new Set([...folioIds, ...toFolios.map((f: any) => f.id)]));
   const reservations = await prisma.reservations.findMany({
-    where: { folio_id: { in: allFolioIds } },
+    where: { folio_id: { in: allFolioIds }, deleted_at: null },
     select: { id: true, folio_id: true, room_name: true, is_posting: true, date: true },
     orderBy: [{ date: 'asc' }, { id: 'asc' }],
   });
 
   const folioMap = new Map(folios.map((f: any) => [f.id, f]));
-  const toFolioMap = new Map(toFolios.map((f: any) => [f.folio_number, f]));
+  // Laravel first() per folio_number = lowest id, deleted_at null
+  const toFolioMap = new Map();
+  for (const f of [...toFolios].sort((a: any, b: any) => Number(a.id) - Number(b.id))) {
+    if (!toFolioMap.has(f.folio_number)) toFolioMap.set(f.folio_number, f);
+  }
   const userMap = new Map(users.map((u: any) => [u.id, u.name]));
 
   const lastReservation = (folioId: any): any => {
     if (folioId == null) return null;
-    for (const r of reservations) {
-      if (r.folio_id === folioId && r.is_posting === 0) return r;
+    const list = reservations.filter((r: any) => r.folio_id === folioId);
+    // Laravel: is_posting=0 orderBy date asc first(); fallback newest date
+    for (const r of list) {
+      if (r.is_posting === 0) return r;
     }
-    return null;
+    return list[list.length - 1] || null;
   };
+  // Laravel folio->reservation first() = lowest id, no is_posting filter
   const firstReservation = (folioId: any): any => {
     if (folioId == null) return null;
-    for (const r of reservations) {
-      if (r.folio_id === folioId) return r;
-    }
-    return null;
+    return reservations.filter((r: any) => r.folio_id === folioId)
+      .sort((a: any, b: any) => Number(a.id) - Number(b.id))[0] || null;
   };
 
   const reportData = transactions.map((t: any) => {
@@ -1707,7 +1767,7 @@ async function getInHouseGuestDetail(params: any): Promise<any> {
     LEFT JOIN cities ci ON g.city_id = ci.id
     WHERE f.property_id = ${pid}
       AND f.type_reservation <> 'vr'
-      AND res.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T23:59:59Z`)}
+      AND res.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T00:00:00Z`)}
       AND r.name IS NOT NULL
     ORDER BY r.name`;
 
@@ -1791,9 +1851,11 @@ async function getRoomUtilizationReport(params: any): Promise<any> {
   const end = new Date(`${endDate}T23:59:59Z`);
 
   const [roomTypes, rooms, folios] = await Promise.all([
-    prisma.room_types.findMany({ where: { property_id: pid, deleted_at: null, status: 1 }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+    // Laravel withOutGlobalScopes: room_types NO deleted_at filter
+    prisma.room_types.findMany({ where: { property_id: pid, status: 1 }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
     prisma.rooms.findMany({ where: { property_id: pid, deleted_at: null, status: 1 }, select: { id: true, name: true, room_type_id: true }, orderBy: { id: 'asc' } }),
-    prisma.folios.findMany({ where: { property_id: pid, deleted_at: null, check_in_date: { gte: start, lte: end } }, select: { id: true, folio_number: true, first_name: true, last_name: true, check_in_date: true, check_out_date: true } }),
+    // Laravel withOutGlobalScopes: folios NO deleted_at filter; DATE(check_in_date) BETWEEN
+    prisma.folios.findMany({ where: { property_id: pid, check_in_date: { gte: start, lte: end } }, select: { id: true, folio_number: true, first_name: true, last_name: true, check_in_date: true, check_out_date: true } }),
   ]);
 
   const folioIds = folios.map((f: any) => f.id);
@@ -3004,13 +3066,33 @@ async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
     include: {
       folios: {
         select: {
-          folio_number: true, first_name: true, last_name: true, company_name: true,
-          reservations: { orderBy: { id: 'desc' }, take: 1, select: { room_type_name: true, room_name: true } },
+          folio_number: true, guest_profile_id: true, company_name: true,
         },
       },
       type_payments: { select: { name: true } },
     },
   });
+
+  const folioIds = [...new Set(transactions.map((t: any) => Number(t.folio_id)).filter(Boolean))];
+  const guestIds = [...new Set(transactions.map((t: any) => Number((t.folios as any)?.guest_profile_id)).filter(Boolean))];
+  const [folioReservations, guestProfiles] = await Promise.all([
+    folioIds.length
+      ? prisma.reservations.findMany({
+          where: { folio_id: { in: folioIds }, deleted_at: null, is_posting: 0 },
+          select: { folio_id: true, date: true, room_type_name: true, room_name: true },
+        })
+      : [],
+    guestIds.length
+      ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } })
+      : [],
+  ]);
+  // Laravel lastReservation() = OLDEST non-posting reservation (orderBy date asc, first)
+  const lastResByFolio = new Map<number, any>();
+  for (const r of folioReservations) {
+    const cur = lastResByFolio.get(Number(r.folio_id));
+    if (!cur || new Date(r.date).getTime() < new Date(cur.date).getTime()) lastResByFolio.set(Number(r.folio_id), r);
+  }
+  const guestById = new Map(guestProfiles.map((g: any) => [Number(g.id), g]));
 
   const creatorIds: any[] = [...new Set(transactions.map((t: any) => t.created_by).filter(Boolean))];
   const users = creatorIds.length
@@ -3023,16 +3105,18 @@ async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
     const pname = String(t.type_payments?.name || 'Unknown').toUpperCase();
     if (!groups[pname]) groups[pname] = { type: pname, transaksi: [], totalAmount: 0, totalSurcharge: 0, total: 0 };
     const g = groups[pname];
-    const sign = cashOnly ? 1 : (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? 1 : -1);
-    const lastRes: any = (t.folios as any)?.reservations?.[0];
-    const guest = [(t.folios as any)?.first_name, (t.folios as any)?.last_name].filter(Boolean).join(' ');
-    const parts = [guest, (t.folios as any)?.company_name || '', lastRes?.room_type_name || '', lastRes?.room_name || '', t.description || ''].filter(Boolean);
+    const folio = (t.folios as any) || {};
+    const sign = cashOnly ? 1 : (t.type_amount === 'MINUS' ? 1 : -1);
+    const gp = folio.guest_profile_id ? guestById.get(Number(folio.guest_profile_id)) : undefined;
+    const guest = gp ? `${gp.first_name || ''} ${gp.last_name || ''}` : '';
+    const lastRes = lastResByFolio.get(Number(t.folio_id));
+    const parts = [guest, folio.company_name || '', lastRes?.room_type_name || '', lastRes?.room_name || '', t.description || ''].filter(Boolean);
     const charge = Number(t.amount || 0) * sign;
     const surcharge = Number(t.surcharge || 0) * sign;
     const total = Number(t.total || 0) * sign;
     g.transaksi.push({
       date: t.date ? formatDateDMY(t.date) : '',
-      folio_number: (t.folios as any)?.folio_number || '-',
+      folio_number: folio.folio_number || '-',
       description: parts.join(' - '),
       staff: userMap.get(t.created_by as any) || 'Unknown',
       card_name: t.card_name || '-',
@@ -3041,9 +3125,10 @@ async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
       surcharge,
       total,
     });
+    // Laravel index: group total = sum of raw AMOUNTS; payment: sum of signed totals
     g.totalAmount += charge;
     g.totalSurcharge += surcharge;
-    g.total += total;
+    g.total += cashOnly ? Number(t.amount || 0) : total;
   }
   const transactionsArr = Object.values(groups);
   const grandTotal = transactionsArr.reduce((s: number, g: any) => s + g.total, 0);
@@ -5364,7 +5449,7 @@ async function getTaxBreakdownSummary(params: any): Promise<any[]> {
   const startDate = params.startDate || params.date || formatDate(new Date());
   const endDate = params.endDate || startDate;
   const start = new Date(`${startDate}T00:00:00Z`);
-  const end = new Date(`${endDate}T23:59:59Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
 
   const rows = await prisma.transaction_breakdowns.groupBy({
     by: ['code'],
@@ -5476,15 +5561,16 @@ async function getInHouseFolioBalHistory(params: any): Promise<any[]> {
     },
     include: {
       company_profiles_folios_company_profile_idTocompany_profiles: true,
-      reservations: { orderBy: { id: 'desc' }, take: 1, include: { room_types: true, rates: true } },
+      // Laravel lastReservation(): oldest non-posting (date asc)
+      reservations: { orderBy: [{ date: 'asc' }, { id: 'asc' }], include: { room_types: true, rates: true } },
     },
   });
 
-  const roomIds = [...new Set(folios.map((f: any) => f.reservations?.[0]?.room_id).filter((v: any) => v !== null && v !== undefined))];
+  const roomIds = [...new Set(folios.map((f: any) => f.reservations?.find((r: any) => r.is_posting === 0)?.room_id).filter((v: any) => v !== null && v !== undefined))];
   const guestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter((v: any) => v !== null && v !== undefined))];
   const parentIds = [...new Set(folios.filter((f: any) => f.type_reservation === 'git' && f.parent && Number(f.parent) !== 0).map((f: any) => f.parent as bigint))];
   const [rooms, guests, parents] = await Promise.all([
-    roomIds.length ? prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, name: true } }) : Promise.resolve([] as any[]),
+    roomIds.length ? prisma.rooms.findMany({ where: { id: { in: roomIds }, deleted_at: null }, select: { id: true, name: true } }) : Promise.resolve([] as any[]),
     guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : Promise.resolve([] as any[]),
     parentIds.length ? prisma.folios.findMany({ where: { id: { in: parentIds } }, select: { id: true, company_profiles_folios_company_profile_idTocompany_profiles: { select: { id: true, name: true, credit_limit: true } } } }) : Promise.resolve([] as any[]),
   ]);
@@ -5494,20 +5580,40 @@ async function getInHouseFolioBalHistory(params: any): Promise<any[]> {
 
   const folioIds = folios.map((f: any) => f.id);
   const txns = folioIds.length
-    ? await prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, type_amount: true, total: true } })
+    ? await prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, model_type: true, type_amount: true, total: true } })
     : [];
-  const balanceByFolio = new Map<string, number>();
-  for (const t of txns) {
-    const key = t.folio_id.toString();
-    const cur = balanceByFolio.get(key) ?? 0;
-    balanceByFolio.set(key, cur + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)));
+  // Laravel getBalance: parent GIT adds child folio (status != cancel) CompanyProfile transactions
+  const childFolios = folioIds.length
+    ? await prisma.folios.findMany({ where: { parent: { in: folioIds }, status_reservation: { not: STATUS_RESERVATION_CANCEL } }, select: { id: true, parent: true } })
+    : [];
+  const childTxns = childFolios.length
+    ? await prisma.transactions.findMany({ where: { folio_id: { in: childFolios.map((c: any) => c.id) }, model_type: 'App\\Models\\CompanyProfile', deleted_at: null }, select: { folio_id: true, type_amount: true, total: true } })
+    : [];
+  const childByParent = new Map<string, bigint[]>();
+  for (const c of childFolios) {
+    const key = String(c.parent);
+    if (!childByParent.has(key)) childByParent.set(key, []);
+    childByParent.get(key)!.push(c.id);
   }
+  const sumSignedTx = (list: any[]) => list.reduce((s: number, t: any) => s + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)), 0);
+  const balanceOf = (folio: any, ownTxns: any[]) => {
+    const isParentGit = String(folio.type_reservation).toLowerCase() === 'git' && Number(folio.parent || 0) === 0;
+    const isSubGit = String(folio.type_reservation).toLowerCase() === 'git' && Number(folio.parent || 0) !== 0;
+    if (isParentGit) {
+      const childIds = childByParent.get(folio.id.toString()) || [];
+      const childSum = sumSignedTx(childTxns.filter((t: any) => childIds.includes(t.folio_id)));
+      return sumSignedTx(ownTxns) + childSum;
+    }
+    if (isSubGit) return sumSignedTx(ownTxns.filter((t: any) => t.model_type === 'App\\Models\\GuestProfile'));
+    return sumSignedTx(ownTxns);
+  };
 
   const grouped: Record<string, any> = {};
   let grandTotal = 0;
   for (const folio of folios) {
-    const res = folio.reservations?.[0];
-    if (!res) continue;
+    // Laravel lastReservation(): oldest non-posting reservation
+    const res = (folio.reservations || []).find((r: any) => r.is_posting === 0);
+    if (!res || !roomById.get(res.room_id)) continue;
     const isSubGit = folio.type_reservation === 'git' && folio.parent && Number(folio.parent) !== 0;
     const parent = isSubGit ? parentById.get(folio.parent as bigint) : null;
     const company: any = parent?.company_profiles_folios_company_profile_idTocompany_profiles || folio.company_profiles_folios_company_profile_idTocompany_profiles;
@@ -5518,7 +5624,7 @@ async function getInHouseFolioBalHistory(params: any): Promise<any[]> {
       || folio.company_profiles_folios_company_profile_idTocompany_profiles?.name
       || 'Unknown';
 
-    const balance = balanceByFolio.get(folio.id.toString()) ?? 0;
+    const balance = balanceOf(folio, txns.filter((t: any) => t.folio_id === folio.id));
     grandTotal += balance;
     if (!grouped[companyId]) {
       grouped[companyId] = { company_name: companyName, folios: [], total_balance: 0, credit_limit: Number(company?.credit_limit ?? 0) };
@@ -7439,16 +7545,34 @@ async function getOwiRevenueReport(params: any): Promise<any[]> {
   const pid = params.propertyId;
   const start = params.startDate || params.date;
   const end = params.endDate || start;
-  const folios = await prisma.folios.findMany({
-    where: { property_id: pid, deleted_at: null, check_in_date: { gte: new Date(`${start}T00:00:00Z`), lte: new Date(`${end}T23:59:59Z`) }, is_walk_in: true },
-    select: { id: true, folio_number: true, first_name: true, last_name: true, check_in_date: true, total_amount: true },
-  });
-  return folios.map((f: any) => ({
-    folio_number: f.folio_number,
-    guest_name: `${f.first_name || ''} ${f.last_name || ''}`.trim(),
-    check_in: f.check_in_date ? formatDate(f.check_in_date) : '',
-    total_amount: Number(f.total_amount),
+  // Laravel OwiRevenueReportController: plain SQL on transaction_breakdowns,
+  // date BETWEEN strings (end-day 00:00 exclusive), GROUP BY date ORDER BY date
+  const rows: any = await prisma.$queryRaw`
+    SELECT date,
+           COALESCE(SUM(amount), 0)::float8 AS amount,
+           COALESCE(SUM(pb1), 0)::float8 AS pb1,
+           COALESCE(SUM(svr_chrg), 0)::float8 AS svr_chrg,
+           COALESCE(SUM(total), 0)::float8 AS total
+    FROM transaction_breakdowns
+    WHERE date >= ${new Date(`${start}T00:00:00Z`)}
+      AND date < ${new Date(`${end}T00:00:00Z`)} + INTERVAL '1 day'
+      AND property_id = ${pid}
+    GROUP BY date
+    ORDER BY date ASC`;
+  const list = (rows || []).map((r: any) => ({
+    date: r.date ? new Date(r.date).toISOString().slice(0, 10) : '',
+    amount: Number(r.amount || 0),
+    pb1: Number(r.pb1 || 0),
+    svr_chrg: Number(r.svr_chrg || 0),
+    total: Number(r.total || 0),
   }));
+  const grandTotals = list.reduce((acc: any, r: any) => ({
+    amount: acc.amount + r.amount,
+    pb1: acc.pb1 + r.pb1,
+    svr_chrg: acc.svr_chrg + r.svr_chrg,
+    total: acc.total + r.total,
+  }), { amount: 0, pb1: 0, svr_chrg: 0, total: 0 });
+  return [{ reportTitle: 'OWI Revenue Report', startDate: start, endDate: end, rows: list, grandTotals }];
 }
 
 async function getOccupancyRevenueReport(params: any): Promise<any[]> {
@@ -8538,32 +8662,33 @@ async function generateDailySalesExcel(res: Response, data: any): Promise<void> 
 
 // ── OWI Revenue Report Excel ──
 async function generateOwiRevenueExcel(res: Response, data: any): Promise<void> {
-  const rows = Array.isArray(data) ? data : [data];
+  const payload = Array.isArray(data) ? data[0] : data;
+  const rows = payload?.rows || [];
+  const gt = payload?.grandTotals || { amount: 0, pb1: 0, svr_chrg: 0, total: 0 };
   const workbook = new ExcelJS.Workbook();
   const ws = workbook.addWorksheet('OWI Revenue');
   const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const nf = (v: any) => Number(v || 0).toFixed(2);
 
   const title = ws.getCell(1, 1);
   title.value = 'OWI REVENUE REPORT';
   title.font = { bold: true, size: 13 };
   title.alignment = { horizontal: 'center' };
-  for (let i = 1; i <= 4; i++) ws.getColumn(i).width = i === 2 ? 30 : 18;
+  for (let i = 1; i <= 5; i++) ws.getColumn(i).width = i === 1 ? 14 : 18;
 
   const hdr = ws.getRow(3);
-  hdr.values = ['Folio Number', 'Guest Name', 'Check In', 'Total Amount'];
+  hdr.values = ['TANGGAL', 'NET REVENUE', 'SERVICE CHARGE', 'TAX PB1', 'TOTAL REVENUE'];
   hdr.font = { bold: true };
   hdr.alignment = { horizontal: 'center' };
   hdr.eachCell((c: any) => { c.border = border; });
 
   let rn = 4;
-  let total = 0;
   for (const r of rows) {
-    total += Number(r.total_amount || 0);
-    ws.getRow(rn).values = [r.folio_number, r.guest_name, r.check_in, nf(Number(r.total_amount || 0))];
+    ws.getRow(rn).values = [r.date ? r.date.slice(8, 10) + '/' + r.date.slice(5, 7) + '/' + r.date.slice(2, 4) : '', nf(r.amount), nf(r.svr_chrg), nf(r.pb1), nf(r.total)];
     ws.getRow(rn).eachCell((c: any) => { c.border = border; });
     rn++;
   }
-  ws.getRow(rn).values = ['TOTAL', '', '', nf(total)];
+  ws.getRow(rn).values = ['Grand Total', nf(gt.amount), nf(gt.svr_chrg), nf(gt.pb1), nf(gt.total)];
   ws.getRow(rn).font = { bold: true };
   ws.getRow(rn).eachCell((c: any) => { c.border = border; });
 
