@@ -947,6 +947,61 @@ async function generateTaxBreakdownDetailExcel(res: Response, data: any): Promis
   res.end();
 }
 
+// ── Tax Breakdown Summary Excel ──
+async function generateTaxBreakdownSummaryExcel(res: Response, data: any): Promise<void> {
+  const rows = data.reportData;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Tax Breakdown Summary');
+
+  // Header row 1: Billing Name
+  const headerRow1 = ws.addRow(['Billing Name']);
+  headerRow1.eachCell((c: any) => {
+    c.font = { bold: true };
+    c.fill = { fgColor: { argb: 'FFE0E0E0' } };
+  });
+
+  // Header row 2: Post Code details
+  const headerRow2 = ws.addRow(['Post Code', 'Amount', 'PB1', 'SVC', 'Surcharge', 'Total']);
+  headerRow2.eachCell((c: any) => {
+    c.font = { bold: true };
+    c.fill = { fgColor: { argb: 'FFE0E0E0' } };
+  });
+
+  // Data rows
+  rows.forEach((row: any) => {
+    const postCodeRows = row.postCodes.map((pc: any) => [
+      pc.name,
+      nf(pc.amount),
+      nf(pc.pb1),
+      nf(pc.svc),
+      nf(pc.surcharge),
+      nf(pc.total),
+    ]);
+    postCodeRows.forEach((pr: any[]) => ws.addRow(pr));
+    // Group total row
+    ws.addRow(['', nf(row.totals.amount), nf(row.totals.pb1), nf(row.totals.svc), nf(row.totals.surcharge), nf(row.totals.total)]);
+  });
+
+  // Grand total row
+  ws.addRow(['Grand Total', nf(data.grandTotals.amount), nf(data.grandTotals.pb1), nf(data.grandTotals.svc), nf(data.grandTotals.surcharge), nf(data.grandTotals.total)]);
+
+  // Payment summary section
+  const paymentSectionHdr = ws.addRow(['Payment Summary', 'Total']);
+  paymentSectionHdr.eachCell((c: any) => {
+    c.font = { bold: true };
+    c.fill = { fgColor: { argb: 'FFE0E0E0' } };
+  });
+  const paymentTotalRow = ws.addRow(['Total Payments', nf(data.totalPayment)]);
+  paymentTotalRow.eachCell((c: any) => {
+    c.font = { bold: true };
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="tax-breakdown-summary.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
 // ── Cash / Payment Detailed Report ──
 // Laravel parity: CashDetailedController (index = cash-only, payment = all payment types)
 // + cash-detailed.blade.php ("Payment Detailed Report", 9 columns, grouped by payment type).
@@ -5526,7 +5581,11 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/frontoffice/daily-revenue-report': getDailyRevenueReport,
   'account/guest-ledger-report': getGuestLedgerReport,
   'account/on-resv-bal': getOnResvBal,
+  'account/on-resbal': getOnResvBal,
+  'account/on-resbal/view': getOnResvBal,
   'batch/after-night-audit/in-house-foliobal': getInHouseFolioBalance,
+  'batch/after-night-audit/on-resbal': getOnResvBal,
+  'batch/after-night-audit/on-resbal/view': getOnResvBal,
   'batch/before-night-audit/before-in-house-foliobal': getInHouseFolioBalance,
   'batch/housekeeping/room-status-report': getRoomStatusReport,
   'batch/housekeeping/block-rooms-report': getBlockRoomsReport,
@@ -5763,6 +5822,34 @@ export class ReportController {
         const data = await reportHandlers[reportKey](params);
 
         if (typeOps === 'view') {
+          if (reportKey === 'account/transaction-report/view') {
+            await generateTransactionReportExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/guest-ledger-report/view') {
+            await generateGuestLedgerExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/daily-statistic/view') {
+            await generateDailyStatisticExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/on-resv-bal/view' || reportKey === 'batch/after-night-audit/on-resbal/view' || reportKey === 'account/on-resv-bal/view' || reportKey === 'account/on-resbal/view') {
+            await generateOnResvBalExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/roomtype-utilization/view') {
+            await generateRoomTypeUtilizationExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/inclusive-items/view') {
+            await generateInclusiveItemsExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/daily-room-forecast/view') {
+            await generateDailyRoomForecastExcel(res, data);
+            return;
+          }
           if (reportKey === 'batch/after-night-audit/room-division' || reportKey === 'batch/after-night-audit/room-division/view') {
             const fileName = 'room-division-report';
             await generateExcel(res, Array.isArray(data) ? data : [data], Object.keys((Array.isArray(data) ? data[0] : data) || {}).map((k) => ({
@@ -5791,8 +5878,28 @@ export class ReportController {
             await generateDailyRevenueExcel(res, data);
             return;
           }
+          if (reportKey === 'account/daily-sales-report/view') {
+            await generateDailySalesExcel(res, data);
+            return;
+          }
           if (reportKey === 'account/tax-breakdown-detail/view') {
             await generateTaxBreakdownDetailExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/tax-breakdown-summary/view') {
+            await generateTaxBreakdownSummaryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/owi-revenue-report/view') {
+            await generateOwiRevenueExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/in-house-folio-bal-history/view') {
+            await generateInHouseFolioBalHistoryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/comission-for-booking/view' || reportKey === 'account/comission-for-booking-company/view') {
+            await generateCommissionForBookingExcel(res, data);
             return;
           }
           if (reportKey.startsWith('account/')) {
@@ -5809,6 +5916,130 @@ export class ReportController {
             })), fileName);
             return;
           }
+          if (reportKey === 'batch/after-night-audit/in-house-folio-balance/view') {
+            await generateInHouseFolioBalanceExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/vacant-rooms/view') {
+            await generateVacantRoomsExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/no-show/view') {
+            await generateNoShowExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/nationality-statistic/view') {
+            await generateNationalityStatisticExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/expected-arrival-summary/view') {
+            await generateExpectedArrivalSummaryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/expected-departure-summary/view') {
+            await generateExpectedDepartureSummaryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/daily-sales-report/view') {
+            await generateFrontOfficeDailySalesExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/daily-revenue-report/view') {
+            await generateFrontOfficeDailyRevenueExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/cancellation-listing/view') {
+            await generateCancellationListingExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/birthday-report/view') {
+            await generateBirthdayReportExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/free-of-charge-detail-report/view') {
+            await generateFreeOfChargeDetailExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/reservations-by-staff/view') {
+            await generateReservationsByStaffExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/room-type-detailed-report/view') {
+            await generateRoomTypeDetailedExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/in-house-guest-listing/view') {
+            await generateInHouseGuestListingExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/room-type-monthly-report/view') {
+            await generateRoomTypeMonthlyExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/same-day-check-out-check-in-report/view') {
+            await generateSameDayCheckOutCheckInExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/transaction-by-staff-report/view') {
+            await generateTransactionByStaffFOExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/housekeeping/room-status-report/view') {
+            await generateRoomStatusReportExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/housekeeping/block-rooms-report/view') {
+            await generateBlockRoomsReportExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/housekeeping/room-change-history/view') {
+            await generateRoomChangeHistoryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/before-night-audit/before-in-house-foliobal/view') {
+            await generateInHouseFolioBalanceExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/before-night-audit/rate-code-analysis/view') {
+            await generateRateCodeAnalysisExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/before-night-audit/vacant-and-dirty-rooms/view') {
+            await generateVacantAndDirtyRoomsExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/before-night-audit/breakfast-report/view') {
+            await generateBreakfastReportExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/before-night-audit/room-revenue-breakdown/view') {
+            await generateRoomRevenueBreakdownExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/sales-marketing/all-companies-room-revenue/view') {
+            await generateAllCompaniesRoomRevenueExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/sales-marketing/all-companies-room-revenue-breakdown-report/view') {
+            await generateAllCompaniesRoomRevenueBreakdownExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/sales-marketing/market-segmentation-report/view') {
+            await generateMarketSegmentationExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/sales-marketing/nationality-statistics-detailed/view') {
+            await generateNationalityStatisticsDetailedExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/sales-marketing/staff-sales-summary/view') {
+            await generateStaffSalesSummaryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/sales-marketing/room-occupancy-chart/view') {
+            await generateRoomOccupancyChartExcel(res, data);
+            return;
+          }
           if (reportKey.startsWith('batch/')) {
             const baseKey = reportKey.replace('/view', '');
             const fileName = baseKey.replace('/', '-');
@@ -5816,6 +6047,14 @@ export class ReportController {
               header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
               key: k,
             })), fileName);
+            return;
+          }
+          if (reportKey === 'occupancy-revenue-report/view') {
+            await generateOccupancyRevenueReportExcel(res, data);
+            return;
+          }
+          if (reportKey === 'financial-report/view') {
+            await generateFinancialReportExcel(res, data);
             return;
           }
           if (['occupancy-revenue-report', 'financial-report'].includes(reportKey.replace('/view', ''))) {
@@ -6241,3 +6480,1673 @@ export class ReportController {
   }
 }
 
+
+async function generateDailySalesExcel(res: Response, data: any): Promise<void> {
+}
+
+// ── OWI Revenue Report Excel ──
+async function generateOwiRevenueExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('OWI Revenue');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+
+  const title = ws.getCell(1, 1);
+  title.value = 'OWI REVENUE REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  for (let i = 1; i <= 4; i++) ws.getColumn(i).width = i === 2 ? 30 : 18;
+
+  const hdr = ws.getRow(3);
+  hdr.values = ['Folio Number', 'Guest Name', 'Check In', 'Total Amount'];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+
+  let rn = 4;
+  let total = 0;
+  for (const r of rows) {
+    total += Number(r.total_amount || 0);
+    ws.getRow(rn).values = [r.folio_number, r.guest_name, r.check_in, nf(Number(r.total_amount || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['TOTAL', '', '', nf(total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="owi-revenue-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── In House Folio Bal History Excel ──
+async function generateInHouseFolioBalHistoryExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('In House Folio Balances');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio', 'Room Type', 'Room', 'Guest', 'Group', 'Arrival', 'Departure', 'Rate Code', 'Balance'];
+
+  const title = ws.getCell(1, 1);
+  title.value = String(row.reportTitle || 'IN HOUSE FOLIO BALANCES').toUpperCase();
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  const dateRow = ws.getRow(2);
+  dateRow.getCell(1).value = `For Business Date: ${row.reportDate || row.startDate || ''}`;
+  dateRow.getCell(1).font = { bold: true };
+  for (let i = 1; i <= HEADERS.length; i++) ws.getColumn(i).width = i === 4 ? 28 : 15;
+
+  const hdr = ws.getRow(4);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+
+  let rn = 5;
+  for (const g of row.reportData || []) {
+    ws.getRow(rn).values = [g.company_name, '', '', '', '', '', '', '', ''];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const f of g.folios || []) {
+      ws.getRow(rn).values = ['', f.folio, f.room_type, f.room, f.guest, f.group_name, f.arrival, f.departure, f.rate_code, nf(f.balance)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'Total Balance', '', '', '', '', '', '', nf(g.total_balance)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    if (g.credit_limit) {
+      rn++;
+      ws.getRow(rn).values = ['', 'Credit Limit', '', '', '', '', '', '', nf(g.credit_limit)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    }
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'GRAND TOTAL', '', '', '', '', '', '', nf(row.grandTotal || 0)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="in-house-folio-bal-history.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Commission For Booking Excel (agent / agent+company) ──
+async function generateCommissionForBookingExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Commission For Booking');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio No', 'Check In', 'Check Out', 'Guest Name', 'Charges', 'Payable Commission'];
+
+  const title = ws.getCell(1, 1);
+  title.value = String(row.reportTitle || 'COMMISSION FOR BOOKING AGENT REPORT').toUpperCase();
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  const periodRow = ws.getRow(2);
+  periodRow.getCell(1).value = `Period: ${row.reportStartDate || ''} - ${row.reportEndDate || ''}`;
+  periodRow.getCell(1).font = { bold: true };
+  for (let i = 1; i <= HEADERS.length; i++) ws.getColumn(i).width = i === 4 ? 28 : 15;
+
+  let rn = 4;
+  const groups = Object.values(row.groupedData || {});
+  for (const g of groups as any[]) {
+    ws.getRow(rn).values = [`Agent: ${g.agentInfo?.name || 'N/A'}`];
+    ws.getRow(rn).font = { bold: true };
+    rn++;
+    ws.getRow(rn).values = [`Commission Rate: ${g.agentInfo?.commissionRate ?? 0}%`, `Account No: ${g.agentInfo?.accountNo || 'N/A'}`, `Business Reg: ${g.agentInfo?.businessReg || 'N/A'}`, `Address: ${g.agentInfo?.address || 'N/A'}`];
+    rn++;
+    if (g.companyInfo) {
+      ws.getRow(rn).values = [`Company: ${g.companyInfo?.name || 'N/A'}`, `Account No: ${g.companyInfo?.accountNo || 'N/A'}`, `Address: ${g.companyInfo?.address || 'N/A'}`];
+      rn++;
+    }
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const f of g.folios || []) {
+      ws.getRow(rn).values = ['', f.folioNo, f.checkInDate, f.checkOutDate, f.guestName, nf(f.charges), nf(f.payableCommission)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', '', nf(g.totalCharges || 0), nf(g.totalCommission || 0)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn += 2;
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="comission-for-booking.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── In House Folio Balance Excel ──
+async function generateInHouseFolioBalanceExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('In House Folio Balance');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio Number', 'Guest Name', 'Room', 'Room Type', 'Check In', 'Check Out', 'Total Amount'];
+  const widths = [16, 28, 14, 14, 12, 12, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'IN HOUSE FOLIO BALANCE';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let total = 0;
+  for (const r of rows) {
+    total += Number(r.total_amount || 0);
+    ws.getRow(rn).values = ['', r.folio_number, r.guest_name, r.room_name, r.room_type, r.check_in, r.check_out, nf(Number(r.total_amount || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', nf(total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="in-house-folio-balance.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Vacant Rooms Excel ──
+async function generateVacantRoomsExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Vacant Rooms');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room', 'Room Type', 'Floor', 'Status'];
+  const widths = [16, 16, 12, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'VACANT ROOMS';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.room_name, r.room_type, r.floor, r.status];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="vacant-rooms.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── No Show Excel ──
+async function generateNoShowExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('No Show');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio Number', 'Guest Name', 'Room Type', 'Check In', 'Check Out', 'Company'];
+  const widths = [16, 28, 14, 12, 12, 24];
+  const title = ws.getCell(1, 1);
+  title.value = 'NO SHOW';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.folio_number, r.guest_name, r.room_type, r.check_in, r.check_out, r.company];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="no-show.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Nationality Statistic Excel ──
+async function generateNationalityStatisticExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Nationality Statistic');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Nationality', 'Country', 'Count'];
+  const widths = [30, 30, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'NATIONALITY STATISTIC';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let total = 0;
+  for (const r of rows) {
+    total += Number(r.count || 0);
+    ws.getRow(rn).values = ['', r.nationality, r.country, Number(r.count || 0)];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', total];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="nationality-statistic.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Expected Arrival Summary Excel ──
+async function generateExpectedArrivalSummaryExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Expected Arrival Summary');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio Number', 'Guest Name', 'Room Type', 'Night', 'Adult', 'Child', 'Company', 'Status'];
+  const widths = [16, 28, 14, 8, 8, 8, 24, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'EXPECTED ARRIVAL SUMMARY';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tNight = 0, tAdult = 0, tChild = 0;
+  for (const r of rows) {
+    tNight += Number(r.night || 0);
+    tAdult += Number(r.adult || 0);
+    tChild += Number(r.child || 0);
+    ws.getRow(rn).values = ['', r.folio_number, r.guest_name, r.room_type, Number(r.night || 0), Number(r.adult || 0), Number(r.child || 0), r.company, r.status];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', tNight, tAdult, tChild, '', ''];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="expected-arrival-summary.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Expected Departure Summary Excel ──
+async function generateExpectedDepartureSummaryExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Expected Departure Summary');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio Number', 'Guest Name', 'Room', 'Room Type', 'Check Out', 'Company', 'Total Amount'];
+  const widths = [16, 28, 14, 14, 12, 24, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'EXPECTED DEPARTURE SUMMARY';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let total = 0;
+  for (const r of rows) {
+    total += Number(r.total_amount || 0);
+    ws.getRow(rn).values = ['', r.folio_number, r.guest_name, r.room_name, r.room_type, r.check_out, r.company, nf(Number(r.total_amount || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', nf(total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="expected-departure-summary.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Front Office Daily Sales Excel ──
+async function generateFrontOfficeDailySalesExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Daily Sales');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'Transaction Count', 'Total Sales', 'Cash', 'Non Cash'];
+  const widths = [14, 18, 18, 16, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'DAILY SALES REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tCount = 0, tTotal = 0, tCash = 0, tNonCash = 0;
+  for (const r of rows) {
+    tCount += Number(r.transaction_count || 0);
+    tTotal += Number(r.total_sales || 0);
+    tCash += Number(r.cash || 0);
+    tNonCash += Number(r.non_cash || 0);
+    ws.getRow(rn).values = ['', r.date, Number(r.transaction_count || 0), nf(Number(r.total_sales || 0)), nf(Number(r.cash || 0)), nf(Number(r.non_cash || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', tCount, nf(tTotal), nf(tCash), nf(tNonCash)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-sales-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Front Office Daily Revenue Excel ──
+async function generateFrontOfficeDailyRevenueExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Daily Revenue');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'Invoice Count', 'Total Revenue', 'PB1', 'Service Charge'];
+  const widths = [14, 16, 18, 16, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'DAILY REVENUE REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tCount = 0, tRev = 0, tPb1 = 0, tSvc = 0;
+  for (const r of rows) {
+    tCount += Number(r.invoice_count || 0);
+    tRev += Number(r.total_revenue || 0);
+    tPb1 += Number(r.pb1 || 0);
+    tSvc += Number(r.service_charge || 0);
+    ws.getRow(rn).values = ['', r.date, Number(r.invoice_count || 0), nf(Number(r.total_revenue || 0)), nf(Number(r.pb1 || 0)), nf(Number(r.service_charge || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', tCount, nf(tRev), nf(tPb1), nf(tSvc)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-revenue-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Cancellation Listing Excel ──
+async function generateCancellationListingExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.reportData || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Cancellation Listing');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Res Type', 'Folio', 'Guest', 'Company', 'Room Type', 'Rate Code', 'Adult', 'Child', 'Check In', 'Check Out', 'Rate', 'Cancellation Staff', 'Cancellation Date', 'Reason'];
+  const widths = [10, 14, 22, 20, 14, 12, 8, 8, 12, 12, 14, 16, 18, 24];
+  const title = ws.getCell(1, 1);
+  title.value = 'CANCELLATION LISTING';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tRate = 0;
+  for (const r of rows) {
+    tRate += Number(r.rate || 0);
+    ws.getRow(rn).values = ['', r.resType, r.folio, r.guest, r.company, r.roomType, r.rateCode, r.adult, r.child, r.checkInDate, r.checkOutDate, nf(Number(r.rate || 0)), r.cancellationStaff, r.cancellationDate, r.cancellationReason];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', '', '', '', '', '', nf(tRate), '', '', ''];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="cancellation-listing.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Birthday Report Excel ──
+async function generateBirthdayReportExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.reportData || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Birthday Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Guest Name', 'Date Of Birth', 'Folio No', 'Room Unit'];
+  const widths = [28, 20, 16, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'BIRTHDAY REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.guestName, r.dateOfBirth, r.folioNo, r.roomUnit];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="birthday-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Free Of Charge Detail Excel ──
+async function generateFreeOfChargeDetailExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Free Of Charge Detail');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Res Type', 'Folio', 'Guest', 'Company', 'Room', 'Room Type', 'Rate', 'Adult', 'Child', 'Check In', 'Check Out'];
+  const widths = [10, 14, 22, 20, 14, 14, 14, 8, 8, 12, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'FREE OF CHARGE DETAIL REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  const dump = (g: any[]) => {
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const r of g) {
+      ws.getRow(rn).values = ['', r.resType, r.folio, r.guest, r.company, r.room, r.roomType, nf(Number(r.rate || 0)), r.adult, r.child, r.checkInDate, r.checkOutDate];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+  };
+  for (const groupName of Object.keys(row.reportData || {})) {
+    ws.getRow(rn).values = [groupName];
+    ws.getRow(rn).font = { bold: true };
+    rn++;
+    const byType = row.reportData[groupName] || {};
+    for (const typeName of Object.keys(byType)) {
+      ws.getRow(rn).values = [`${typeName} (${(byType[typeName] || []).length})`];
+      ws.getRow(rn).font = { bold: true };
+      rn++;
+      dump(byType[typeName] || []);
+    }
+  }
+  const s = row.summary || {};
+  ws.getRow(rn).values = ['SUMMARY'];
+  ws.getRow(rn).font = { bold: true };
+  rn++;
+  ws.getRow(rn).values = ['No Of Folios', s.noOfFolios ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total COMP Room', s.totalCOMPRoom ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total HSE Room', s.totalHSERoom ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total CRT Room', s.totalCRTRoom ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total CRD Room', s.totalCRDRoom ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total BRD Room', s.totalBRDRoom ?? 0];
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="free-of-charge-detail-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Reservations By Staff Excel ──
+async function generateReservationsByStaffExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Reservations By Staff');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Res Type', 'Folio', 'Guest', 'Company', 'Stay', 'Room', 'Room Type', 'Adult', 'Child', 'Check In', 'Check Out', 'Rate Code', 'First Night Rate', 'Res Status', 'Res Date'];
+  const widths = [10, 14, 22, 20, 8, 14, 14, 8, 8, 12, 12, 12, 14, 10, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'RESERVATIONS BY STAFF';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const g of (Object.values(row.reportData || {}) as any[])) {
+    ws.getRow(rn).values = [g.staffName || 'Unknown Staff'];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    let tRate = 0;
+    for (const r of g.folios || []) {
+      tRate += Number(r.firstNightRate || 0);
+      ws.getRow(rn).values = ['', r.resType, r.folio, r.guest, r.company, r.stay, r.room, r.roomType, r.adult, r.child, r.checkInDate, r.checkOutDate, r.rateCode, nf(Number(r.firstNightRate || 0)), r.resStatus, r.resDate];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL RESERVATIONS', '', '', '', '', '', '', '', '', '', '', '', nf(tRate), '', ''];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    if ((g.cancelledFolios || []).length) {
+      ws.getRow(rn).values = [`CANCELLED (${g.cancelledFolios.length})`];
+      ws.getRow(rn).font = { bold: true };
+      rn++;
+      for (const r of g.cancelledFolios) {
+        ws.getRow(rn).values = ['', r.resType, r.folio, r.guest, r.company, r.stay, r.room, r.roomType, r.adult, r.child, r.checkInDate, r.checkOutDate, r.rateCode, nf(Number(r.firstNightRate || 0)), '', r.cancellationDate];
+        ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+        rn++;
+      }
+      rn++;
+    }
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="reservations-by-staff.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Type Detailed Excel ──
+async function generateRoomTypeDetailedExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Type Detailed');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room Type', 'Total Room', 'Block', 'NG Arr', 'NG Dep', 'NG Sty', 'NG Rev', 'G Arr', 'G Dep', 'G Sty', 'G Rev', 'T Arr', 'T Dep', 'T Sty', 'T Rev', 'Occ Rooms', 'Occupancy %', 'Ave Nett Rev'];
+  const widths = [16, 10, 8, 8, 8, 8, 14, 8, 8, 8, 14, 8, 8, 8, 14, 10, 10, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'ROOM TYPE DETAILED REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const day of row.reportData || []) {
+    ws.getRow(rn).values = [day.date];
+    ws.getRow(rn).font = { bold: true };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const rt of day.room_types || []) {
+      ws.getRow(rn).values = ['', rt.room_type, rt.total_room, rt.block, rt.non_grp_arr, rt.non_grp_dep, rt.non_grp_sty, nf(Number(rt.non_grp_revenue || 0)), rt.grp_arr, rt.grp_dep, rt.grp_sty, nf(Number(rt.grp_revenue || 0)), rt.total_arr, rt.total_dep, rt.total_sty, nf(Number(rt.total_revenue || 0)), rt.occupied_rooms, Number(rt.occupancy || 0).toFixed(2), nf(Number(rt.ave_nett_revenue || 0))];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    const t = day.totals || {};
+    ws.getRow(rn).values = ['', 'TOTAL', t.total_room, t.block, t.non_grp_arr, t.non_grp_dep, t.non_grp_sty, nf(Number(t.non_grp_revenue || 0)), t.grp_arr, t.grp_dep, t.grp_sty, nf(Number(t.grp_revenue || 0)), t.total_arr, t.total_dep, t.total_sty, nf(Number(t.total_revenue || 0)), t.occupied_rooms, Number(t.occupancy || 0).toFixed(2), nf(Number(t.ave_nett_revenue || 0))];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn += 2;
+  }
+  const g = row.grandTotal || {};
+  ws.getRow(rn).values = ['GRAND TOTAL', g.total_room, g.block, g.non_grp_arr, g.non_grp_dep, g.non_grp_sty, nf(Number(g.non_grp_revenue || 0)), g.grp_arr, g.grp_dep, g.grp_sty, nf(Number(g.grp_revenue || 0)), g.total_arr, g.total_dep, g.total_sty, nf(Number(g.total_revenue || 0)), g.occupied_rooms, Number(g.occupancy || 0).toFixed(2), nf(Number(g.ave_nett_revenue || 0))];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-type-detailed-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── In House Guest Listing Excel ──
+async function generateInHouseGuestListingExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('In House Guest Listing');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room', 'Adult', 'Child'];
+  const widths = [16, 10, 10];
+  const title = ws.getCell(1, 1);
+  title.value = 'IN HOUSE GUEST LISTING';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tAdult = 0, tChild = 0;
+  for (const r of row.folios || []) {
+    tAdult += Number(r.adult || 0);
+    tChild += Number(r.child || 0);
+    ws.getRow(rn).values = ['', r.room_name, Number(r.adult || 0), Number(r.child || 0)];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', tAdult, tChild];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn += 2;
+  const s = row.summary || {};
+  ws.getRow(rn).values = ['SUMMARY'];
+  ws.getRow(rn).font = { bold: true };
+  rn++;
+  for (const k of [['No Of Folios', s.no_of_folios], ['Total Adults', s.total_adults], ['Total Child', s.total_child], ['Total COMP Room', s.total_comp_room], ['Total HSE Room', s.total_hse_room], ['Total CRT Room', s.total_crt_room], ['Total CRD Room', s.total_crd_room], ['Total BRD Room', s.total_brd_room]]) {
+    ws.getRow(rn).values = k;
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="in-house-guest-listing.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Type Monthly Excel ──
+async function generateRoomTypeMonthlyExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Type Monthly');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room Type', 'Total Room', 'Block', 'NG Arr', 'NG Dep', 'NG Sty', 'NG Rev', 'G Arr', 'G Dep', 'G Sty', 'G Rev', 'T Arr', 'T Dep', 'T Sty', 'T Rev', 'Occ Rooms', 'Ave Nett Rev', 'Occupancy %'];
+  const widths = [16, 10, 8, 8, 8, 8, 14, 8, 8, 8, 14, 8, 8, 8, 14, 10, 14, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'ROOM TYPE MONTHLY REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  const cell = (rt: any, side: string, k: string) => (rt[side] || {})[k] ?? 0;
+  for (const [name, rt] of (Object.entries(row.reportData || {}) as any[])) {
+    ws.getRow(rn).values = ['', name, rt.totalRoom, rt.block, cell(rt, 'nonGrp', 'arr'), cell(rt, 'nonGrp', 'dep'), cell(rt, 'nonGrp', 'sty'), nf(Number(cell(rt, 'nonGrp', 'revenue') || 0)), cell(rt, 'grp', 'arr'), cell(rt, 'grp', 'dep'), cell(rt, 'grp', 'sty'), nf(Number(cell(rt, 'grp', 'revenue') || 0)), cell(rt, 'total', 'arr'), cell(rt, 'total', 'dep'), cell(rt, 'total', 'sty'), nf(Number(cell(rt, 'total', 'revenue') || 0)), rt.occupiedRooms, nf(Number(rt.aveNettRevenue || 0)), Number(rt.occupancy || 0).toFixed(2)];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  const g = row.grandTotal || {};
+  ws.getRow(rn).values = ['', 'TOTAL', g.totalRoom, g.block, cell(g, 'nonGrp', 'arr'), cell(g, 'nonGrp', 'dep'), cell(g, 'nonGrp', 'sty'), nf(Number(cell(g, 'nonGrp', 'revenue') || 0)), cell(g, 'grp', 'arr'), cell(g, 'grp', 'dep'), cell(g, 'grp', 'sty'), nf(Number(cell(g, 'grp', 'revenue') || 0)), cell(g, 'total', 'arr'), cell(g, 'total', 'dep'), cell(g, 'total', 'sty'), nf(Number(cell(g, 'total', 'revenue') || 0)), g.occupiedRooms, nf(Number(g.aveNettRevenue || 0)), Number(g.occupancy || 0).toFixed(2)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-type-monthly-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Same Day Check Out / Check In Excel ──
+async function generateSameDayCheckOutCheckInExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.reportData || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Same Day Check Out / Check In');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Guest Name', 'From Company', 'From Folio No', 'From Rate Code', 'From Room Rate', 'To Company', 'To Folio No', 'To Rate Code', 'To Room Rate', 'Check Out Date'];
+  const widths = [22, 18, 14, 12, 14, 18, 14, 12, 14, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'SAME DAY CHECK OUT / CHECK IN REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.guestName, r.fromCompany, r.fromFolioNo, r.fromRateCode, nf(Number(r.fromRoomRate || 0)), r.toCompany, r.toFolioNo, r.toRateCode, nf(Number(r.toRoomRate || 0)), r.checkOutDate ? formatDate(r.checkOutDate) : ''];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="same-day-check-out-check-in-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Transaction By Staff (FO) Excel ──
+async function generateTransactionByStaffFOExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Transaction By Staff');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio', 'Room', 'Guest', 'Post Date/Time', 'Description', 'Card Name', 'Last Digit', 'Total'];
+  const widths = [14, 14, 22, 20, 34, 14, 10, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'TRANSACTION BY STAFF REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  const staffRow = ws.getRow(2);
+  staffRow.getCell(1).value = `Staff: ${row.staffName || ''}  |  Date: ${row.date || ''}`;
+  staffRow.getCell(1).font = { bold: true };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 4;
+  let grandTotal = 0;
+  for (const g of row.reportData || []) {
+    ws.getRow(rn).values = [g.type];
+    ws.getRow(rn).font = { bold: true };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const t of g.transactions || []) {
+      ws.getRow(rn).values = ['', t.folio, t.room, t.guest, t.postDateTime, t.description, t.card_name, t.last_digit_card, nf(Number(t.total || 0))];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', '', nf(Number(g.total || 0))];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    grandTotal += Number(g.total || 0);
+    rn += 2;
+  }
+  ws.getRow(rn).values = ['GRAND TOTAL', '', '', '', '', '', '', nf(grandTotal)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="transaction-by-staff-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Status Report Excel ──
+async function generateRoomStatusReportExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.rooms || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Status Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Building', 'Floor', 'Room', 'Room Type', 'Room Status', 'Maid Status'];
+  const widths = [18, 12, 14, 16, 14, 14];
+  const title = ws.getCell(1, 1);
+  title.value = `ROOM STATUS REPORT (${row.reportDate || ''})`;
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.building, r.floor, r.room, r.roomType, r.roomStatus, r.maidStatus];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  rn++;
+  ws.getRow(rn).values = ['Total Rooms', row.totalRooms ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total Occupied', row.totalOccupied ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total Clean Rooms', row.totalCleanRooms ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Total Dirty Rooms', row.totalDirtyRooms ?? 0];
+  rn++;
+  ws.getRow(rn).values = ['Percent Clean Rooms', row.percentCleanRooms ?? 0];
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-status-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Block Rooms Report Excel ──
+async function generateBlockRoomsReportExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Block Rooms Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room', 'Type', 'Reason', 'User', 'Block Time'];
+  const widths = [16, 16, 20, 20, 22];
+  const title = ws.getCell(1, 1);
+  title.value = 'BLOCK ROOMS REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const [date, items] of (Object.entries(row.reportData || {}) as any[])) {
+    ws.getRow(rn).values = [date];
+    ws.getRow(rn).font = { bold: true };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const r of items) {
+      ws.getRow(rn).values = ['', r.room, r.type, r.reason, r.user, r.blockTime];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="block-rooms-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Change History Excel ──
+async function generateRoomChangeHistoryExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.roomChanges || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Change History');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio Number', 'Check In', 'Check Out', 'From Room', 'To Room', 'Changed By', 'Changed Date', 'Reason'];
+  const widths = [16, 12, 12, 14, 14, 18, 20, 24];
+  const title = ws.getCell(1, 1);
+  title.value = 'ROOM CHANGE HISTORY';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.folio_number, r.check_in_date, r.check_out_date, r.from_room_name, r.to_room_name, r.changed_by, r.changed_date, r.reason];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-change-history.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Rate Code Analysis Excel ──
+async function generateRateCodeAnalysisExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Rate Code Analysis');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room', 'Room Type', 'Folio', 'Guest', 'Company', 'Old Rate Code', 'Old Rate', 'Override Reason', 'Nett Rate', 'AD', 'CH'];
+  const widths = [12, 14, 14, 22, 22, 14, 12, 16, 14, 8, 8];
+  const title = ws.getCell(1, 1);
+  title.value = `RATE CODE ANALYSIS (${row.businessDate || ''})`;
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  let gRooms = 0, gNet = 0, gAd = 0, gCh = 0;
+  for (const g of (row.data || [])) {
+    ws.getRow(rn).values = [`${g.rate_code} - ${g.description}`];
+    ws.getRow(rn).font = { bold: true };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const f of g.folios || []) {
+      ws.getRow(rn).values = ['', f.rm, f.rm_type, f.folio, f.guest, f.company_group_name, f.old_rate_code, f.old_rate, f.override_reason, nf(Number(f.nett_rate || 0)), f.ad, f.ch];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', '', '', nf(Number(g.totals?.nett_rate || 0)), g.totals?.rooms, g.totals?.ad, g.totals?.ch];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    gRooms += Number(g.totals?.rooms || 0);
+    gNet += Number(g.totals?.nett_rate || 0);
+    gAd += Number(g.totals?.ad || 0);
+    gCh += Number(g.totals?.ch || 0);
+    rn += 2;
+  }
+  ws.getRow(rn).values = ['REPORT TOTAL', '', '', '', '', '', '', '', nf(gNet), gRooms, gAd, gCh];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+  ws.getRow(rn).values = ['AVERAGE ROOM RATE', '', '', '', '', '', '', '', nf(Number(row.averageRoomRate || 0))];
+  ws.getRow(rn).font = { bold: true };
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="rate-code-analysis.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Vacant And Dirty Rooms Excel ──
+async function generateVacantAndDirtyRoomsExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.rooms || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Vacant And Dirty Rooms');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Building', 'Floor', 'Room', 'Room Type', 'Room Status', 'Maid Status', 'Checkout Date/Time'];
+  const widths = [18, 12, 14, 16, 14, 14, 22];
+  const title = ws.getCell(1, 1);
+  title.value = `VACANT AND DIRTY ROOMS (${row.report_date || ''})`;
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.building, r.floor, r.room, r.room_type, r.room_status, r.maid_status, r.checkout_date_time];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL VACANT DIRTY ROOMS', '', '', '', '', rows.length];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="vacant-and-dirty-rooms.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Breakfast Report Excel ──
+async function generateBreakfastReportExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Breakfast Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room', 'Folio', 'Name', 'Company', 'Description', 'Adult', 'Child', 'Arrival Date', 'Dep.Date', 'Status', 'Frequency', 'Sales'];
+  const widths = [12, 14, 22, 22, 26, 8, 8, 12, 12, 12, 12, 14];
+  const title = ws.getCell(1, 1);
+  title.value = `BREAKFAST REPORT (${row.businessDate || ''})`;
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  const section = (label: string, items: any[], totals: any) => {
+    ws.getRow(rn).values = [label];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const b of items) {
+      ws.getRow(rn).values = ['', b.Room, b.Folio, b.Name, b.Company, b.Description, b.Adult, b.Child, b['Arrival Date'], b['Dep.Date'], b.Status, b.Frequency, nf(Number(b.sales || 0))];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', totals.adults, totals.children, '', '', totals.rooms, totals.numberOfFolio, nf(totals.totalSales)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn += 2;
+  };
+  section('ADDITIONAL BREAKFAST', row.additionalBreakfast || [], {
+    adults: row.additionalAdults ?? 0, children: row.additionalChildren ?? 0, rooms: row.additionalRooms ?? 0, numberOfFolio: row.additionalnumberOfFolio ?? 0, totalSales: row.additionaltotalSales ?? 0,
+  });
+  section('INCLUSIVE BREAKFAST', row.inclusiveBreakfast || [], {
+    adults: row.inclusiveAdults ?? 0, children: row.inclusiveChildren ?? 0, rooms: row.inclusiveRooms ?? 0, numberOfFolio: row.inclusivenumberOfFolio ?? 0, totalSales: row.inclusivetotalSales ?? 0,
+  });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="breakfast-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Revenue Breakdown Excel ──
+async function generateRoomRevenueBreakdownExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const rows = row.breakdowns || [];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Revenue Breakdown');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio', 'Unit', 'Rate Code', 'Rate', 'Room', 'Add Bed', 'Breakfast', 'Lunch', 'Dinner', 'Other', 'Arrival', 'Departure', 'Guest Name', 'Company', 'Segmentation', 'Source'];
+  const widths = [14, 12, 12, 12, 12, 10, 12, 10, 10, 10, 12, 12, 22, 22, 16, 14];
+  const title = ws.getCell(1, 1);
+  title.value = `ROOM REVENUE BREAKDOWN (${row.reportDate || ''})`;
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of rows) {
+    ws.getRow(rn).values = ['', r.folio, r.unit, r.rateCode, nf(Number(r.rate || 0)), nf(Number(r.room || 0)), nf(Number(r.addBed || 0)), nf(Number(r.breakfast || 0)), nf(Number(r.lunch || 0)), nf(Number(r.dinner || 0)), nf(Number(r.other || 0)), r.arrival, r.departure, r.guestName, r.company, r.segmentation, r.source];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL RATE', '', '', nf(Number(row.totalRate || 0))];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-revenue-breakdown.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── All Companies Room Revenue Excel ──
+async function generateAllCompaniesRoomRevenueExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('All Companies Room Revenue');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio No', 'Room No', 'Guest Name', 'Arrival Date', 'Dep Date', 'Room Nights', 'Nett Revenue', 'ANR', 'Gross Revenue', 'AGR'];
+  const widths = [14, 12, 22, 12, 12, 12, 14, 12, 14, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'ALL COMPANIES ROOM REVENUE';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const c of row.companies || []) {
+    ws.getRow(rn).values = [c.name];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c2: any) => { c2.border = border; });
+    rn++;
+    for (const f of (Object.values(c.folios || {}) as any[])) {
+      const d = (v: any) => v ? formatDate(v) : '';
+      ws.getRow(rn).values = ['', f.folioNo, f.roomNo, f.guestName, d(f.arrivalDate), d(f.depDate), f.roomNights, nf(Number(f.nettRevenue || 0)), nf(Number(f.anr || 0)), nf(Number(f.grossRevenue || 0)), nf(Number(f.agr || 0))];
+      ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', '', '', c.total?.roomNights, nf(Number(c.total?.nettRevenue || 0)), nf(Number(c.total?.anr || 0)), nf(Number(c.total?.grossRevenue || 0)), nf(Number(c.total?.agr || 0))];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+    rn += 2;
+  }
+  const g = row.grandTotal || {};
+  ws.getRow(rn).values = ['GRAND TOTAL', '', '', '', '', g.roomNights, nf(Number(g.nettRevenue || 0)), nf(Number(g.anr || 0)), nf(Number(g.grossRevenue || 0)), nf(Number(g.agr || 0))];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="all-companies-room-revenue.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── All Companies Room Revenue Breakdown Excel ──
+async function generateAllCompaniesRoomRevenueBreakdownExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('All Companies Room Revenue Breakdown');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Company', 'Folios', 'Room Nights', 'Revenue'];
+  const widths = [34, 12, 14, 18];
+  const title = ws.getCell(1, 1);
+  title.value = 'ALL COMPANIES ROOM REVENUE BREAKDOWN';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tFolios = 0, tNights = 0, tRev = 0;
+  for (const r of rows) {
+    tFolios += Number(r.folios || 0);
+    tNights += Number(r.room_nights || 0);
+    tRev += Number(r.revenue || 0);
+    ws.getRow(rn).values = ['', r.company, Number(r.folios || 0), Number(r.room_nights || 0), nf(Number(r.revenue || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', tFolios, tNights, nf(tRev)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="all-companies-room-revenue-breakdown-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Market Segmentation Excel ──
+async function generateMarketSegmentationExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Market Segmentation');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Company', 'Nationality', 'Nights', 'Nett Revenue', 'Gross Revenue', 'ANR', 'AGR'];
+  const widths = [30, 18, 10, 16, 16, 14, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'MARKET SEGMENTATION REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const [segName, companies] of Object.entries(row.data || {} as any)) {
+    ws.getRow(rn).values = [segName];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    let tNights = 0, tNet = 0, tGross = 0;
+    for (const [compName, c] of (Object.entries(companies as any) as any[])) {
+      tNights += Number(c.nights || 0);
+      tNet += Number(c.nettRevenue || 0);
+      tGross += Number(c.grossRevenue || 0);
+      ws.getRow(rn).values = ['', compName, c.nationality, Number(c.nights || 0), nf(Number(c.nettRevenue || 0)), nf(Number(c.grossRevenue || 0)), nf(Number(c.ANR || 0)), nf(Number(c.AGR || 0))];
+      ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', tNights, nf(tNet), nf(tGross), '', ''];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+    rn += 2;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="market-segmentation-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Nationality Statistics Detailed Excel ──
+async function generateNationalityStatisticsDetailedExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Nationality Statistics Detailed');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Doc No', 'Guest Name', 'Description', 'Nights', 'Check In', 'Check Out', 'Pax', 'Adult', 'Child', 'Revenue'];
+  const widths = [16, 22, 26, 10, 12, 12, 8, 8, 8, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'NATIONALITY STATISTICS DETAILED';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  let gNights = 0, gPax = 0, gRev = 0;
+  for (const g of row.reportData || []) {
+    ws.getRow(rn).values = [g.nationality];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const guest of g.guests || []) {
+      ws.getRow(rn).values = ['', guest.docno, guest.guestName, guest.description, guest.noOfNights, guest.checkInDate ? formatDate(guest.checkInDate) : '', guest.checkOutDate ? formatDate(guest.checkOutDate) : '', guest.pax, guest.adult, guest.child, nf(Number(guest.revenue || 0))];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = ['', 'TOTAL', '', '', g.nights, '', '', g.totalPax, '', '', nf(Number(g.nettRoomRevenue || 0))];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    gNights += Number(g.nights || 0);
+    gPax += Number(g.totalPax || 0);
+    gRev += Number(g.nettRoomRevenue || 0);
+    rn += 2;
+  }
+  ws.getRow(rn).values = ['GRAND TOTAL', '', '', '', gNights, '', '', gPax, '', '', nf(gRev)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="nationality-statistics-detailed.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Staff Sales Summary Excel ──
+async function generateStaffSalesSummaryExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Staff Sales Summary');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio Number', 'Nights', 'Nett Amount', 'Gross Amount'];
+  const widths = [16, 10, 16, 16];
+  const title = ws.getCell(1, 1);
+  title.value = 'STAFF SALES SUMMARY';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const s of row.reportData?.staffData || []) {
+    ws.getRow(rn).values = [s.name];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    for (const c of s.companies || []) {
+      ws.getRow(rn).values = [`  ${c.name} (Projection: ${c.total_projection ?? 0} / Actual: ${c.total_actual ?? 0})`];
+      ws.getRow(rn).font = { bold: true };
+      rn++;
+      const hdr = ws.getRow(rn);
+      hdr.values = ['', ...HEADERS];
+      hdr.font = { bold: true };
+      hdr.alignment = { horizontal: 'center' };
+      hdr.eachCell((c2: any) => { c2.border = border; });
+      rn++;
+      for (const f of c.listFolio || []) {
+        ws.getRow(rn).values = ['', f.folio_number, f.nights, nf(Number(f.amount || 0)), nf(Number(f.total || 0))];
+        ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+        rn++;
+      }
+      ws.getRow(rn).values = ['', 'COMPANY TOTAL', c.total_actual ?? 0, nf(Number(c.nettRevenue || 0)), nf(Number(c.grossRevenue || 0))];
+      ws.getRow(rn).font = { bold: true };
+      ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+      rn++;
+      ws.getRow(rn).values = ['', `ANR: ${nf(Number(c.anr || 0))}  AGR: ${nf(Number(c.agr || 0))}`];
+      rn++;
+    }
+    ws.getRow(rn).values = ['STAFF TOTAL', '', s.total?.nights ?? 0, nf(Number(s.total?.nettRevenue || 0)), nf(Number(s.total?.grossRevenue || 0))];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+    rn += 2;
+  }
+  const g = row.reportData?.grandTotal || {};
+  ws.getRow(rn).values = ['GRAND TOTAL', '', g.nights ?? 0, nf(Number(g.nettRevenue || 0)), nf(Number(g.grossRevenue || 0))];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c2: any) => { c2.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="staff-sales-summary.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Occupancy Chart Excel ──
+async function generateRoomOccupancyChartExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Occupancy Chart');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'NG Arr', 'NG Dep', 'NG Sty', 'NG Rev', 'G Arr', 'G Dep', 'G Sty', 'G Rev', 'T Arr', 'T Dep', 'T Sty', 'T Rev', 'Guests', 'Occ Rooms', 'Ave Nett Rev', 'Occupancy %'];
+  const widths = [12, 8, 8, 8, 14, 8, 8, 8, 14, 8, 8, 8, 14, 10, 10, 14, 12];
+  const title = ws.getCell(1, 1);
+  title.value = 'ROOM OCCUPANCY CHART';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  const cell = (d: any, side: string, k: string) => (d[side] || {})[k] ?? 0;
+  for (const [date, d] of (Object.entries(row.data || {}) as any[])) {
+    ws.getRow(rn).values = ['', date, cell(d, 'non_grp', 'arr'), cell(d, 'non_grp', 'dep'), cell(d, 'non_grp', 'sty'), nf(Number(cell(d, 'non_grp', 'revenue') || 0)), cell(d, 'grp', 'arr'), cell(d, 'grp', 'dep'), cell(d, 'grp', 'sty'), nf(Number(cell(d, 'grp', 'revenue') || 0)), cell(d, 'total', 'arr'), cell(d, 'total', 'dep'), cell(d, 'total', 'sty'), nf(Number(cell(d, 'total', 'revenue') || 0)), d.total_guests, d.occupied_rooms, nf(Number(d.ave_nett_revenue || 0)), Number(d.occupancy || 0).toFixed(2)];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  const g = row.grandTotal || {};
+  ws.getRow(rn).values = ['', 'TOTAL', cell(g, 'non_grp', 'arr'), cell(g, 'non_grp', 'dep'), cell(g, 'non_grp', 'sty'), nf(Number(cell(g, 'non_grp', 'revenue') || 0)), cell(g, 'grp', 'arr'), cell(g, 'grp', 'dep'), cell(g, 'grp', 'sty'), nf(Number(cell(g, 'grp', 'revenue') || 0)), cell(g, 'total', 'arr'), cell(g, 'total', 'dep'), cell(g, 'total', 'sty'), nf(Number(cell(g, 'total', 'revenue') || 0)), g.total_guests, g.occupied_rooms, nf(Number(g.ave_nett_revenue || 0)), Number(g.occupancy || 0).toFixed(2)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-occupancy-chart.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Occupancy Revenue Report Excel ──
+async function generateOccupancyRevenueReportExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Occupancy Revenue Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const title = ws.getCell(1, 1);
+  title.value = 'OCCUPANCY & REVENUE REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  ws.getColumn(1).width = 30;
+  ws.getColumn(2).width = 22;
+  const rows: [string, any][] = [
+    ['Period', row.period],
+    ['Total Rooms', row.total_rooms],
+    ['Total Room Nights', row.total_room_nights],
+    ['Occupied Nights', row.occupied_nights],
+    ['Occupancy (%)', row.occupancy_pct !== undefined ? Number(row.occupancy_pct).toFixed(2) : ''],
+    ['Revenue', nf(Number(row.revenue || 0))],
+    ['Average Room Rate (ARR)', nf(Number(row.arr || 0))],
+  ];
+  let rn = 3;
+  for (const [k, v] of rows) {
+    ws.getRow(rn).values = [k, v];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    ws.getRow(rn).getCell(1).font = { bold: true };
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="occupancy-revenue-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Financial Report Excel ──
+async function generateFinancialReportExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Financial Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const title = ws.getCell(1, 1);
+  title.value = 'FINANCIAL REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  ws.getColumn(1).width = 30;
+  ws.getColumn(2).width = 22;
+  const rows: [string, any][] = [
+    ['Period', row.period],
+    ['Total Folios', row.total_folios],
+    ['Cancelled Folios', row.cancelled_folios],
+    ['Net Folios', row.net_folios],
+    ['Total Revenue', nf(Number(row.total_revenue || 0))],
+    ['Average Per Folio', nf(Number(row.avg_per_folio || 0))],
+  ];
+  let rn = 3;
+  for (const [k, v] of rows) {
+    ws.getRow(rn).values = [k, v];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    ws.getRow(rn).getCell(1).font = { bold: true };
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="financial-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Transaction Report Excel ──
+async function generateTransactionReportExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Transaction Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'Folio No', 'Code', 'Code Name', 'Description', 'Amount', 'Total', 'Type Amount', 'Type Payment'];
+  const widths = [12, 14, 10, 16, 40, 14, 14, 12, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'TRANSACTION REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tAmount = 0, tTotal = 0;
+  for (const r of rows) {
+    tAmount += Number(r.amount || 0);
+    tTotal += Number(r.total || 0);
+    ws.getRow(rn).values = ['', r.date, r.folio_number, r.code, r.code_name, r.description, nf(Number(r.amount || 0)), nf(Number(r.total || 0)), r.type_amount, r.type_payment];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', nf(tAmount), nf(tTotal), '', ''];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="transaction-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Guest Ledger Report Excel ──
+async function generateGuestLedgerExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Guest Ledger Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'Folio No', 'Guest', 'Code', 'Code Name', 'Description', 'Debit', 'Credit', 'Balance'];
+  const widths = [12, 14, 22, 10, 16, 40, 14, 14, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'GUEST LEDGER REPORT';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tDebit = 0, tCredit = 0;
+  for (const r of rows) {
+    tDebit += Number(r.debit || 0);
+    tCredit += Number(r.credit || 0);
+    ws.getRow(rn).values = ['', r.date, r.folio_number, r.guest, r.code, r.code_name, r.description, nf(Number(r.debit || 0)), nf(Number(r.credit || 0)), nf(Number(r.balance || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', '', nf(tDebit), nf(tCredit), ''];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="guest-ledger-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Daily Statistic Excel ──
+async function generateDailyStatisticExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Daily Statistic');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const title = ws.getCell(1, 1);
+  title.value = 'DAILY STATISTIC';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  ws.getColumn(1).width = 28;
+  ws.getColumn(2).width = 18;
+  const rows: [string, any][] = [
+    ['Date', row.date],
+    ['Total Rooms', row.total_rooms],
+    ['Check Ins', row.check_ins],
+    ['Check Outs', row.check_outs],
+    ['In House', row.in_house],
+    ['Vacancy', row.vacancy],
+    ['Occupancy Rate', row.occupancy_rate],
+  ];
+  let rn = 3;
+  for (const [k, v] of rows) {
+    ws.getRow(rn).values = [k, v];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    ws.getRow(rn).getCell(1).font = { bold: true };
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-statistic.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── On Reservation Balance Excel ──
+async function generateOnResvBalExcel(res: Response, data: any): Promise<void> {
+  const rows = Array.isArray(data) ? data : [data];
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('On Reservation Balance');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio No', 'Guest Name', 'Room', 'Room Type', 'Check In', 'Check Out', 'Total Amount', 'Status'];
+  const widths = [14, 22, 14, 14, 12, 12, 14, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'ON RESERVATION BALANCE';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  let tAmount = 0;
+  for (const r of rows) {
+    tAmount += Number(r.total_amount || 0);
+    ws.getRow(rn).values = ['', r.folio_number, r.guest_name, r.room_name, r.room_type, r.check_in, r.check_out, nf(Number(r.total_amount || 0)), r.status];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', '', nf(tAmount), ''];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="on-resv-bal.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Type Utilization Excel ──
+async function generateRoomTypeUtilizationExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Type Utilization');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room Type', 'Rooms', 'Percentage %', 'Revenue', 'Average'];
+  const widths = [24, 12, 14, 16, 14];
+  const title = ws.getCell(1, 1);
+  title.value = 'ROOM TYPE UTILIZATION';
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  let rn = 3;
+  for (const [label, stats] of ([['TODAY', row.today], ['MONTH TO DATE', row.monthToDate], ['YEAR TO DATE', row.yearToDate]] as any[])) {
+    ws.getRow(rn).values = [label];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', ...HEADERS];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const s of stats || []) {
+      ws.getRow(rn).values = ['', s.roomType, s.room, s.percentage, nf(Number(s.revenue || 0)), nf(Number(s.average || 0))];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    rn++;
+  }
+  for (const [label, list] of ([['COMPLIMENTARY', row.complimentary], ['DAY USE', row.dayUse], ['HOUSE USE', row.houseUse]] as any[])) {
+    ws.getRow(rn).values = [label];
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    rn++;
+    const hdr = ws.getRow(rn);
+    hdr.values = ['', 'Room Type', 'Count'];
+    hdr.font = { bold: true };
+    hdr.alignment = { horizontal: 'center' };
+    hdr.eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const s of list || []) {
+      ws.getRow(rn).values = ['', s.roomType, s.count];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    rn++;
+  }
+  const t = row.totals || {};
+  ws.getRow(rn).values = [`Total Rooms: ${t.totalRooms}   Occupied Rooms: ${t.occupiedRooms}`];
+  ws.getRow(rn).font = { bold: true };
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="roomtype-utilization.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Inclusive Items Excel ──
+async function generateInclusiveItemsExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Inclusive Items');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Room', 'Folio', 'Guest Name', 'Company', 'Rate Code', 'Frequency', 'Calculator', 'Description', 'Adult', 'Child', 'Arrival', 'Departure'];
+  const widths = [12, 14, 22, 20, 14, 12, 12, 30, 8, 8, 12, 12];
+  const title = ws.getCell(1, 1);
+  title.value = String(row.reportTitle || 'Inclusive Items Report').toUpperCase();
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const r of row.reportData || []) {
+    ws.getRow(rn).values = ['', r.room, r.folio, r.name, r.company, r.rateCode, r.frequency, r.calculator, r.description, r.adult, r.child, r.arrival_date, r.dep_date];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="inclusive-items.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Daily Room Forecast Excel ──
+async function generateDailyRoomForecastExcel(res: Response, data: any): Promise<void> {
+  const row = Array.isArray(data) ? data[0] : data;
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Daily Room Forecast');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'NG Pax', 'NG Arr', 'NG Dep', 'NG Sty', 'G Arr', 'G Dep', 'G Sty', 'Rms Held', 'Occ %', 'Room Rev', 'Bfast Rev', 'Total Rev', 'ARR Room', 'ARR', 'ARR Bfast'];
+  const widths = [16, 8, 8, 8, 8, 8, 8, 8, 10, 8, 14, 14, 14, 12, 12, 12];
+  const title = ws.getCell(1, 1);
+  title.value = String(row.reportTitle || 'DAILY ROOM FORECAST').toUpperCase();
+  title.font = { bold: true, size: 13 };
+  title.alignment = { horizontal: 'center' };
+  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
+  const hdr = ws.getRow(3);
+  hdr.values = ['', ...HEADERS];
+  hdr.font = { bold: true };
+  hdr.alignment = { horizontal: 'center' };
+  hdr.eachCell((c: any) => { c.border = border; });
+  let rn = 4;
+  for (const d of row.reportData || []) {
+    ws.getRow(rn).values = ['', d.date, d.nonGrp?.pax ?? 0, d.nonGrp?.arr ?? 0, d.nonGrp?.dep ?? 0, d.nonGrp?.sty ?? 0, d.grp?.arr ?? 0, d.grp?.dep ?? 0, d.grp?.sty ?? 0, d.rmsHeld, d.occPercentage, nf(Number(d.roomRev || 0)), nf(Number(d.breakfastRev || 0)), nf(Number(d.totalRev || 0)), nf(Number(d.arrRoom || 0)), nf(Number(d.arr || 0)), nf(Number(d.arrBf || 0))];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-room-forecast.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
