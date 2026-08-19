@@ -326,6 +326,8 @@ async function calcDailyRevPeriod(
   let totalComplimentary = 0;
   let totalHouseUse = 0;
   let totalDayUse = 0;
+  let dayUseNights = 0;
+  const dayUseFolioIds = new Set<bigint>();
   let totalInHouseGuests = 0;
   const roomTypeSales: Record<string, number> = {};
   roomTypes.forEach((t: any) => { roomTypeSales[t.name] = 0; });
@@ -338,7 +340,7 @@ async function calcDailyRevPeriod(
     const isDayUse = cin !== '' && cin === cout;
     if (f.is_house_use) { totalHouseUse++; continue; }
     if (f.complimentary || (r.rate_id && exclRateIds.includes(r.rate_id))) { totalComplimentary++; continue; }
-    if (isDayUse) { totalDayUse++; }
+    if (isDayUse) { totalDayUse++; dayUseNights++; dayUseFolioIds.add(f.id); }
     else { totalSold++; const rt = roomTypes.find((t: any) => t.id === r.room_type_id); if (rt) roomTypeSales[rt.name] = (roomTypeSales[rt.name] || 0) + 1; }
     totalInHouseGuests += (r.adult || 0) + (r.child || 0);
   }
@@ -408,7 +410,7 @@ async function calcDailyRevPeriod(
     roomAvailableOccupancyWithCOM: Math.round(roomAvailOccWithCom * 100) / 100,
     roomAvailableOccupancyWithCOMDayUse: Math.round(roomAvailOccWithComDayUse * 100) / 100,
     doubleOccupancy: Math.round(doubleOcc * 100) / 100,
-    averageLengthOfStay: 0,
+    averageLengthOfStay: dayUseFolioIds.size > 0 ? Math.round((dayUseNights / dayUseFolioIds.size) * 100) / 100 : 0,
   };
 }
 
@@ -498,7 +500,7 @@ async function getAccountDailyRevenueReport(params: any): Promise<any> {
       date: { gte: new Date(`${s}T00:00:00Z`), lte: new Date(`${e}T23:59:59Z`) },
       type: isPayment ? { in: ['payment', 'paidout', 'refund'] } : { notIn: ['payment', 'paidout', 'refund'] },
     },
-    select: { code: true, amount: true, pb1: true, svr_chrg: true, surcharge: true, type_amount: true },
+    select: { code: true, amount: true, pb1: true, svr_chrg: true, surcharge: true, total: true, type_amount: true },
   });
   const [todayRoomRevenue, mtdRoomRevenue, ytdRoomRevenue, todayPayment, mtdPayment, ytdPayment] = await Promise.all([
     fetchTb(date, date, false), fetchTb(startOfMonth, date, false), fetchTb(startOfYear, date, false),
@@ -648,11 +650,21 @@ async function generateDailyRevenueExcel(res: Response, data: any): Promise<void
     if (bold) r.font = { bold: true };
     return r;
   };
+  const nf2 = (v: any) => Number(v || 0).toFixed(2);
+  const sumSigned = (rows: any[], code: string, field: string) => rows
+    .filter((t: any) => String(t.code) === code)
+    .reduce((sum: number, t: any) => sum + (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? -Number(t[field] || 0) : Number(t[field] || 0)), 0);
+  const periodTotals = (arr: any[], key: string) => arr.reduce((s: number, a: any) => s + (a[key] || 0), 0);
+
   section('STATISTICS');
-  const stat = (label: string, key: string, fmt: (v: any) => any = (v) => v) => {
-    const [d, m, y] = [data.todayData[key], data.mtdData[key], data.ytdData[key]];
-    const [db, mb, yb] = [data.todayData[key + 'Budget'], data.mtdData[key + 'Budget'], data.ytdData[key + 'Budget']];
-    row10([label, fmt(d), fmt(db), fmt(d - db), fmt(m), fmt(mb), fmt(m - mb), fmt(y), fmt(yb), fmt(y - yb)]);
+  const stat = (label: string, key: string) => {
+    const [d, m, y] = [data.todayData[key] || 0, data.mtdData[key] || 0, data.ytdData[key] || 0];
+    const [db, mb, yb] = [data.todayData[key + 'Budget'] || 0, data.mtdData[key + 'Budget'] || 0, data.ytdData[key + 'Budget'] || 0];
+    row10([label, d, db, d - db, m, mb, m - mb, y, yb, y - yb]);
+  };
+  const statZero = (label: string, key: string, fmt: (v: any) => any = (v) => v) => {
+    const [d, m, y] = [data.todayData[key] || 0, data.mtdData[key] || 0, data.ytdData[key] || 0];
+    row10([label, fmt(d), 0, fmt(d), fmt(m), 0, fmt(m), fmt(y), 0, fmt(y)]);
   };
   stat('TOTAL ROOM AVAILABLE', 'totalAvailableRoom');
   stat('TOTAL ROOM OUT OF ORDER', 'totalBlockedRoom');
@@ -665,18 +677,19 @@ async function generateDailyRevenueExcel(res: Response, data: any): Promise<void
   stat('TOTAL ROOM COMPLIMENTARY (COM)', 'totalComplimentary');
   stat('TOTAL ROOM HOUSE USE (HSE)', 'totalHouseUse');
   stat('TOTAL SALEABLE ROOM', 'totalSaleableRoom');
-  stat('TOTAL VACANT ROOM', 'totalVacantRoom');
+  statZero('TOTAL VACANT ROOM', 'totalVacantRoom');
   stat('TOTAL DAY USE', 'totalDayUse');
   stat('TOTAL IN-HOUSE GUESTS (Excl. HSE)', 'totalInHouseGuests');
-  stat('AVERAGE ROOM RATE (ARR)', 'averageRoomRate', (v) => Number(v).toFixed(2));
-  stat('% ROOM SALEABLE OCCUPANCY', 'roomSaleableOccupancy', (v) => Number(v).toFixed(2));
-  stat('% ROOM SALEABLE OCCUPANCY (Incl. COM)', 'roomSaleableOccupancyWithCOM', (v) => Number(v).toFixed(2));
-  stat('% ROOM SALEABLE OCC. (Incl. COM&Day Use)', 'roomSaleableOccupancyWithCOMDayUse', (v) => Number(v).toFixed(2));
-  stat('REVENUE PER AVAIL. ROOM (REVPAR)', 'revenuePerAvailableRoom', (v) => Number(v).toFixed(2));
-  stat('% ROOM AVAILABLE OCCUPANCY', 'roomAvailableOccupancy', (v) => Number(v).toFixed(2));
-  stat('% ROOM AVAILABLE OCCUPANCY (Incl. COM)', 'roomAvailableOccupancyWithCOM', (v) => Number(v).toFixed(2));
-  stat('% ROOM AVAILABLE OCC. (Incl. COM&Day Use)', 'roomAvailableOccupancyWithCOMDayUse', (v) => Number(v).toFixed(2));
-  stat('% DOUBLE OCCUPANCY (Incl. COM)', 'doubleOccupancy', (v) => Number(v).toFixed(2));
+  statZero('AVERAGE ROOM RATE (ARR)', 'averageRoomRate', nf2);
+  statZero('% ROOM SALEABLE OCCUPANCY', 'roomSaleableOccupancy', nf2);
+  statZero('% ROOM SALEABLE OCCUPANCY (Incl. COM)', 'roomSaleableOccupancyWithCOM', nf2);
+  statZero('% ROOM SALEABLE OCC. (Incl. COM&Day Use)', 'roomSaleableOccupancyWithCOMDayUse', nf2);
+  statZero('REVENUE PER AVAIL. ROOM (REVPAR)', 'revenuePerAvailableRoom', nf2);
+  statZero('% ROOM AVAILABLE OCCUPANCY', 'roomAvailableOccupancy', nf2);
+  statZero('% ROOM AVAILABLE OCCUPANCY (Incl. COM)', 'roomAvailableOccupancyWithCOM', nf2);
+  statZero('% ROOM AVAILABLE OCC. (Incl. COM&Day Use)', 'roomAvailableOccupancyWithCOMDayUse', nf2);
+  statZero('% DOUBLE OCCUPANCY (Incl. COM)', 'doubleOccupancy', nf2);
+  statZero('AVERAGE LENGTH OF STAY (ALOS)', 'averageLengthOfStay', nf2);
 
   section('ROOM ACTIVITIES');
   const act = (label: string, key: string) => {
@@ -699,62 +712,84 @@ async function generateDailyRevenueExcel(res: Response, data: any): Promise<void
 
   const revSection = (label: string, codeBillings: any[], codePosts: any[], today: any[], mtd: any[], ytd: any[], budgetRows: any[], isPayment: boolean) => {
     section(label);
-    const totals: any = { revenue: [], tax: [], svc: [], surcharge: [] };
-    const sumSigned = (rows: any[], code: string, field: string) => rows
-      .filter((t: any) => String(t.code) === code)
-      .reduce((sum: number, t: any) => sum + (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? -Number(t[field] || 0) : Number(t[field] || 0)), 0);
-    for (const billing of codeBillings) {
+    const totals: any = { revenue: [], budget: [], variance: [], tax: [], svc: [], surcharge: [] };
+    const sorted = isPayment ? codeBillings : [...codeBillings].sort((a: any, b: any) => String(a.name || '').localeCompare(String(b.name || '')));
+    for (const billing of sorted) {
       const bPosts = codePosts.filter((p: any) => p.code_billing_id === billing.id);
-      if (!bPosts.length) continue;
       section(String(billing.name || '').toUpperCase());
-      let acc = { revenue: { today: 0, mtd: 0, ytd: 0 }, tax: { today: 0, mtd: 0, ytd: 0 }, svc: { today: 0, mtd: 0, ytd: 0 }, surcharge: { today: 0, mtd: 0, ytd: 0 } };
+      let acc = {
+        revenue: { today: 0, mtd: 0, ytd: 0 }, budget: { today: 0, mtd: 0, ytd: 0 }, variance: { today: 0, mtd: 0, ytd: 0 },
+        tax: { today: 0, mtd: 0, ytd: 0 }, svc: { today: 0, mtd: 0, ytd: 0 }, surcharge: { today: 0, mtd: 0, ytd: 0 },
+      };
       for (const post of bPosts) {
         const t = sumSigned(today, String(post.id), 'amount');
         const m = sumSigned(mtd, String(post.id), 'amount');
         const y = sumSigned(ytd, String(post.id), 'amount');
-        const taxT = sumSigned(today, String(post.id), 'pb1');
-        const taxM = sumSigned(mtd, String(post.id), 'pb1');
-        const taxY = sumSigned(ytd, String(post.id), 'pb1');
-        const svcT = sumSigned(today, String(post.id), 'svr_chrg');
-        const svcM = sumSigned(mtd, String(post.id), 'svr_chrg');
-        const svcY = sumSigned(ytd, String(post.id), 'svr_chrg');
+        const taxT = isPayment ? 0 : sumSigned(today, String(post.id), 'pb1');
+        const taxM = isPayment ? 0 : sumSigned(mtd, String(post.id), 'pb1');
+        const taxY = isPayment ? 0 : sumSigned(ytd, String(post.id), 'pb1');
+        const svcT = isPayment ? 0 : sumSigned(today, String(post.id), 'svr_chrg');
+        const svcM = isPayment ? 0 : sumSigned(mtd, String(post.id), 'svr_chrg');
+        const svcY = isPayment ? 0 : sumSigned(ytd, String(post.id), 'svr_chrg');
         const surT = isPayment ? sumSigned(today, String(post.id), 'surcharge') : 0;
         const surM = isPayment ? sumSigned(mtd, String(post.id), 'surcharge') : 0;
         const surY = isPayment ? sumSigned(ytd, String(post.id), 'surcharge') : 0;
-        const monthlyBudget = budgetRows.filter((b: any) => b.code_post_id === post.id).reduce((s: number, b: any) => s + Number(b.budget), 0);
-        const todayBudget = monthlyBudget / data.totalDaysInMonth;
+        const monthlyBudget = budgetRows.filter((b: any) => b.code_post_id === post.id).reduce((s: number, b: any) => s + Number(b.budget || 0), 0);
+        const todayBudget = monthlyBudget / (data.totalDaysInMonth > 0 ? data.totalDaysInMonth : 1);
         const mtdBudget = todayBudget * new Date().getDate();
         const ytdBudget = todayBudget * new Date().getDate() + monthlyBudget * (new Date().getMonth());
-        const nf = (v: number) => Number(v).toFixed(2);
-        row10([String(post.name || '').toUpperCase(), nf(t), nf(todayBudget), nf(t - todayBudget), nf(m), nf(mtdBudget), nf(m - mtdBudget), nf(y), nf(ytdBudget), nf(y - ytdBudget)]);
+        row10([String(post.name || '').toUpperCase(), nf2(t), nf2(todayBudget), nf2(t - todayBudget), nf2(m), nf2(mtdBudget), nf2(m - mtdBudget), nf2(y), nf2(ytdBudget), nf2(y - ytdBudget)]);
         acc.revenue.today += t; acc.revenue.mtd += m; acc.revenue.ytd += y;
+        acc.budget.today += todayBudget; acc.budget.mtd += mtdBudget; acc.budget.ytd += ytdBudget;
+        acc.variance.today += t - todayBudget; acc.variance.mtd += m - mtdBudget; acc.variance.ytd += y - ytdBudget;
         acc.tax.today += taxT; acc.tax.mtd += taxM; acc.tax.ytd += taxY;
         acc.svc.today += svcT; acc.svc.mtd += svcM; acc.svc.ytd += svcY;
         acc.surcharge.today += surT; acc.surcharge.mtd += surM; acc.surcharge.ytd += surY;
       }
-      const nf = (v: number) => Number(v).toFixed(2);
-      row10([`Total ${String(billing.name || '').toUpperCase()}`, nf(acc.revenue.today), nf(acc.revenue.today * 0.11), nf(acc.revenue.today - acc.revenue.today * 0.11), nf(acc.revenue.mtd), nf(acc.revenue.mtd * 0.11), nf(acc.revenue.mtd - acc.revenue.mtd * 0.11), nf(acc.revenue.ytd), nf(acc.revenue.ytd * 0.11), nf(acc.revenue.ytd - acc.revenue.ytd * 0.11)], true);
+      row10([`Total ${String(billing.name || '').toUpperCase()}`, nf2(acc.revenue.today), nf2(acc.budget.today), nf2(acc.variance.today), nf2(acc.revenue.mtd), nf2(acc.budget.mtd), nf2(acc.variance.mtd), nf2(acc.revenue.ytd), nf2(acc.budget.ytd), nf2(acc.variance.ytd)], true);
       totals.revenue.push(acc.revenue);
+      totals.budget.push(acc.budget);
+      totals.variance.push(acc.variance);
       totals.tax.push(acc.tax);
       totals.svc.push(acc.svc);
       totals.surcharge.push(acc.surcharge);
     }
-    const sum = (arr: any[], key: string) => arr.reduce((s: number, a: any) => s + a[key], 0);
     const lbl = isPayment ? 'Hotel Payment' : 'Hotel Revenue';
     section(lbl);
     const netLbl = isPayment ? 'Hotel Net Payment' : 'Total Net Revenue';
-    const extraLbl = isPayment ? 'Surcharge' : 'Government Tax';
-    const grossLbl = isPayment ? 'Total Gross Payment' : 'Total Gross Revenue';
-    const nf = (v: number) => Number(v).toFixed(2);
-    row10([netLbl, nf(sum(totals.revenue, 'today')), nf(sum(totals.revenue, 'today')), nf(sum(totals.revenue, 'today')), nf(sum(totals.revenue, 'mtd')), nf(sum(totals.revenue, 'mtd')), nf(sum(totals.revenue, 'mtd')), nf(sum(totals.revenue, 'ytd')), nf(sum(totals.revenue, 'ytd')), nf(sum(totals.revenue, 'ytd'))], true);
-    const extraArr = isPayment ? totals.surcharge : totals.tax;
-    const extraSvc = isPayment ? totals.svc : totals.svc;
-    row10([extraLbl, nf(sum(extraArr, 'today')), nf(sum(extraArr, 'today')), nf(sum(extraArr, 'today')), nf(sum(extraArr, 'mtd')), nf(sum(extraArr, 'mtd')), nf(sum(extraArr, 'mtd')), nf(sum(extraArr, 'ytd')), nf(sum(extraArr, 'ytd')), nf(sum(extraArr, 'ytd'))], true);
+    row10([netLbl, nf2(periodTotals(totals.revenue, 'today')), nf2(periodTotals(totals.budget, 'today')), nf2(periodTotals(totals.variance, 'today')), nf2(periodTotals(totals.revenue, 'mtd')), nf2(periodTotals(totals.budget, 'mtd')), nf2(periodTotals(totals.variance, 'mtd')), nf2(periodTotals(totals.revenue, 'ytd')), nf2(periodTotals(totals.budget, 'ytd')), nf2(periodTotals(totals.variance, 'ytd'))], true);
     if (!isPayment) {
-      row10(['Service Charge', nf(sum(totals.svc, 'today')), nf(sum(totals.svc, 'today')), nf(sum(totals.svc, 'today')), nf(sum(totals.svc, 'mtd')), nf(sum(totals.svc, 'mtd')), nf(sum(totals.svc, 'mtd')), nf(sum(totals.svc, 'ytd')), nf(sum(totals.svc, 'ytd')), nf(sum(totals.svc, 'ytd'))], true);
-      row10([grossLbl, nf(sum(totals.revenue, 'today') + sum(totals.tax, 'today') + sum(totals.svc, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.tax, 'today') + sum(totals.svc, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.tax, 'today') + sum(totals.svc, 'today')), nf(sum(totals.revenue, 'mtd') + sum(totals.tax, 'mtd') + sum(totals.svc, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.tax, 'mtd') + sum(totals.svc, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.tax, 'mtd') + sum(totals.svc, 'mtd')), nf(sum(totals.revenue, 'ytd') + sum(totals.tax, 'ytd') + sum(totals.svc, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.tax, 'ytd') + sum(totals.svc, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.tax, 'ytd') + sum(totals.svc, 'ytd'))], true);
+      const taxRow = (k: 'today' | 'mtd' | 'ytd') => {
+        const tax = periodTotals(totals.tax, k);
+        const tb = tax * 0.11;
+        return [nf2(tax), nf2(tb), nf2(tax - tb)];
+      };
+      row10(['Government Tax', ...taxRow('today'), ...taxRow('mtd'), ...taxRow('ytd')], true);
+      const svcRow = (k: 'today' | 'mtd' | 'ytd') => {
+        const svc = periodTotals(totals.svc, k);
+        const sb = svc * 0.10;
+        return [nf2(svc), nf2(sb), nf2(svc - sb)];
+      };
+      row10(['Service Charge', ...svcRow('today'), ...svcRow('mtd'), ...svcRow('ytd')], true);
+      const grossRow = (k: 'today' | 'mtd' | 'ytd') => [
+        nf2(periodTotals(totals.revenue, k) + periodTotals(totals.tax, k) + periodTotals(totals.svc, k)),
+        nf2(periodTotals(totals.budget, k) + periodTotals(totals.tax, k) * 0.11 + periodTotals(totals.svc, k) * 0.10),
+        nf2(periodTotals(totals.variance, k) + periodTotals(totals.tax, k) - periodTotals(totals.tax, k) * 0.11 + periodTotals(totals.svc, k) - periodTotals(totals.svc, k) * 0.10),
+      ];
+      row10(['Total Gross Revenue', ...grossRow('today'), ...grossRow('mtd'), ...grossRow('ytd')], true);
     } else {
-      row10([grossLbl, nf(sum(totals.revenue, 'today') + sum(totals.surcharge, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.surcharge, 'today')), nf(sum(totals.revenue, 'today') + sum(totals.surcharge, 'today')), nf(sum(totals.revenue, 'mtd') + sum(totals.surcharge, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.surcharge, 'mtd')), nf(sum(totals.revenue, 'mtd') + sum(totals.surcharge, 'mtd')), nf(sum(totals.revenue, 'ytd') + sum(totals.surcharge, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.surcharge, 'ytd')), nf(sum(totals.revenue, 'ytd') + sum(totals.surcharge, 'ytd'))], true);
+      const surRow = (k: 'today' | 'mtd' | 'ytd') => {
+        const sur = periodTotals(totals.surcharge, k);
+        const sb = sur * 0.11;
+        return [nf2(sur), nf2(sb), nf2(sur - sb)];
+      };
+      row10(['Surcharge', ...surRow('today'), ...surRow('mtd'), ...surRow('ytd')], true);
+      const grossRow = (k: 'today' | 'mtd' | 'ytd') => [
+        nf2(periodTotals(totals.revenue, k) + periodTotals(totals.surcharge, k)),
+        nf2(periodTotals(totals.budget, k) + periodTotals(totals.surcharge, k) * 0.11),
+        nf2(periodTotals(totals.variance, k) + periodTotals(totals.surcharge, k) - periodTotals(totals.surcharge, k) * 0.11),
+      ];
+      row10(['Total Gross Payment', ...grossRow('today'), ...grossRow('mtd'), ...grossRow('ytd')], true);
     }
   };
 
@@ -763,20 +798,25 @@ async function generateDailyRevenueExcel(res: Response, data: any): Promise<void
 
   const ledgerRow = (label: string, key: string) => {
     const t = data.ledgerToday || {}, m = data.ledgerMtd || {}, y = data.ledgerYtd || {};
-    const nf = (v: any) => Number(v || 0).toFixed(2);
-    row10([label, nf(t[key]), 0, nf(t[key]), nf(m[key]), 0, nf(m[key]), nf(y[key]), 0, nf(y[key])], true);
+    row10([label, nf2(t[key]), 0, nf2(t[key]), nf2(m[key]), 0, nf2(m[key]), nf2(y[key]), 0, nf2(y[key])], true);
   };
   ledgerRow('GUEST LEDGER CURRENT DAY', 'GUESTLEDGERCURRENT');
   ledgerRow('GUEST LEDGER PREVIOUS DAY', 'GUESTLEDGERPREVIOUS');
   ledgerRow('ADVANCED DEPOSIT CURRENT DAY', 'ADVANCEDDEPOSITCURRENTDAY');
   ledgerRow('ADVANCED DEPOSIT PREVIOUS DAY', 'ADVANCEDDEPOSITPREVIOUSDAY');
   ledgerRow('TOTAL LEDGER & DEPOSIT', 'TOTALLEDGERDEPOSIT');
-  const cb = (v: any) => Number(v || 0).toFixed(2);
-  const ctrl = (side: 'today' | 'mtd' | 'ytd') => {
-    const l = data[`ledger${side === 'today' ? 'Today' : side === 'mtd' ? 'Mtd' : 'Ytd'}`] || {};
-    return Number(l.TOTALLEDGERDEPOSIT || 0);
+  const ctrlSigned = (periodRows: any[], posts: any[]) => {
+    const ids = new Set(posts.map((p: any) => String(p.id)));
+    return (periodRows || []).filter((t: any) => ids.has(String(t.code)))
+      .reduce((s: number, t: any) => s + (String(t.type_amount || 'PLUS').toUpperCase() === 'MINUS' ? -Number(t.total || 0) : Number(t.total || 0)), 0);
   };
-  row10(['CONTROL BALANCE', cb(ctrl('today')), 0, cb(ctrl('today')), cb(ctrl('mtd')), 0, cb(ctrl('mtd')), cb(ctrl('ytd')), 0, cb(ctrl('ytd'))], true);
+  const ctrl = (k: 'today' | 'mtd' | 'ytd') => {
+    const rr = k === 'today' ? data.roomRevenue?.today : k === 'mtd' ? data.roomRevenue?.mtd : data.roomRevenue?.ytd;
+    const pm = k === 'today' ? data.payment?.today : k === 'mtd' ? data.payment?.mtd : data.payment?.ytd;
+    const lk = data[`ledger${k === 'today' ? 'Today' : k === 'mtd' ? 'Mtd' : 'Ytd'}`] || {};
+    return nf2(ctrlSigned(rr, data.roomRevenue?.codePostRoomRevenue || []) + ctrlSigned(pm, data.payment?.codePostPayment || []) + Number(lk.TOTALLEDGERDEPOSIT || 0));
+  };
+  row10(['CONTROL BALANCE', ctrl('today'), 0, ctrl('today'), ctrl('mtd'), 0, ctrl('mtd'), ctrl('ytd'), 0, ctrl('ytd')], true);
 
   ws.eachRow({ includeEmpty: false }, (r: any, rn: number) => {
     if (rn < 3) return;
