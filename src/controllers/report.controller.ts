@@ -902,7 +902,7 @@ async function getTaxBreakdownDetail(params: any): Promise<any> {
       lr.room_name AS room_no,
       CONCAT(f.first_name, ' ', f.last_name) AS "Guest_Name",
       f.company_name,
-      CONCAT(COALESCE(tb.type, ''), ' - ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, '')))) AS description,
+      COALESCE(tb.description, CONCAT(INITCAP(REPLACE(COALESCE(tb.type, ''), '_', ' ')), ' - ', COALESCE(f.folio_number, ''), ' ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, ''))))) AS description,
       tb.created_at AS "Posting_date",
       CASE WHEN tb.type = 'Room_Revenue' THEN 'SYSTEM' WHEN tb.receipt IS NOT NULL THEN 'POS SYSTEM' ELSE u.name END AS "STAFF",
       CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.amount AS DECIMAL(18,2)) ELSE CAST(tb.amount AS DECIMAL(18,2)) END AS "Charge",
@@ -1114,7 +1114,7 @@ async function getAccountTransactionReportDetail(params: any): Promise<any> {
       lr.room_name AS room_no,
       CONCAT(f.first_name, ' ', f.last_name) AS "Guest_Name",
       f.company_name,
-      CONCAT(COALESCE(tb.type, ''), ' - ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, '')))) AS description,
+      COALESCE(tb.description, CONCAT(INITCAP(REPLACE(COALESCE(tb.type, ''), '_', ' ')), ' - ', COALESCE(f.folio_number, ''), ' ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, ''))))) AS description,
       tb.created_at AS "Posting_date",
       CASE WHEN tb.type = 'Room_Revenue' THEN ${staffName} WHEN tb.receipt IS NOT NULL THEN 'POS SYSTEM' ELSE u.name END AS "STAFF",
       CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.amount AS DECIMAL(18,2)) ELSE CAST(tb.amount AS DECIMAL(18,2)) END AS "Charge",
@@ -2049,12 +2049,13 @@ async function generateWeeklyBookingExcel(res: any, data: any): Promise<void> {
   t1.value = `Weekly Booking Report ${data.startDate} - ${data.endDate}`;
   t1.font = { bold: true, size: 14 };
 
-  const header = ['No', '', 'Number of Reservations', 'Total Person', 'Total Night', 'Percentage'];
+  const totalAll = data.totalReservations;
+  const pct = (x: number) => `${Number((x / Math.max(totalAll, 1) * 100).toFixed(2))}%`;
   const rows: any[] = [
-    { title: 'SOURCE', data: data.sourceData },
-    { title: 'COMPANY', data: data.companyData },
-    { title: 'OTA', data: data.otaData },
-    { title: 'DIRECT BOOKING', data: data.directBookingData },
+    { title: 'Reservation Source Summary', nameCol: 'Source', data: data.sourceData },
+    { title: 'Company Reservations', nameCol: 'Company Name', data: data.companyData },
+    { title: 'OTA Reservations', nameCol: 'OTA Name', data: data.otaData },
+    { title: 'Direct Booking', nameCol: 'Direct Booking', data: data.directBookingData, totalLabel: 'TOTAL DIRECT BOOKING' },
   ];
   let r = 3;
   for (const section of rows) {
@@ -2065,7 +2066,7 @@ async function generateWeeklyBookingExcel(res: any, data: any): Promise<void> {
     c.alignment = { horizontal: 'center' };
     r++;
     const hr = r;
-    ['No', 'Source', 'Number of Reservations', 'Total Person', 'Total Night', 'Percentage'].forEach((h, i) => {
+    ['No', section.nameCol, 'Number of Reservations', 'Total Person', 'Total Night', 'Percentage'].forEach((h, i) => {
       ws.getCell(hr, 1 + i).value = h;
       ws.getCell(hr, 1 + i).font = { bold: true };
       ws.getCell(hr, 1 + i).alignment = { horizontal: 'center' };
@@ -2073,65 +2074,81 @@ async function generateWeeklyBookingExcel(res: any, data: any): Promise<void> {
     r++;
     section.data.forEach((item: any, i: number) => {
       ws.getCell(r, 1).value = i + 1;
-      ws.mergeCells(`B${r}:C${r}`);
-      ws.getCell(`B${r}`).value = item.name;
-      ws.getCell(r, 4).value = `${item.reservations} 件`;
-      ws.getCell(r, 5).value = `${item.persons} 人`;
-      ws.getCell(r, 6).value = `${item.nights} 泊`;
-      ws.getCell(r, 7).value = Number(item.percentage.toFixed(2));
+      ws.getCell(r, 2).value = item.name;
+      ws.getCell(r, 3).value = `${item.reservations} 件`;
+      ws.getCell(r, 4).value = `${item.persons} 人`;
+      ws.getCell(r, 5).value = `${item.nights} 泊`;
+      ws.getCell(r, 6).value = pct(item.reservations);
       r++;
     });
-    ws.mergeCells(`A${r}:C${r}`);
-    ws.getCell(`A${r}`).value = 'TOTAL';
+    ws.mergeCells(`A${r}:B${r}`);
+    ws.getCell(`A${r}`).value = section.totalLabel || 'Total';
     ws.getCell(`A${r}`).font = { bold: true };
     const tsum = section.data.reduce((s: number, x: any) => s + x.reservations, 0);
     const psum = section.data.reduce((s: number, x: any) => s + x.persons, 0);
     const nsum = section.data.reduce((s: number, x: any) => s + x.nights, 0);
-    ws.getCell(r, 4).value = `${tsum} 件`;
-    ws.getCell(r, 5).value = `${psum} 人`;
-    ws.getCell(r, 6).value = `${nsum} 泊`;
-    ws.getCell(r, 7).value = Number((tsum / Math.max(data.totalReservations, 1) * 100).toFixed(2));
-    ws.getCell(r, 7).font = { bold: true };
+    ws.getCell(r, 3).value = `${tsum} 件`;
+    ws.getCell(r, 4).value = `${psum} 人`;
+    ws.getCell(r, 5).value = `${nsum} 泊`;
+    ws.getCell(r, 6).value = pct(tsum);
+    ws.getCell(r, 6).font = { bold: true };
     r += 2;
   }
 
-  // OTHERS (Promo)
+  // Others (Promo)
   ws.mergeCells(`A${r}:F${r}`);
   const oc = ws.getCell(`A${r}`);
-  oc.value = 'OTHERS (PROMO)';
+  oc.value = 'Others (Promo)';
   oc.font = { bold: true };
   oc.alignment = { horizontal: 'center' };
   r++;
   const hr2 = r;
-  ['No', 'Promotion Name', '', '', '', ''].forEach((h, i) => {
+  ['No', 'Others (Promo)', 'Number of Reservations', 'Total Person', 'Total Night', 'Percentage'].forEach((h, i) => {
     ws.getCell(hr2, 1 + i).value = h;
     ws.getCell(hr2, 1 + i).font = { bold: true };
     ws.getCell(hr2, 1 + i).alignment = { horizontal: 'center' };
   });
   r++;
-  for (const promo of data.othersPromoData) {
-    ws.getCell(r, 1).value = promo.sources.length > 0 ? '' : '';
-    ws.mergeCells(`B${r}:F${r}`);
-    ws.getCell(`B${r}`).value = promo.name;
-    r++;
-    promo.sources.forEach((src: any) => {
-      ws.getCell(r, 1).value = '';
-      ws.mergeCells(`B${r}:C${r}`);
-      ws.getCell(`B${r}`).value = src.name;
-      ws.getCell(r, 4).value = `${src.reservations} 件`;
-      ws.getCell(r, 5).value = `${src.persons} 人`;
-      ws.getCell(r, 6).value = `${src.nights} 泊`;
-      ws.getCell(r, 7).value = Number(src.percentage.toFixed(2));
+  if (data.othersPromoData.length > 0) {
+    let promoCounter = 1;
+    for (const promo of data.othersPromoData) {
+      const spanRows = promo.sources.length + 2;
+      ws.mergeCells(`A${r}:A${r + spanRows - 1}`);
+      ws.getCell(`A${r}`).value = promoCounter;
+      ws.getCell(`A${r}`).alignment = { horizontal: 'center' };
+      ws.mergeCells(`B${r}:F${r}`);
+      ws.getCell(`B${r}`).value = promo.name;
       r++;
-    });
+      for (const src of promo.sources) {
+        ws.getCell(r, 2).value = src.name;
+        ws.getCell(r, 3).value = src.reservations;
+        ws.getCell(r, 4).value = src.persons;
+        ws.getCell(r, 5).value = src.nights;
+        ws.getCell(r, 6).value = pct(src.reservations);
+        r++;
+      }
+      ws.getCell(r, 2).value = 'TOTAL';
+      ws.getCell(r, 2).font = { bold: true };
+      ws.getCell(r, 3).value = promo.sources.reduce((s: number, x: any) => s + x.reservations, 0);
+      ws.getCell(r, 4).value = promo.sources.reduce((s: number, x: any) => s + x.persons, 0);
+      ws.getCell(r, 5).value = promo.sources.reduce((s: number, x: any) => s + x.nights, 0);
+      ws.getCell(r, 6).value = pct(promo.sources.reduce((s: number, x: any) => s + x.reservations, 0));
+      r++;
+      promoCounter++;
+    }
+  } else {
+    ws.getCell(r, 1).value = 1;
+    ws.mergeCells(`B${r}:F${r}`);
+    ws.getCell(`B${r}`).value = 'No promo data available';
+    r++;
   }
-  ws.mergeCells(`A${r}:C${r}`);
+  ws.mergeCells(`A${r}:B${r}`);
   ws.getCell(`A${r}`).value = 'TOTAL OTHERS';
   ws.getCell(`A${r}`).font = { bold: true };
-  ws.getCell(r, 4).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.reservations, 0), 0)} 件`;
-  ws.getCell(r, 5).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.persons, 0), 0)} 人`;
-  ws.getCell(r, 6).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.nights, 0), 0)} 泊`;
-  ws.getCell(r, 7).value = Number((data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.reservations, 0), 0) / Math.max(data.totalReservations, 1) * 100).toFixed(2));
+  ws.getCell(r, 3).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.reservations, 0), 0)}件`;
+  ws.getCell(r, 4).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.persons, 0), 0)}人`;
+  ws.getCell(r, 5).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.nights, 0), 0)}泊`;
+  ws.getCell(r, 6).value = pct(data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.reservations, 0), 0));
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="weekly-booking.xlsx"`);
@@ -2279,12 +2296,6 @@ async function generateCalendarOperationExcel(res: any, data: any): Promise<void
   ws.getCell(`A${r}`).value = `Calendar Operation Report ${formatLongDate(data.startDate)} - ${formatLongDate(data.endDate)}`;
   ws.getCell(`A${r}`).font = { bold: true, size: 14 };
   r++;
-  ws.mergeCells(`A${r}:J${r}`);
-  ws.getCell(`A${r}`).value = `Total Room: ${data.totalRooms}`;
-  r++;
-  ws.mergeCells(`A${r}:J${r}`);
-  ws.getCell(`A${r}`).value = `Total Room Target: ${data.totalRooms} × ${data.monthlyData.reduce((s: number, m: any) => s + new Date(Date.UTC(new Date(m.start_date).getUTCFullYear(), new Date(m.start_date).getUTCMonth() + 1, 0)).getUTCDate(), 0)} = ${data.monthlyData.reduce((s: number, m: any) => s + m.monthly_target, 0)}`;
-  r++;
   ws.mergeCells(`A${r}:B${r}`);
   ws.getCell(`A${r}`).value = 'Date';
   ws.getCell(`A${r}`).font = { bold: true };
@@ -2315,8 +2326,13 @@ async function generateCalendarOperationExcel(res: any, data: any): Promise<void
   r++;
 
   for (const month of data.monthlyData) {
+    ws.mergeCells(`A${r}:J${r}`);
+    ws.getCell(`A${r}`).value = `Calender Operation, Allocation and Price from ${month.start_date} to ${month.end_date}`;
+    ws.getCell(`A${r}`).font = { bold: true };
+    r++;
     for (const day of month.daily_data) {
-      ws.getCell(r, 1).value = `${day.day_name}, ${formatDateMYShort(day.date)}`;
+      const md = new Date(`${day.date}T00:00:00Z`);
+      ws.getCell(r, 1).value = `${day.day_name}, ${String(md.getUTCMonth() + 1).padStart(2, '0')}/${String(md.getUTCDate()).padStart(2, '0')}`;
       ws.getCell(r, 2).value = day.daily_total;
       ws.getCell(r, 3).value = day.running_total;
       ws.getCell(r, 4).value = `${day.occupancy_rate}%`;
@@ -2331,20 +2347,20 @@ async function generateCalendarOperationExcel(res: any, data: any): Promise<void
     ws.mergeCells(`A${r}:B${r}`);
     ws.getCell(`A${r}`).value = 'Monthly Room Total';
     ws.getCell(`A${r}`).font = { bold: true };
-    ws.getCell(r, 3).value = Number(month.monthly_total.toFixed(2));
-    ws.mergeCells(`C${r}:D${r}`);
-    ws.getCell(`C${r}`).value = 'Monthly Total Capacity';
-    ws.getCell(`C${r}`).font = { bold: true };
-    ws.getCell(r, 5).value = `${month.monthly_occupancy_rate}%`;
+    ws.getCell(r, 3).value = month.monthly_total.toFixed(2);
+    ws.mergeCells(`D${r}:E${r}`);
+    ws.getCell(`D${r}`).value = 'Monthly Total Capacity';
+    ws.getCell(`D${r}`).font = { bold: true };
+    ws.getCell(r, 6).value = `${month.monthly_occupancy_rate}%`;
     r++;
     ws.mergeCells(`A${r}:B${r}`);
     ws.getCell(`A${r}`).value = 'Monthly Room Target';
     ws.getCell(`A${r}`).font = { bold: true };
-    ws.getCell(r, 3).value = Number(month.monthly_target.toFixed(2));
-    ws.mergeCells(`C${r}:D${r}`);
-    ws.getCell(`C${r}`).value = 'Monthly Target Operation';
-    ws.getCell(`C${r}`).font = { bold: true };
-    ws.getCell(r, 5).value = '70%';
+    ws.getCell(r, 3).value = month.monthly_target.toFixed(2);
+    ws.mergeCells(`D${r}:E${r}`);
+    ws.getCell(`D${r}`).value = 'Monthly Target Operation';
+    ws.getCell(`D${r}`).font = { bold: true };
+    ws.getCell(r, 6).value = '70%';
     r += 2;
   }
 
@@ -2579,11 +2595,11 @@ async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
   });
   r++;
   const monthlyRows = [
-    ['Next Month', data.monthlyStats.nextMonth.count, data.monthlyStats.nextMonth.guests, data.monthlyStats.nextMonth.nights],
-    ['2 Month Later', data.monthlyStats.twoMonths.count, data.monthlyStats.twoMonths.guests, data.monthlyStats.twoMonths.nights],
-    ['3 Month Later', data.monthlyStats.threeMonths.count, data.monthlyStats.threeMonths.guests, data.monthlyStats.threeMonths.nights],
-    ['Continue', data.monthlyStats.continue.count, data.monthlyStats.continue.guests, data.monthlyStats.continue.nights],
-    ['Total Amount', data.monthlyStats.thisMonth.count + data.monthlyStats.nextMonth.count + data.monthlyStats.twoMonths.count + data.monthlyStats.threeMonths.count + data.monthlyStats.continue.count, data.monthlyStats.thisMonth.guests + data.monthlyStats.nextMonth.guests + data.monthlyStats.twoMonths.guests + data.monthlyStats.threeMonths.guests + data.monthlyStats.continue.guests, data.monthlyStats.thisMonth.nights + data.monthlyStats.nextMonth.nights + data.monthlyStats.twoMonths.nights + data.monthlyStats.threeMonths.nights + data.monthlyStats.continue.nights],
+    ['Next Month', 'Monthly', 0, 0, 0],
+    ['2 Month Later', 'Monthly', 0, 0, 0],
+    ['3 Month Later', 'Monthly', 0, 0, 0],
+    ['Continue', 'Monthly', 0, 0, 0],
+    ['Total Amount', 0, 0, 0],
   ];
   for (const row of monthlyRows) {
     ws.mergeCells(`A${r}:B${r}`);
@@ -2610,11 +2626,6 @@ async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
   ws.getCell(`F${r}`).font = { bold: true };
   ws.getCell(`F${r}`).alignment = { horizontal: 'center' };
   r++;
-  ['', '', '件', '人', '泊', 'pct', '件', '件', '泊', ''].forEach((h, i) => {
-    ws.getCell(r, 1 + i).value = h;
-    ws.getCell(r, 1 + i).font = { bold: true };
-  });
-  r++;
 
   const g = data.groupStats;
   const c = data.companyStats;
@@ -2634,9 +2645,10 @@ async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
     ws.getCell(r, 4).value = `${item.guests} 人`;
     ws.getCell(r, 5).value = `${item.nights} 泊`;
     ws.getCell(r, 6).value = pctOf(useCount === 'count' ? item.count : item.nights);
-    ws.getCell(r, 7).value = `${item.count} 件`;
-    ws.getCell(r, 8).value = `${item.guests} 人`;
-    ws.getCell(r, 9).value = `${item.nights} 泊`;
+    ws.getCell(r, 7).value = '件';
+    ws.getCell(r, 8).value = '件';
+    ws.getCell(r, 9).value = '泊';
+    ws.getCell(r, 10).value = '';
     r++;
   }
   for (const [cname, item] of Object.entries(c.ota) as [string, any][]) {
@@ -2646,9 +2658,10 @@ async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
     ws.getCell(r, 4).value = `${item.guests} 人`;
     ws.getCell(r, 5).value = `${item.nights} 泊`;
     ws.getCell(r, 6).value = pctOf(item.nights);
-    ws.getCell(r, 7).value = `${item.count} 件`;
-    ws.getCell(r, 8).value = `${item.guests} 人`;
-    ws.getCell(r, 9).value = `${item.nights} 泊`;
+    ws.getCell(r, 7).value = '件';
+    ws.getCell(r, 8).value = '件';
+    ws.getCell(r, 9).value = '泊';
+    ws.getCell(r, 10).value = '';
     r++;
   }
   ws.mergeCells(`A${r}:B${r}`);
@@ -2657,9 +2670,10 @@ async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
   ws.getCell(r, 4).value = `${c.others.guests} 人`;
   ws.getCell(r, 5).value = `${c.others.nights} 泊`;
   ws.getCell(r, 6).value = pctOf(c.others.nights);
-  ws.getCell(r, 7).value = `${c.others.count} 件`;
-  ws.getCell(r, 8).value = `${c.others.guests} 人`;
-  ws.getCell(r, 9).value = `${c.others.nights} 泊`;
+  ws.getCell(r, 7).value = '件';
+  ws.getCell(r, 8).value = '人';
+  ws.getCell(r, 9).value = '泊';
+  ws.getCell(r, 10).value = '';
   r++;
   ws.mergeCells(`A${r}:B${r}`);
   ws.getCell(`A${r}`).value = 'Subtotal';
@@ -2668,20 +2682,22 @@ async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
   ws.getCell(r, 4).value = `${c.subtotal.guests} 人`;
   ws.getCell(r, 5).value = `${c.subtotal.nights} 泊`;
   ws.getCell(r, 6).value = pctOf(c.subtotal.nights);
-  ws.getCell(r, 7).value = `${c.subtotal.count} 件`;
-  ws.getCell(r, 8).value = `${c.subtotal.guests} 人`;
-  ws.getCell(r, 9).value = `${c.subtotal.nights} 泊`;
+  ws.getCell(r, 7).value = '件';
+  ws.getCell(r, 8).value = '人';
+  ws.getCell(r, 9).value = '泊';
+  ws.getCell(r, 10).value = '';
   r++;
   ws.mergeCells(`A${r}:B${r}`);
-  ws.getCell(`A${r}`).value = 'Grand Total';
+  ws.getCell(`A${r}`).value = 'Grand total';
   ws.getCell(`A${r}`).font = { bold: true };
   ws.getCell(r, 3).value = `${g.subtotal.count + c.subtotal.count} 件`;
   ws.getCell(r, 4).value = `${g.subtotal.guests + c.subtotal.guests} 人`;
   ws.getCell(r, 5).value = `${g.subtotal.nights + c.subtotal.nights} 泊`;
   ws.getCell(r, 6).value = Number(100.0.toFixed(2));
-  ws.getCell(r, 7).value = `${g.subtotal.count + c.subtotal.count} 件`;
-  ws.getCell(r, 8).value = `${g.subtotal.guests + c.subtotal.guests} 人`;
-  ws.getCell(r, 9).value = `${g.subtotal.nights + c.subtotal.nights} 泊`;
+  ws.getCell(r, 7).value = '件';
+  ws.getCell(r, 8).value = '人';
+  ws.getCell(r, 9).value = '泊';
+  ws.getCell(r, 10).value = '';
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="daily-checkin-list.xlsx"`);
@@ -2873,6 +2889,11 @@ async function generateGuestListingExcel(res: any, data: any): Promise<void> {
 
   const up = (v: any) => (v === undefined || v === null ? '-' : String(v).trim().toUpperCase() || '-');
   const fmt = (v: any) => (v === undefined || v === null || v === '' ? '-' : formatDMYDash(v));
+  if (data.reportData.length === 0) {
+    ws.mergeCells(3, 1, 3, headerCols.length + 1);
+    ws.getCell(3, 1).value = 'Tidak ada data tamu yang sesuai filter';
+    ws.getCell(3, 1).alignment = { horizontal: 'center' };
+  }
   data.reportData.forEach((row: any, i: number) => {
     const r = 3 + i;
     ws.getCell(r, 1).value = i + 1;
@@ -2880,7 +2901,7 @@ async function generateGuestListingExcel(res: any, data: any): Promise<void> {
       let v: any = '-';
       if (c === 'account') v = row.account ?? '-';
       else if (c === 'status_profile') v = row.status_profile ?? '-';
-      else if (c === 'name_combine') v = up(row.name_combine);
+      else if (c === 'name_combine') v = String(row.name_combine ?? '').trim().toUpperCase();
       else if (c === 'gender') v = row.gender ?? '-';
       else if (c === 'age') v = row.age ?? '-';
       else if (c === 'birth_of_date') v = fmt(row.birth_of_date);
