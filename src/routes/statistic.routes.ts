@@ -11,6 +11,7 @@ router.get('/statistic/by-room-type', authMiddleware, StatisticController.byRoom
 router.get('/statistic/statistic-room-type', authMiddleware, StatisticController.byRoomType);
 router.get('/statistic/statistic-room-type-grouping', authMiddleware, StatisticController.byRoomType);
 router.get('/statistic/room-availability', authMiddleware, StatisticController.roomAvailability);
+router.get('/statistic/room-availability/folio/:folioNumber', authMiddleware, StatisticController.getFolioDetail);
 router.get('/statistic/messages', authMiddleware, StatisticController.messages);
 router.get('/statistic/rate-codes', authMiddleware, StatisticController.rateCodes);
 router.get('/statistic', authMiddleware, StatisticController.roomStatisticGrid);

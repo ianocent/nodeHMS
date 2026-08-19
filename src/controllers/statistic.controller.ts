@@ -661,8 +661,66 @@ export class StatisticController {
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       };
-      success(res, null, 'Success', 200, meta);
+success(res, null, 'Success', 200, meta);
     } catch (err: any) { console.error('Room statistic grid error:', err); error(res, 'Failed to load room statistic', 500); }
+  }
+
+  // Laravel: StatisticController@getFolioDetail (cms.php route statistic/room-availability/folio/{folioNumber})
+  static async getFolioDetail(req: Request, res: Response): Promise<void> {
+    try {
+      const folioNumber = String(req.params.folioNumber ?? '').trim();
+      const folio = await prisma.folios.findFirst({
+        where: { folio_number: folioNumber, deleted_at: null },
+      });
+      if (!folio) { error(res, 'Folio tidak ditemukan: ' + folioNumber, 404); return; }
+
+      const reservation = await prisma.reservations.findFirst({
+        where: { folio_id: folio.id, deleted_at: null },
+        orderBy: { check_in_date: 'desc' },
+      });
+      if (!reservation) { error(res, 'Reservation tidak ditemukan untuk folio: ' + folioNumber, 404); return; }
+
+      const firstName = String(folio.first_name ?? '').trim();
+      const lastName = String(folio.last_name ?? '').trim();
+      let guestName = `${firstName} ${lastName}`.trim();
+      const companyName = String(folio.company_name ?? 'N/A');
+
+      if (!guestName && folio.guest_profile_id) {
+        const guestProfile = await prisma.guest_profiles.findFirst({
+          where: { id: folio.guest_profile_id, deleted_at: null },
+        });
+        if (guestProfile) {
+          guestName = `${String(guestProfile.first_name ?? '').trim()} ${String(guestProfile.last_name ?? '').trim()}`.trim();
+        }
+      }
+
+      const statusMap: Record<number, string> = {
+        0: 'Check-In', 1: 'Check-Out', 2: 'Cancelled', 3: 'Reservation', 4: 'In House', 5: 'Pending',
+      };
+
+      let rateName = reservation.rate_name ?? null;
+      if (rateName === null && reservation.rate_id) {
+        const rate = await prisma.rates.findFirst({
+          where: { id: reservation.rate_id, deleted_at: null, property_id: folio.property_id ?? undefined },
+        });
+        rateName = rate?.name ?? null;
+      }
+
+      success(res, {
+        folio_number: folio.folio_number,
+        guest_name: guestName || '-',
+        company_name: companyName.toUpperCase() || '-',
+        rate_name: rateName ?? '-',
+        check_in_date: reservation.check_in_date ?? '-',
+        check_out_date: reservation.check_out_date ?? '-',
+        room_name: reservation.room_name ?? '-',
+        status: statusMap[folio.status_reservation ?? 0] ?? 'Unknown',
+        type_reservation: String(folio.type_reservation ?? '').toUpperCase() || '-',
+      });
+    } catch (err: any) {
+      console.error('getFolioDetail error:', err);
+      error(res, 'getFolioDetail error: ' + (err?.message ?? 'unknown'), 500);
+    }
   }
 }
 

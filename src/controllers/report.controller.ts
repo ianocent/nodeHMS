@@ -3125,7 +3125,11 @@ LEFT JOIN cities c ON gp.city_id = c.id
 WHERE 1=1 ${whereSql}
 ORDER BY COALESCE(fn.totalStay, 0) DESC, gp.account`;
 
-  const rows = await prisma.$queryRawUnsafe(sql, ...cteBindings, ...bindings);
+  // Prisma 7 driver adapter (PrismaPg) strips `?` placeholders in $queryRawUnsafe.
+  // Convert to sequential $1..$n before calling.
+  let n = 0;
+  const numberedSql = sql.replace(/\?/g, () => `$${++n}`);
+  const rows = await prisma.$queryRawUnsafe(numberedSql, ...cteBindings, ...bindings);
   const safeRows = Array.isArray(rows) ? rows.map((x: any) => bigintToNumber(x)) : [];
 
   return {
