@@ -1087,7 +1087,8 @@ success(res, formatted, 'Success', 200, {
       const businessDate = new Date();
       const bdate = await AuthController.getBusinessDate(pid === 0n ? null : pid);
 
-      const folio = await prisma.folios.findUnique({
+// Try find folio by id; if not found, fall back to reservations.id -> folio_id
+      let folio = await prisma.folios.findUnique({
         where: { id },
         include: {
           company_profiles_folios_company_profile_idTocompany_profiles: true,
@@ -1095,6 +1096,21 @@ success(res, formatted, 'Success', 200, {
           reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, include: { room_types: true, rates: true } },
         },
       });
+
+      if (!folio || folio.deleted_at) {
+        // Fallback: id may be a reservation id; lookup its folio_id
+        const resv = await prisma.reservations.findUnique({ where: { id, deleted_at: null }, select: { folio_id: true } });
+        if (resv?.folio_id) {
+          folio = await prisma.folios.findUnique({
+            where: { id: resv.folio_id },
+            include: {
+              company_profiles_folios_company_profile_idTocompany_profiles: true,
+              company_profiles_folios_booking_agent_idTocompany_profiles: true,
+              reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, include: { room_types: true, rates: true } },
+            },
+          });
+        }
+      }
 
       if (!folio || folio.deleted_at) { notFound(res, 'Not Found'); return; }
 

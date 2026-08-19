@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { ReservationController } from '../controllers/reservation.controller';
+import { FolioController } from '../controllers/folio.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 
@@ -83,6 +84,10 @@ router.post('/reservation/:id/confirm', authMiddleware, requirePermission(80, 'e
 router.post('/reservation/:id/unassign-room', authMiddleware, requirePermission(80, 'edit'), ReservationController.unassignRoom);
 router.post('/reservation/:id/replicate', authMiddleware, requirePermission(80, 'add'), ReservationController.replicate);
 router.post('/reservation/:id/assign-room', authMiddleware, requirePermission(80, 'edit'), ReservationController.assignRoom);
+
+// update-status (mirror Laravel ReservationController@updateStatus)
+router.post('/reservation/update-status/:folio', authMiddleware, requirePermission(80, 'edit'), FolioController.updateStatus);
+router.put('/reservation/update-status/:folio', authMiddleware, requirePermission(80, 'edit'), FolioController.updateStatus);
 
 // ── Reservation items (sub-resource) ──
 router.get('/reservations/:folioId/items', authMiddleware, requirePermission(80, 'view'), ReservationController.listItems);

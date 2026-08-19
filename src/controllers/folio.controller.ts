@@ -343,7 +343,7 @@ export class FolioController {
 
   static async updateStatus(req: Request, res: Response): Promise<void> {
     try {
-      const id = idParam(req.params.id);
+      const id = idParam(req.params.folio);
       const userId = req.user?.id;
       const { status_reservation, check_in_date, check_out_date, reason } = req.body;
 

@@ -6,6 +6,8 @@ import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission, getPermissionFlags } from '../middleware/permission.middleware';
 import { success, error, notFound } from '../utils/response';
 import { encrypt } from '../utils/encryption';
+import { moneyFormat } from '../utils/cmsConfig';
+import { STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 import { GenericController } from '../controllers/generic.controller';
 import { RoomController } from '../controllers/room.controller';
 import { ApprovalMatrixController } from '../controllers/approval-matrix.controller';
@@ -300,31 +302,207 @@ const countryByRegionHandler = async (req: Request, res: Response) => {
 router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
 router.get('/countrybyregion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
 
-// â”€â”€ Assign Room (GET â€” fetch available rooms for assignment dropdown) â”€â”€
+// ── Assign Room (GET — mirror Laravel AssignRoomController@index/default/defaultParent) ──
 router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async (req: Request, res: Response) => {
   try {
     const propertyId = req.user?.lastProperty;
-    const roomTypeId = req.query.room_type_id as string;
-    const folioId = req.query.folio_id as string;
-    const type = req.query.type as string || 'available';
+    const folioIdStr = req.query.folio_id as string;
+    const type = (req.query.type as string) || 'available';
 
-    const where: any = { deleted_at: null, is_physical: true };
-    if (propertyId) where.property_id = BigInt(propertyId);
-    if (roomTypeId) where.room_type_id = BigInt(roomTypeId);
-
-    if (type === 'available') {
-      where.status = 0;
+    if (!folioIdStr) {
+      return error(res, 'folio_id required', 400);
     }
+    const folioId = BigInt(folioIdStr);
 
-    const rooms = await prisma.rooms.findMany({
-      where,
-      orderBy: { sort: 'asc' },
-      include: { room_types: { select: { id: true, name: true } } },
+    const folio = await prisma.folios.findUnique({
+      where: { id: folioId, deleted_at: null },
+      include: {
+        reservations: {
+          where: { deleted_at: null },
+          orderBy: { date: 'asc' },
+          include: {
+            room_types: { select: { id: true, name: true } },
+            rooms: { select: { id: true, name: true } },
+            rates: { select: { id: true, name: true, code: true } },
+          },
+        },
+        guest_profiles: { select: { first_name: true, last_name: true } },
+        company_profiles_folios_company_profile_idTocompany_profiles: { select: { name: true } },
+      },
     });
 
-    success(res, bigintToNumber(rooms), 'Success');
+    if (!folio) {
+      return error(res, 'Folio not found', 404);
+    }
+
+    const isParentGit = folio.type_reservation?.toLowerCase() === 'git' && Number(folio.parent) === 0;
+    const parentGitTypes = ['check_in', 'check_out', 'move_reservation', 'un_check_in', 'un_check_out', 'all'];
+
+    // Helper: status label
+    const statusLabel = (code: number) => STATUS_RESERVATION_MAP[code] ?? String(code);
+
+    // Helper: lastReservation (is_posting 0, date asc first)
+    const lastReservation = (resvs: any[]) => {
+      const postingZero = resvs.filter(r => r.is_posting === 0);
+      return postingZero.length ? postingZero[0] : (resvs.length ? resvs[0] : null);
+    };
+
+    // Default parent GIT
+    if (isParentGit && parentGitTypes.includes(type)) {
+      const childFolios = await prisma.folios.findMany({
+        where: { parent: folioId, deleted_at: null },
+        include: {
+          reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, include: { room_types: true, rooms: true, rates: true } },
+          guest_profiles: { select: { first_name: true, last_name: true } },
+          company_profiles_folios_company_profile_idTocompany_profiles: { select: { name: true } },
+        },
+      });
+
+      let data: any[] = [];
+      const targetStatus = type === 'check_in' ? 3 : (type === 'check_out' || type === 'un_check_in' ? 0 : 3);
+      const filteredChildren = childFolios.filter(c => c.status_reservation === targetStatus);
+
+      for (const child of filteredChildren) {
+        const lr = lastReservation(child.reservations);
+        if (!lr) continue;
+        data.push({
+          id: Number(child.id),
+          guest: `${child.guest_profiles?.first_name ?? ''} ${child.guest_profiles?.last_name ?? ''}`.trim(),
+          guest_profile_id: child.guest_profile_id ? Number(child.guest_profile_id) : null,
+          status: statusLabel(child.status_reservation ?? 3),
+          folio_number: child.folio_number,
+          room_type_id: lr.room_type_id ? Number(lr.room_type_id) : null,
+          room_type: lr.room_types?.name ?? '',
+          room_id: lr.room_id ? Number(lr.room_id) : null,
+          room: lr.rooms?.name ?? '',
+          rate_id: lr.rate_id ? Number(lr.rate_id) : null,
+          rate: lr.rates?.name ?? lr.rates?.code ?? '',
+          company_id: child.company_profile_id ? Number(child.company_profile_id) : null,
+          company: child.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? '',
+          check_in_date: child.check_in_date ? child.check_in_date.toISOString().slice(0, 10) : '',
+          check_out_date: child.check_out_date ? child.check_out_date.toISOString().slice(0, 10) : '',
+          adult: lr.adult ?? 0,
+          child: lr.child ?? 0,
+          remark: lr.remark ?? '',
+        });
+      }
+
+      const table = [
+        { label: 'Folio Number', key: 'folio_number', type: 'none', is_search: false },
+        { label: 'Check In Date', key: 'check_in_date', type: 'none', is_search: false },
+        { label: 'Check Out Date', key: 'check_out_date', type: 'none', is_search: false },
+        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+        { label: 'Room', key: 'room', type: 'none', is_search: false },
+        { label: 'Rate', key: 'rate', type: 'none', is_search: false },
+      ];
+
+      const page = Number(req.query.page || 1);
+      const limit = 999;
+      return success(res, {
+        data,
+        code: 200,
+        message: 'Success',
+        table,
+        pagging: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
+        permission: { view: true, edit: true },
+      });
+    }
+
+    // Confirm change room — not implemented, fallback to default()
+    if (type === 'confirm_change_room') {
+      // Fall through to default()
+    }
+
+    // Default for check_in, check_out, move_reservation, assign_room, un_check_out, un_check_in, cancel_reservation
+    const defaultTypes = ['check_in', 'check_out', 'move_reservation', 'assign_room', 'un_check_out', 'un_check_in', 'cancel_reservation'];
+    if (defaultTypes.includes(type)) {
+      const reservations = folio.reservations;
+      let data: any[] = reservations.map((r: any) => ({
+        id: Number(r.id),
+        date: r.date ? r.date.toISOString().slice(0, 10) : '',
+        guest: `${folio.guest_profiles?.first_name ?? ''} ${folio.guest_profiles?.last_name ?? ''}`.trim(),
+        guest_profile_id: folio.guest_profile_id ? Number(folio.guest_profile_id) : null,
+        status: statusLabel(folio.status_reservation ?? 3),
+        room_type_id: r.room_type_id ? Number(r.room_type_id) : null,
+        room_type: r.room_types?.name ?? '',
+        room_id: r.room_id ? Number(r.room_id) : null,
+        room: r.rooms?.name ?? '',
+        rate_id: r.rate_id ? Number(r.rate_id) : null,
+        rate: r.rates?.name ?? r.rates?.code ?? '',
+        company_id: folio.company_profile_id ? Number(folio.company_profile_id) : null,
+        company: folio.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? '',
+        check_in_date: folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : '',
+        check_out_date: folio.check_out_date ? folio.check_out_date.toISOString().slice(0, 10) : '',
+        adult: r.adult ?? 0,
+        child: r.child ?? 0,
+        remark: r.remark ?? '',
+        rate_price: r.amount ? moneyFormat(Number(r.amount)) : '0.00',
+        is_posting: r.is_posting ?? 0,
+      }));
+
+      // Type-specific filters
+      if (type === 'move_reservation' || type === 'un_check_out') {
+        const first = data[0];
+        if (first) {
+          first.id = Number(folio.id);
+          data = [first];
+        }
+      }
+      if (type === 'check_out') {
+        data = data.length ? [data[data.length - 1]] : [];
+      }
+      if (type === 'check_in') {
+        data = data.length ? [data[0]] : [];
+      }
+
+      const table = [
+        { label: 'date', key: 'date', type: 'none', is_search: false },
+        { label: 'Company', key: 'company', type: 'none', is_search: false },
+        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+        { label: 'Room', key: 'room', type: 'none', is_search: false },
+        { label: 'Rate Code', key: 'rate', type: 'none', is_search: false },
+      ];
+
+      const page = Number(req.query.page || 1);
+      const limit = 999;
+      return success(res, {
+        data,
+        code: 200,
+        message: 'Success',
+        table,
+        pagging: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
+        permission: { view: true, edit: true },
+      });
+    }
+
+    // Plain fallback (type == 'available' or others): date/room_type/room from reservations
+    const data = folio.reservations.map((r: any) => ({
+      id: Number(r.id),
+      date: r.date ? r.date.toISOString().slice(0, 10) : '',
+      room_type_id: r.room_type_id ? Number(r.room_type_id) : null,
+      room_type: r.room_types?.name ?? '',
+      room_id: r.room_id ? Number(r.room_id) : null,
+      room: r.rooms?.name ?? '',
+    }));
+
+    const table = [
+      { label: 'date', key: 'date', type: 'none', is_search: false },
+      { label: 'Room Type', key: 'room_type_id', type: 'none', is_search: false },
+      { label: 'Room', key: 'room_id', type: 'none', is_search: false },
+    ];
+
+    const page = Number(req.query.page || 1);
+    const limit = 999;
+    success(res, {
+      data,
+      code: 200,
+      message: 'Success',
+      table,
+      pagging: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
+      permission: { view: true, edit: true },
+    });
   } catch (err: any) {
-    error(res, err.message || 'Failed to fetch assignable rooms', 500);
+    error(res, err.message || 'Failed to fetch assign-room data', 500);
   }
 });
 

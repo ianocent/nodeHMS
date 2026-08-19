@@ -946,6 +946,12 @@ success(res, bigintToNumber(data), 'Success', 200, {
             })),
           });
         }
+
+        // Update room maid_status to 'dirty' (1) when housekeeper assigned
+        await prisma.rooms.update({
+          where: { id: roomId },
+          data: { maid_status: MAID_STATUSES.dirty.id },
+        });
       }
 
       success(res, null, 'Batch update successful');

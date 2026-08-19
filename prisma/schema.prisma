@@ -1535,6 +1535,7 @@ model folios {
   properties                                                   properties                    @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   company_profiles_folios_company_profile_idTocompany_profiles company_profiles              @relation("folios_company_profile_idTocompany_profiles", fields: [company_profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   company_profiles_folios_booking_agent_idTocompany_profiles   company_profiles?             @relation("folios_booking_agent_idTocompany_profiles", fields: [booking_agent_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  guest_profiles                                               guest_profiles?               @relation(fields: [guest_profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   messages                                                     messages[]
   reservations                                                 reservations[]
   staah_reservations                                           staah_reservations[]
@@ -1733,6 +1734,7 @@ model guest_profiles {
   guest_profile_request_notes                                                                    guest_profile_request_notes[]
   properties                                                                                     properties                     @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   other_guests                                                                                   other_guests[]
+  folios                                                                                         folios[]
 
   @@index([property_id])
   @@index([id, property_id, deleted_at])
@@ -3019,6 +3021,7 @@ model reservations {
   rates                    rates?               @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   folios                   folios               @relation(fields: [folio_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   room_types               room_types?          @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rooms                    rooms?               @relation(fields: [room_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   staah_reservations       staah_reservations[]
 
   @@index([company_profile_id])
@@ -3299,6 +3302,7 @@ model rooms {
   other_rooms              rooms[]                    @relation("roomsTorooms")
   room_types               room_types                 @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   work_orders              work_orders[]
+  reservations             reservations[]
 
   @@index([is_physical])
   @@index([is_physical, maid_status])
