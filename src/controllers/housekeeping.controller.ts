@@ -287,7 +287,7 @@ export class HousekeepingController {
           { label: 'Room type', key: 'room_type_id', type: 'none', is_search: false, options: [] },
           { label: 'Guest Name', key: 'guest', type: 'none', is_search: false },
           { label: 'DND', key: 'is_do_not_disturb', type: 'none', is_search: false },
-          { label: 'Cleaning time', key: 'cleaning_time', type: 'none', is_search: false },
+          { label: 'Cleaning time', key: 'cleaning_time', type: 'date', is_search: false },
           { label: 'Linen days', key: 'linen_days', type: 'none', is_search: false },
           { label: 'Bed', key: 'total_bed', type: 'none', is_search: false },
           { label: 'Phone Ext', key: 'phone_ext', type: 'none', is_search: false },
