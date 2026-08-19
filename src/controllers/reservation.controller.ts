@@ -24,7 +24,7 @@ const STATUS_RESERVATION = {
 };
 
 const STATUS_ACTIVE = 1;
-const MENU_ID = 80; // Reservation menu ID
+const MENU_ID = 60; // Reservation menu ID
 
 // Reservation action icons (matching Laravel config/cms.php action_reservation.action)
 const ACTION_RESERVATION: { key: string; name: string; icon: string; line?: boolean }[] = [
@@ -2640,7 +2640,7 @@ success(res, formatted, 'Success', 200, {
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /cms/reservation/rate (Laravel getRate)
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  static async rateListHelper(req: Request, res: Response): Promise<void> {
+static async rateListHelper(req: Request, res: Response): Promise<void> {
     try {
       const ci = req.query.check_in_date as string;
       const co = req.query.check_out_date as string;
@@ -2649,10 +2649,12 @@ success(res, formatted, 'Success', 200, {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const propertyId = req.user?.lastProperty;
+      if (!propertyId) { badRequest(res, 'Property not found'); return; }
+      const pId = BigInt(propertyId);
       const rtId = BigInt(roomTypeId);
 
       const where: any = { deleted_at: null, module: 'rate' };
-      where.rate_rates = { some: { room_type_id: rtId, property_id: propertyId ? BigInt(propertyId) : undefined } };
+      where.rate_rates = { some: { room_type_id: rtId, property_id: pId } };
       const ciD = new Date(ci);
       const coD = new Date(co);
       where.start_date = { lte: ciD };
