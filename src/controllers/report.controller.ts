@@ -35,6 +35,10 @@ function bigintToNumber(val: any): any {
   return val;
 }
 
+function isNumeric(v: any): boolean {
+  return v !== '' && v !== null && !isNaN(Number(v));
+}
+
 function formatDate(d: any): string {
   if (!d) return '';
   const dt = new Date(d);
@@ -1229,7 +1233,7 @@ async function getTransactionRpt(params: any): Promise<any> {
       gst: Number(t.tax3 || 0),
       total: Number(t.total || 0),
     };
-  }).sort((a: any, b: any) => a.category.localeCompare(b.category));
+  }).sort((a: any, b: any) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
 
   const categories: Record<string, any> = {};
   const totals = { excl_tax: 0, gst: 0, total: 0 };
@@ -1899,20 +1903,29 @@ async function generateRoomUtilizationExcel(res: Response, data: any): Promise<v
 
 async function getWeeklyBooking(params: any): Promise<any> {
   const pid = params.propertyId;
-  const base = params.date || params.startDate || formatDate(new Date());
-  const d = new Date(`${base}T00:00:00Z`);
-  const offset = (d.getUTCDay() + 6) % 7; // Carbon startOfWeek = Monday
-  const start = new Date(d);
-  start.setUTCDate(start.getUTCDate() - offset);
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 6);
-  const startDate = formatDate(start);
-  const endDate = formatDate(end);
+  const tryDate = (v: any): Date | null => {
+    if (!v) return null;
+    const d = new Date(`${String(v).slice(0, 10)}T00:00:00Z`);
+    return isNaN(d.getTime()) ? null : d;
+  };
+  const weekStart = (d: Date): Date => {
+    const offset = (d.getUTCDay() + 6) % 7; // Carbon startOfWeek = Monday
+    const s = new Date(d);
+    s.setUTCDate(s.getUTCDate() - offset);
+    return s;
+  };
+  // start/end bounds computed independently (Laravel: isDate invalid -> businessDate week; valid -> startOfWeek/endOfWeek of that value)
+  const startDate = weekStart(tryDate(params.startDate || params.date) ?? new Date());
+  const endBase = weekStart(tryDate(params.endDate || params.date) ?? new Date());
+  const endDate = new Date(endBase);
+  endDate.setUTCDate(endDate.getUTCDate() + 6);
+  const startDateStr = formatDate(startDate);
+  const endDateStr = formatDate(endDate);
 
   const reservations = await prisma.reservations.findMany({
     where: {
       property_id: pid,
-      date: { gte: new Date(`${startDate}T00:00:00Z`), lte: new Date(`${endDate}T23:59:59Z`) },
+      date: { gte: new Date(`${startDateStr}T00:00:00Z`), lte: new Date(`${endDateStr}T23:59:59Z`) },
       deleted_at: null,
     },
     select: { id: true, folio_id: true, adult: true, child: true, promo_code: true },
@@ -2010,9 +2023,11 @@ async function getWeeklyBooking(params: any): Promise<any> {
       const dk = directBookingData[srcName];
       dk.reservations += 1; dk.persons += persons; dk.nights += nights;
       if (res.promo_code) {
-        const promoName = promoDesc.get(res.promo_code) ?? res.promo_code;
-        if (!othersPromoData.has(promoName)) othersPromoData.set(promoName, { name: promoName, sources: { LINE: { reservations: 0, persons: 0, nights: 0 }, WHATSAPP: { reservations: 0, persons: 0, nights: 0 }, TELEPHONE: { reservations: 0, persons: 0, nights: 0 }, INSTAGRAM: { reservations: 0, persons: 0, nights: 0 } } });
-        const p = othersPromoData.get(promoName)!;
+        // Laravel: keyed by promo CODE (name = description ?? code) — same desc different codes stay separate rows
+        const promoKey = String(res.promo_code);
+        const promoName = promoDesc.get(promoKey) ?? promoKey;
+        if (!othersPromoData.has(promoKey)) othersPromoData.set(promoKey, { name: promoName, sources: { LINE: { reservations: 0, persons: 0, nights: 0 }, WHATSAPP: { reservations: 0, persons: 0, nights: 0 }, TELEPHONE: { reservations: 0, persons: 0, nights: 0 }, INSTAGRAM: { reservations: 0, persons: 0, nights: 0 } } });
+        const p = othersPromoData.get(promoKey)!;
         const ps = p.sources[srcName];
         ps.reservations += 1; ps.persons += persons; ps.nights += nights;
       }
@@ -2240,21 +2255,24 @@ async function getCalendarOperation(params: any): Promise<any> {
   let cursor = new Date(`${startDate}T00:00:00Z`);
   const lastDay = new Date(`${endDate}T23:59:59Z`);
   while (cursor <= lastDay) {
-    const monthStart = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), 1));
+    // Laravel chunk: startDate + n months; chunkEnd = endDate only when same month, else chunkStart itself (1 day)
+    const sameMonth = cursor.getUTCFullYear() === lastDay.getUTCFullYear() && cursor.getUTCMonth() === lastDay.getUTCMonth();
+    const chunkEnd = sameMonth ? new Date(lastDay) : new Date(cursor);
     const daysInMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0)).getUTCDate();
-    const monthEnd = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
-    if (monthEnd > lastDay) monthEnd.setTime(lastDay.getTime());
 
     const dailyData: any[] = [];
-    let dayCursor = new Date(monthStart);
-    while (dayCursor <= monthEnd) {
+    let dayCursor = new Date(cursor);
+    while (dayCursor <= chunkEnd) {
       const day = formatDate(dayCursor);
       const dayRes = (resByDay.get(day) || []).map((rsv: any) => eligible(Number(rsv.folio_id), rsv.rate_id)).filter(Boolean);
       const dailyTotal = dayRes.length;
       runningTotal += dailyTotal;
       const travelAgent = dayRes.filter((f: any) => (companyTypeNames.get(Number(f.company_profile_id)) || []).includes('TRAVEL AGENT')).length;
       const ota = dayRes.filter((f: any) => (companyTypeNames.get(Number(f.company_profile_id)) || []).some((n: string) => n.toUpperCase().includes('OTA'))).length;
-      const directBooking = dailyTotal - travelAgent - ota;
+      const directBooking = dayRes.filter((f: any) => {
+        const names = (companyTypeNames.get(Number(f.company_profile_id)) || []).map((n: string) => n.toUpperCase());
+        return !names.includes('TRAVEL AGENT') && !names.includes('OTA');
+      }).length;
       const tentative = dayRes.filter((f: any) => f.status_reservation === 5).length;
       const confirmed = dailyTotal - tentative;
       const occupancyRate = Math.round((dailyTotal / Math.max(totalRooms, 1)) * 1000) / 10;
@@ -2273,14 +2291,14 @@ async function getCalendarOperation(params: any): Promise<any> {
       dayCursor.setUTCDate(dayCursor.getUTCDate() + 1);
     }
     monthlyData.push({
-      start_date: formatDate(monthStart),
-      end_date: formatDate(monthEnd),
+      start_date: formatDate(cursor),
+      end_date: formatDate(chunkEnd),
       daily_data: dailyData,
       monthly_total: runningTotal,
       monthly_target: totalRooms * daysInMonth,
       monthly_occupancy_rate: Math.round((runningTotal / Math.max(totalRooms * daysInMonth, 1)) * 1000) / 10,
     });
-    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
   }
 
   return { startDate, endDate, totalRooms, monthlyData };
@@ -2425,8 +2443,9 @@ async function getDailyCheckin(params: any): Promise<any> {
   const reportData: any[] = [];
   let stt = 0;
   for (const f of folios) {
-    stt++;
     const rsv = lastRes(Number(f.id));
+    if (!rsv) continue; // Laravel: row only when lastReservation exists
+    stt++;
     const gp = f.guest_profile_id ? guestById.get(Number(f.guest_profile_id)) : undefined;
     reportData.push({
       stt,
@@ -2435,8 +2454,8 @@ async function getDailyCheckin(params: any): Promise<any> {
       booking_no: f.folio_number,
       guest_name: `${gp?.first_name ?? ''} ${gp?.last_name ?? ''}`,
       check_in_date: formatDateMYShort(f.check_in_date),
-      pax: (Number(rsv?.adult) || 0) + (Number(rsv?.child) || 0),
-      total_nights: rsv ? diffDays(rsv.check_in_date ?? f.check_in_date, f.check_out_date) : diffDays(f.check_in_date, f.check_out_date),
+      pax: (Number(rsv.adult) || 0) + (Number(rsv.child) || 0),
+      total_nights: diffDays(f.check_in_date, f.check_out_date),
       source: sourceOf(Number(f.id)),
       reception: f.created_by ? (userById.get(Number(f.created_by)) ?? '') : '',
     });
@@ -2462,8 +2481,6 @@ async function getDailyCheckin(params: any): Promise<any> {
     if (!f.res_date) continue;
     const m = monthOf(new Date(f.res_date));
     const rsv = monthLastRes.get(Number(f.id));
-    const guests = (Number(rsv?.adult) || 0) + (Number(rsv?.child) || 0);
-    const nights = diffDays(f.check_in_date, f.check_out_date);
     let bucket: keyof typeof monthlyStats;
     if (m === nowM) bucket = 'thisMonth';
     else if (m === nowM + 1) bucket = 'nextMonth';
@@ -2472,8 +2489,11 @@ async function getDailyCheckin(params: any): Promise<any> {
     else if (new Date(f.res_date) > threeEnd) bucket = 'continue';
     else continue;
     monthlyStats[bucket].count += 1;
-    monthlyStats[bucket].guests += guests;
-    monthlyStats[bucket].nights += nights;
+    // Laravel: guests/nights only when lastReservation exists (count uses folios->count())
+    if (rsv) {
+      monthlyStats[bucket].guests += (Number(rsv.adult) || 0) + (Number(rsv.child) || 0);
+      monthlyStats[bucket].nights += diffDays(f.check_in_date, f.check_out_date);
+    }
   }
 
   const dayFolios = folios;
@@ -2509,17 +2529,28 @@ async function getDailyCheckin(params: any): Promise<any> {
     }
   }
 
-  const companyStats: any = { ota: {} as any, walk_in: { count: 0, guests: 0, nights: 0 }, website: { count: 0, guests: 0, nights: 0 }, others: { count: 0, guests: 0, nights: 0 }, subtotal: { count: 0, guests: 0, nights: 0 } };
+  // Laravel: OTA companies = ALL property companies with company-type type LIKE %OTA% (init 0 rows even without folios today)
+  const allCompanies = await prisma.company_profiles.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true } });
+  const allCompanyIds = allCompanies.map((c: any) => Number(c.id));
+  const allCompanyMht = allCompanyIds.length
+    ? await prisma.model_has_types.findMany({ where: { model_type: 'App\\Models\\CompanyProfile', model_id: { in: allCompanyIds } }, select: { type_id: true, model_id: true } })
+    : [];
+  const allTypeIds = [...new Set(allCompanyMht.map((m: any) => Number(m.type_id)))];
+  const allTypes = allTypeIds.length ? await prisma.types.findMany({ where: { id: { in: allTypeIds }, group: 'company-type' }, select: { id: true, name: true } }) : [];
+  const allTypeById = new Map(allTypes.map((t: any) => [Number(t.id), t.name]));
+  const otaCompanies: any = {};
+  for (const c of allCompanies) {
+    const isOta = allCompanyMht.some((m: any) => Number(m.model_id) === Number(c.id) && (allTypeById.get(Number(m.type_id)) || '').toUpperCase().includes('OTA'));
+    if (isOta && c.name) otaCompanies[c.name] = { count: 0, guests: 0, nights: 0 };
+  }
+
+  const companyStats: any = { ota: otaCompanies, walk_in: { count: 0, guests: 0, nights: 0 }, website: { count: 0, guests: 0, nights: 0 }, others: { count: 0, guests: 0, nights: 0 }, subtotal: { count: 0, guests: 0, nights: 0 } };
   const walkInIds = new Set<number>();
   const websiteIds = new Set<number>();
   for (const [cid, cname] of companyById) {
     if (!cname) continue;
     if (cname.toLowerCase().includes('walk in')) walkInIds.add(cid);
     if (cname.toLowerCase().includes('website')) websiteIds.add(cid);
-  }
-  for (const [cid, cname] of companyById) {
-    if (!cname) continue;
-    if (otaCompanyIds.has(cid)) companyStats.ota[cname] = { count: 0, guests: 0, nights: 0 };
   }
   for (const f of dayFolios) {
     const cid = Number(f.company_profile_id);
@@ -2808,51 +2839,70 @@ async function getGuestListingReport(params: any): Promise<any> {
   if (!selectFields.length) selectFields = ['gp.account AS account', allowedColumns.name_combine];
   const select = selectFields.join(',\n  ');
 
+  const checkOutStatus = 1; // config status_reservation.check_out.id
+  const gitTypeCode = 'git'; // config type_reservation.git.code
+
+  const where: string[] = ['gp.property_id = ?'];
   const bindings: any[] = [pid];
-  const where: string[] = ['f.property_id = ?', 'f.deleted_at IS NULL'];
-  if (params.gender) { where.push('gp.gender = ?'); bindings.push(params.gender); }
-  if (params.min_age) { where.push('TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) >= ?'); bindings.push(Number(params.min_age)); }
-  if (params.max_age) { where.push('TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) <= ?'); bindings.push(Number(params.max_age)); }
+
+  // GENDER (Laravel: filled && !== 'all')
+  if (params.gender && params.gender !== 'all') { where.push('gp.gender = ?'); bindings.push(params.gender); }
+  // MIN/MAX AGE (is_numeric guard)
+  if (params.min_age !== undefined && params.min_age !== '' && isNumeric(params.min_age)) { where.push('TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) >= ?'); bindings.push(Number(params.min_age)); }
+  if (params.max_age !== undefined && params.max_age !== '' && isNumeric(params.max_age)) { where.push('TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) <= ?'); bindings.push(Number(params.max_age)); }
   const dobType = params.dob_filter_type;
   if (dobType === 'month' && params.dob_month) { where.push('MONTH(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_month)); }
-  if (dobType === 'year' && params.dob_year) { where.push('YEAR(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_year)); }
-  if (dobType === 'month_year' && params.dob_month && params.dob_year) { where.push('MONTH(gp.birth_of_date) = ? AND YEAR(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_month), Number(params.dob_year)); }
-  if (dobType === 'month_range' && params.dob_from_month && params.dob_to_month) { where.push('MONTH(gp.birth_of_date) BETWEEN ? AND ?'); bindings.push(Number(params.dob_from_month), Number(params.dob_to_month)); }
+  else if (dobType === 'year' && params.dob_year) { where.push('YEAR(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_year)); }
+  else if (dobType === 'month_year') {
+    // Laravel: each sub-filter applied independently when filled
+    if (params.dob_month) { where.push('MONTH(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_month)); }
+    if (params.dob_year) { where.push('YEAR(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_year)); }
+  }
+  if (dobType === 'month_range' && params.dob_from_month && params.dob_to_month) {
+    const from = Number(params.dob_from_month);
+    const to = Number(params.dob_to_month);
+    if (from <= to) { where.push('MONTH(gp.birth_of_date) BETWEEN ? AND ?'); bindings.push(from, to); }
+    else { where.push('(MONTH(gp.birth_of_date) >= ? OR MONTH(gp.birth_of_date) <= ?)'); bindings.push(from, to); }
+  }
   if (params.nationality_id) { where.push('gp.nationality_id = ?'); bindings.push(Number(params.nationality_id)); }
   if (params.country_id) { where.push('gp.country_id = ?'); bindings.push(Number(params.country_id)); }
   if (params.city_id) { where.push('gp.city_id = ?'); bindings.push(Number(params.city_id)); }
+  // LAST CHECKOUT (Laravel: plain folio EXISTS on check_out_date)
   if (params.last_checkout_date) {
-    where.push('EXISTS (SELECT 1 FROM folio_night fn2 WHERE fn2.folio_id = f.id AND DATE(fn2.last_checkout_date) = ?)');
+    where.push('EXISTS (SELECT 1 FROM folios f WHERE f.guest_profile_id = gp.id AND DATE(f.check_out_date) = ?)');
     bindings.push(params.last_checkout_date);
   }
-  if (params.stay_value && params.stay_operator) {
-    const op = ['>=', '<=', '>', '<', '='].includes(params.stay_operator) ? params.stay_operator : '>=';
-    where.push(`EXISTS (SELECT 1 FROM folio_night fn3 WHERE fn3.folio_id = f.id AND fn3.totalStay ${op} ?)`);
-    bindings.push(Number(params.stay_value));
+  // STAY FILTER (Laravel: grouped HAVING COUNT(*) op ?)
+  if (params.stay_value !== undefined && params.stay_value !== '' && isNumeric(params.stay_value)) {
+    const op = ['>', '<', '>=', '<=', '=', '!='].includes(params.stay_operator) ? params.stay_operator : '>=';
+    where.push(`EXISTS (SELECT 1 FROM folios f2 WHERE f2.guest_profile_id = gp.id AND f2.status_reservation = ? AND (f2.folio_number LIKE 'F%' OR (f2.type_reservation = ? AND f2.parent != 0)) GROUP BY f2.guest_profile_id HAVING COUNT(*) ${op} ?)`);
+    bindings.push(checkOutStatus, gitTypeCode, Number(params.stay_value));
   }
 
+  const whereSql = ' AND ' + where.join(' AND ');
+  const cteBindings = [checkOutStatus, gitTypeCode, pid];
+
   const sql = `WITH folio_night AS (
-  SELECT f.id AS folio_id,
+  SELECT f.guest_profile_id,
     SUM(CASE WHEN r.check_in_date IS NOT NULL AND r.check_out_date IS NOT NULL THEN DATEDIFF(r.check_out_date, r.check_in_date) ELSE 0 END) AS totalNight,
-    COUNT(DISTINCT CASE WHEN f.status = 1 AND (f.folio_number LIKE 'F%' OR (f.type_reservation = 'git' AND f.parent != 0)) THEN f.id END) AS totalStay,
+    COUNT(DISTINCT CASE WHEN f.status_reservation = ? AND (f.folio_number LIKE 'F%' OR (f.type_reservation = ? AND f.parent != 0)) THEN f.id ELSE NULL END) AS totalStay,
     MAX(COALESCE(r.check_out_date, f.check_out_date)) AS last_checkout_date
   FROM folios f
   LEFT JOIN reservations r ON r.folio_id = f.id
-  WHERE f.property_id = ? AND f.deleted_at IS NULL
-  GROUP BY f.id
+  WHERE f.property_id = ?
+  GROUP BY f.guest_profile_id
 )
 SELECT
   ${select}
-FROM folios f
-JOIN guest_profiles gp ON gp.id = f.guest_profile_id
-LEFT JOIN countries na ON na.id = gp.nationality_id
-LEFT JOIN countries co ON co.id = gp.country_id
-LEFT JOIN cities c ON c.id = gp.city_id
-LEFT JOIN folio_night fn ON fn.folio_id = f.id
-WHERE ${where.join(' AND ')}
+FROM guest_profiles gp
+LEFT JOIN folio_night fn ON fn.guest_profile_id = gp.id
+LEFT JOIN countries na ON gp.nationality_id = na.id
+LEFT JOIN countries co ON gp.country_id = co.id
+LEFT JOIN cities c ON gp.city_id = c.id
+WHERE 1=1 ${whereSql}
 ORDER BY COALESCE(fn.totalStay, 0) DESC, gp.account`;
 
-  const rows = await prisma.$queryRawUnsafe(sql, ...bindings);
+  const rows = await prisma.$queryRawUnsafe(sql, ...cteBindings, ...bindings);
   const safeRows = Array.isArray(rows) ? rows.map((x: any) => bigintToNumber(x)) : [];
 
   return {
