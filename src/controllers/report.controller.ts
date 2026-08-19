@@ -72,6 +72,22 @@ function diffDays(a: any, b: any): number {
   return Math.round((db.getTime() - da.getTime()) / 86400000);
 }
 
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function formatDMYDash(d: any): string {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return `${String(dt.getDate()).padStart(2, '0')}-${SHORT_MONTHS[dt.getMonth()]}-${dt.getFullYear()}`;
+}
+
+function formatMonthDayYear(d: any): string {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return `${LONG_MONTHS[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
+}
+
 async function revenueBetween(pid: any, s: Date, e: Date, type?: string): Promise<number> {
   // Generic revenue aggregator for reports. Matches previous behaviour: sum of `amount` in `transactions`.
   const where: any = { property_id: pid, date: { gte: s, lte: e }, deleted_at: null };
@@ -1875,6 +1891,1013 @@ async function generateRoomUtilizationExcel(res: Response, data: any): Promise<v
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="room-utilization-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── T3b: Laravel-only reporting keys (Weekly Booking / Calendar Operation / Daily Check-in / Company Profile / Guest Listing) ──
+
+async function getWeeklyBooking(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const base = params.date || params.startDate || formatDate(new Date());
+  const d = new Date(`${base}T00:00:00Z`);
+  const offset = (d.getUTCDay() + 6) % 7; // Carbon startOfWeek = Monday
+  const start = new Date(d);
+  start.setUTCDate(start.getUTCDate() - offset);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 6);
+  const startDate = formatDate(start);
+  const endDate = formatDate(end);
+
+  const reservations = await prisma.reservations.findMany({
+    where: {
+      property_id: pid,
+      date: { gte: new Date(`${startDate}T00:00:00Z`), lte: new Date(`${endDate}T23:59:59Z`) },
+      deleted_at: null,
+    },
+    select: { id: true, folio_id: true, adult: true, child: true, promo_code: true },
+    orderBy: { id: 'asc' },
+  });
+
+  const folioIds = [...new Set(reservations.map((r: any) => Number(r.folio_id)))];
+  const folios = folioIds.length
+    ? await prisma.folios.findMany({
+        where: { id: { in: folioIds } },
+        select: { id: true, company_profile_id: true, check_in_date: true, check_out_date: true },
+      })
+    : [];
+  const companyIds = [...new Set(folios.map((f: any) => Number(f.company_profile_id)).filter(Boolean))];
+  const companies = companyIds.length
+    ? await prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } })
+    : [];
+  const types = await prisma.types.findMany({
+    where: { property_id: pid, deleted_at: null },
+    select: { id: true, group: true, name: true },
+  });
+  const typeById = new Map(types.map((t: any) => [Number(t.id), t]));
+  const folioMht = folioIds.length
+    ? await prisma.model_has_types.findMany({
+        where: { model_type: 'App\\Models\\Folio', model_id: { in: folioIds } },
+        select: { type_id: true, model_id: true },
+      })
+    : [];
+  const companyMht = companyIds.length
+    ? await prisma.model_has_types.findMany({
+        where: { model_type: 'App\\Models\\CompanyProfile', model_id: { in: companyIds } },
+        select: { type_id: true, model_id: true },
+      })
+    : [];
+  const companyTypeNames = new Map<number, string[]>();
+  for (const m of companyMht) {
+    const t = typeById.get(Number(m.type_id));
+    if (!t) continue;
+    const list = companyTypeNames.get(Number(m.model_id)) || [];
+    list.push(t.name);
+    companyTypeNames.set(Number(m.model_id), list);
+  }
+  const companyNameById = new Map(companies.map((c: any) => [Number(c.id), c.name]));
+  const promoCodes = [...new Set(reservations.map((r: any) => r.promo_code).filter(Boolean))];
+  const promotions = promoCodes.length
+    ? await prisma.promotions.findMany({
+        where: { property_id: pid, promotion_code: { in: promoCodes } },
+        select: { promotion_code: true, description: true },
+      })
+    : [];
+  const promoDesc = new Map(promotions.map((p: any) => [p.promotion_code, p.description]));
+
+  const sourceData = new Map<string, any>();
+  const companyData = new Map<string, any>();
+  const otaData = new Map<string, any>();
+  const directBookingData: any = { LINE: { reservations: 0, persons: 0, nights: 0 }, WHATSAPP: { reservations: 0, persons: 0, nights: 0 }, TELEPHONE: { reservations: 0, persons: 0, nights: 0 }, INSTAGRAM: { reservations: 0, persons: 0, nights: 0 } };
+  const othersPromoData = new Map<string, any>();
+  let totalReservations = 0;
+  let totalPerson = 0;
+  let totalNights = 0;
+
+  for (const res of reservations) {
+    const folio = folios.find((f: any) => Number(f.id) === Number(res.folio_id));
+    let srcName = 'Other';
+    for (const m of folioMht) {
+      if (Number(m.model_id) !== Number(res.folio_id)) continue;
+      const t = typeById.get(Number(m.type_id));
+      if (t && t.group === 'source') { srcName = t.name; break; }
+    }
+    const persons = (Number(res.adult) || 0) + (Number(res.child) || 0);
+    const nights = folio ? diffDays(folio.check_in_date, folio.check_out_date) : 0;
+    totalReservations += 1;
+    totalPerson += persons;
+    totalNights += nights;
+
+    if (!sourceData.has(srcName)) sourceData.set(srcName, { reservations: 0, persons: 0, nights: 0 });
+    const sd = sourceData.get(srcName)!;
+    sd.reservations += 1; sd.persons += persons; sd.nights += nights;
+
+    const companyName = folio?.company_profile_id ? (companyNameById.get(Number(folio.company_profile_id)) ?? '') : '';
+    const cTypes = folio?.company_profile_id ? (companyTypeNames.get(Number(folio.company_profile_id)) || []) : [];
+    const isOta = cTypes.some((n: string) => n.toUpperCase().includes('OTA'));
+    if (companyName && !isOta) {
+      if (!companyData.has(companyName)) companyData.set(companyName, { reservations: 0, persons: 0, nights: 0 });
+      const cd = companyData.get(companyName)!;
+      cd.reservations += 1; cd.persons += persons; cd.nights += nights;
+    } else if (companyName && isOta) {
+      if (!otaData.has(companyName)) otaData.set(companyName, { reservations: 0, persons: 0, nights: 0 });
+      const od = otaData.get(companyName)!;
+      od.reservations += 1; od.persons += persons; od.nights += nights;
+    }
+
+    const directKeys = ['LINE', 'WHATSAPP', 'TELEPHONE', 'INSTAGRAM'];
+    if (directKeys.includes(srcName)) {
+      const dk = directBookingData[srcName];
+      dk.reservations += 1; dk.persons += persons; dk.nights += nights;
+      if (res.promo_code) {
+        const promoName = promoDesc.get(res.promo_code) ?? res.promo_code;
+        if (!othersPromoData.has(promoName)) othersPromoData.set(promoName, { name: promoName, sources: { LINE: { reservations: 0, persons: 0, nights: 0 }, WHATSAPP: { reservations: 0, persons: 0, nights: 0 }, TELEPHONE: { reservations: 0, persons: 0, nights: 0 }, INSTAGRAM: { reservations: 0, persons: 0, nights: 0 } } });
+        const p = othersPromoData.get(promoName)!;
+        const ps = p.sources[srcName];
+        ps.reservations += 1; ps.persons += persons; ps.nights += nights;
+      }
+    }
+  }
+
+  const totalAll = [...sourceData.values()].reduce((s: number, v: any) => s + v.reservations, 0);
+  const pct = (x: number) => (totalAll > 0 ? (x / totalAll) * 100 : 0);
+
+  return {
+    startDate: formatLongDate(startDate),
+    endDate: formatLongDate(endDate),
+    sourceData: [...sourceData.entries()].map(([name, v]) => ({ name, ...v, percentage: pct(v.reservations) })),
+    companyData: [...companyData.entries()].map(([name, v]) => ({ name, ...v, percentage: pct(v.reservations) })),
+    otaData: [...otaData.entries()].map(([name, v]) => ({ name, ...v, percentage: pct(v.reservations) })),
+    directBookingData: Object.entries(directBookingData).map(([name, v]: any) => ({ name, ...v, percentage: pct(v.reservations) })),
+    othersPromoData: [...othersPromoData.values()].map((p: any) => ({
+      ...p,
+      sources: Object.entries(p.sources).map(([name, v]: any) => ({ name, ...v, percentage: pct(v.reservations) })),
+    })),
+    totalReservations,
+    totalPerson,
+    totalNights,
+  };
+}
+
+async function generateWeeklyBookingExcel(res: any, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('WeeklyBooking');
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+  ws.mergeCells('A1:H1');
+  const t1 = ws.getCell('A1');
+  t1.value = `Weekly Booking Report ${data.startDate} - ${data.endDate}`;
+  t1.font = { bold: true, size: 14 };
+
+  const header = ['No', '', 'Number of Reservations', 'Total Person', 'Total Night', 'Percentage'];
+  const rows: any[] = [
+    { title: 'SOURCE', data: data.sourceData },
+    { title: 'COMPANY', data: data.companyData },
+    { title: 'OTA', data: data.otaData },
+    { title: 'DIRECT BOOKING', data: data.directBookingData },
+  ];
+  let r = 3;
+  for (const section of rows) {
+    ws.mergeCells(`A${r}:F${r}`);
+    const c = ws.getCell(`A${r}`);
+    c.value = section.title;
+    c.font = { bold: true };
+    c.alignment = { horizontal: 'center' };
+    r++;
+    const hr = r;
+    ['No', 'Source', 'Number of Reservations', 'Total Person', 'Total Night', 'Percentage'].forEach((h, i) => {
+      ws.getCell(hr, 1 + i).value = h;
+      ws.getCell(hr, 1 + i).font = { bold: true };
+      ws.getCell(hr, 1 + i).alignment = { horizontal: 'center' };
+    });
+    r++;
+    section.data.forEach((item: any, i: number) => {
+      ws.getCell(r, 1).value = i + 1;
+      ws.mergeCells(`B${r}:C${r}`);
+      ws.getCell(`B${r}`).value = item.name;
+      ws.getCell(r, 4).value = `${item.reservations} 件`;
+      ws.getCell(r, 5).value = `${item.persons} 人`;
+      ws.getCell(r, 6).value = `${item.nights} 泊`;
+      ws.getCell(r, 7).value = Number(item.percentage.toFixed(2));
+      r++;
+    });
+    ws.mergeCells(`A${r}:C${r}`);
+    ws.getCell(`A${r}`).value = 'TOTAL';
+    ws.getCell(`A${r}`).font = { bold: true };
+    const tsum = section.data.reduce((s: number, x: any) => s + x.reservations, 0);
+    const psum = section.data.reduce((s: number, x: any) => s + x.persons, 0);
+    const nsum = section.data.reduce((s: number, x: any) => s + x.nights, 0);
+    ws.getCell(r, 4).value = `${tsum} 件`;
+    ws.getCell(r, 5).value = `${psum} 人`;
+    ws.getCell(r, 6).value = `${nsum} 泊`;
+    ws.getCell(r, 7).value = Number((tsum / Math.max(data.totalReservations, 1) * 100).toFixed(2));
+    ws.getCell(r, 7).font = { bold: true };
+    r += 2;
+  }
+
+  // OTHERS (Promo)
+  ws.mergeCells(`A${r}:F${r}`);
+  const oc = ws.getCell(`A${r}`);
+  oc.value = 'OTHERS (PROMO)';
+  oc.font = { bold: true };
+  oc.alignment = { horizontal: 'center' };
+  r++;
+  const hr2 = r;
+  ['No', 'Promotion Name', '', '', '', ''].forEach((h, i) => {
+    ws.getCell(hr2, 1 + i).value = h;
+    ws.getCell(hr2, 1 + i).font = { bold: true };
+    ws.getCell(hr2, 1 + i).alignment = { horizontal: 'center' };
+  });
+  r++;
+  for (const promo of data.othersPromoData) {
+    ws.getCell(r, 1).value = promo.sources.length > 0 ? '' : '';
+    ws.mergeCells(`B${r}:F${r}`);
+    ws.getCell(`B${r}`).value = promo.name;
+    r++;
+    promo.sources.forEach((src: any) => {
+      ws.getCell(r, 1).value = '';
+      ws.mergeCells(`B${r}:C${r}`);
+      ws.getCell(`B${r}`).value = src.name;
+      ws.getCell(r, 4).value = `${src.reservations} 件`;
+      ws.getCell(r, 5).value = `${src.persons} 人`;
+      ws.getCell(r, 6).value = `${src.nights} 泊`;
+      ws.getCell(r, 7).value = Number(src.percentage.toFixed(2));
+      r++;
+    });
+  }
+  ws.mergeCells(`A${r}:C${r}`);
+  ws.getCell(`A${r}`).value = 'TOTAL OTHERS';
+  ws.getCell(`A${r}`).font = { bold: true };
+  ws.getCell(r, 4).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.reservations, 0), 0)} 件`;
+  ws.getCell(r, 5).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.persons, 0), 0)} 人`;
+  ws.getCell(r, 6).value = `${data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.nights, 0), 0)} 泊`;
+  ws.getCell(r, 7).value = Number((data.othersPromoData.reduce((s: number, p: any) => s + p.sources.reduce((a: number, x: any) => a + x.reservations, 0), 0) / Math.max(data.totalReservations, 1) * 100).toFixed(2));
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="weekly-booking.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+async function getCalendarOperation(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+
+  const totalRooms = await prisma.rooms.count({ where: { property_id: pid, deleted_at: null, status: 1 } });
+
+  const reservations = await prisma.reservations.findMany({
+    where: {
+      property_id: pid,
+      date: { gte: new Date(`${startDate}T00:00:00Z`), lte: new Date(`${endDate}T23:59:59Z`) },
+      deleted_at: null,
+    },
+    select: { id: true, folio_id: true, date: true, rate_id: true },
+    orderBy: { id: 'asc' },
+  });
+  const folioIds = [...new Set(reservations.map((x: any) => Number(x.folio_id)))];
+  const folios = folioIds.length
+    ? await prisma.folios.findMany({
+        where: { id: { in: folioIds } },
+        select: { id: true, status_reservation: true, is_house_use: true, complimentary: true, type_reservation: true, folio_number: true, company_profile_id: true },
+      })
+    : [];
+  const folioById = new Map(folios.map((f: any) => [Number(f.id), f]));
+
+  const rateIds = [...new Set(reservations.map((x: any) => Number(x.rate_id)).filter(Boolean))];
+  let complimentRateIds = new Set<number>();
+  let houseRateIds = new Set<number>();
+  if (rateIds.length) {
+    const rateMht = await prisma.model_has_types.findMany({
+      where: { model_type: 'App\\Models\\Rate', model_id: { in: rateIds } },
+      select: { type_id: true, model_id: true },
+    });
+    const typeIds = [...new Set(rateMht.map((m: any) => Number(m.type_id)))];
+    const rateTypes = typeIds.length
+      ? await prisma.types.findMany({ where: { id: { in: typeIds } }, select: { id: true, group: true, name: true } })
+      : [];
+    const rtypeById = new Map(rateTypes.map((t: any) => [Number(t.id), t]));
+    complimentRateIds = new Set(rateMht.filter((m: any) => rtypeById.get(Number(m.type_id))?.group === 'company-type' && rtypeById.get(Number(m.type_id))?.name.toLowerCase().includes('compliment')).map((m: any) => Number(m.model_id)));
+    houseRateIds = new Set(rateMht.filter((m: any) => rtypeById.get(Number(m.type_id))?.group === 'company-type' && rtypeById.get(Number(m.type_id))?.name.toLowerCase().includes('house use')).map((m: any) => Number(m.model_id)));
+  }
+
+  const companyIds = [...new Set(folios.map((f: any) => Number(f.company_profile_id)).filter(Boolean))];
+  const companyTypeNames = new Map<number, string[]>();
+  if (companyIds.length) {
+    const companyMht = await prisma.model_has_types.findMany({
+      where: { model_type: 'App\\Models\\CompanyProfile', model_id: { in: companyIds } },
+      select: { type_id: true, model_id: true },
+    });
+    const ctypeIds = [...new Set(companyMht.map((m: any) => Number(m.type_id)))];
+    const ctypes = ctypeIds.length ? await prisma.types.findMany({ where: { id: { in: ctypeIds } }, select: { id: true, name: true } }) : [];
+    const ctypeById = new Map(ctypes.map((t: any) => [Number(t.id), t]));
+    for (const m of companyMht) {
+      const t = ctypeById.get(Number(m.type_id));
+      if (!t) continue;
+      const list = companyTypeNames.get(Number(m.model_id)) || [];
+      list.push(t.name);
+      companyTypeNames.set(Number(m.model_id), list);
+    }
+  }
+
+  const eligible = (folioId: number, rateId: any): any => {
+    const f = folioById.get(folioId);
+    if (!f) return null;
+    if ([5, 2].includes(f.status_reservation)) return null;
+    if (f.is_house_use || f.complimentary) return null;
+    const t = f.type_reservation;
+    if (!(t === 'fit' || t === 'git' || (t === 'vr' && (f.folio_number || '').startsWith('F')))) return null;
+    if (complimentRateIds.has(Number(rateId)) || houseRateIds.has(Number(rateId))) return null;
+    return f;
+  };
+
+  const resByDay = new Map<string, any[]>();
+  for (const rsv of reservations) {
+    const day = formatDate(rsv.date);
+    if (!resByDay.has(day)) resByDay.set(day, []);
+    resByDay.get(day)!.push(rsv);
+  }
+
+  const monthlyData: any[] = [];
+  let runningTotal = 0;
+  let cursor = new Date(`${startDate}T00:00:00Z`);
+  const lastDay = new Date(`${endDate}T23:59:59Z`);
+  while (cursor <= lastDay) {
+    const monthStart = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), 1));
+    const daysInMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0)).getUTCDate();
+    const monthEnd = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
+    if (monthEnd > lastDay) monthEnd.setTime(lastDay.getTime());
+
+    const dailyData: any[] = [];
+    let dayCursor = new Date(monthStart);
+    while (dayCursor <= monthEnd) {
+      const day = formatDate(dayCursor);
+      const dayRes = (resByDay.get(day) || []).map((rsv: any) => eligible(Number(rsv.folio_id), rsv.rate_id)).filter(Boolean);
+      const dailyTotal = dayRes.length;
+      runningTotal += dailyTotal;
+      const travelAgent = dayRes.filter((f: any) => (companyTypeNames.get(Number(f.company_profile_id)) || []).includes('TRAVEL AGENT')).length;
+      const ota = dayRes.filter((f: any) => (companyTypeNames.get(Number(f.company_profile_id)) || []).some((n: string) => n.toUpperCase().includes('OTA'))).length;
+      const directBooking = dailyTotal - travelAgent - ota;
+      const tentative = dayRes.filter((f: any) => f.status_reservation === 5).length;
+      const confirmed = dailyTotal - tentative;
+      const occupancyRate = Math.round((dailyTotal / Math.max(totalRooms, 1)) * 1000) / 10;
+      dailyData.push({
+        date: day,
+        day_name: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayCursor.getUTCDay()],
+        daily_total: dailyTotal,
+        running_total: runningTotal,
+        occupancy_rate: occupancyRate,
+        travel_agent: travelAgent,
+        ota,
+        direct_booking: directBooking,
+        tentative,
+        confirmed,
+      });
+      dayCursor.setUTCDate(dayCursor.getUTCDate() + 1);
+    }
+    monthlyData.push({
+      start_date: formatDate(monthStart),
+      end_date: formatDate(monthEnd),
+      daily_data: dailyData,
+      monthly_total: runningTotal,
+      monthly_target: totalRooms * daysInMonth,
+      monthly_occupancy_rate: Math.round((runningTotal / Math.max(totalRooms * daysInMonth, 1)) * 1000) / 10,
+    });
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+
+  return { startDate, endDate, totalRooms, monthlyData };
+}
+
+async function generateCalendarOperationExcel(res: any, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('CalendarOperation');
+  ws.views = [{ state: 'frozen', ySplit: 2 }];
+
+  let r = 1;
+  ws.mergeCells(`A${r}:J${r}`);
+  ws.getCell(`A${r}`).value = `Calendar Operation Report ${formatLongDate(data.startDate)} - ${formatLongDate(data.endDate)}`;
+  ws.getCell(`A${r}`).font = { bold: true, size: 14 };
+  r++;
+  ws.mergeCells(`A${r}:J${r}`);
+  ws.getCell(`A${r}`).value = `Total Room: ${data.totalRooms}`;
+  r++;
+  ws.mergeCells(`A${r}:J${r}`);
+  ws.getCell(`A${r}`).value = `Total Room Target: ${data.totalRooms} × ${data.monthlyData.reduce((s: number, m: any) => s + new Date(Date.UTC(new Date(m.start_date).getUTCFullYear(), new Date(m.start_date).getUTCMonth() + 1, 0)).getUTCDate(), 0)} = ${data.monthlyData.reduce((s: number, m: any) => s + m.monthly_target, 0)}`;
+  r++;
+  ws.mergeCells(`A${r}:B${r}`);
+  ws.getCell(`A${r}`).value = 'Date';
+  ws.getCell(`A${r}`).font = { bold: true };
+  ws.getCell(`A${r}`).alignment = { horizontal: 'center' };
+  ws.mergeCells(`C${r}:F${r}`);
+  ws.getCell(`C${r}`).value = 'Forecast Reservation';
+  ws.getCell(`C${r}`).font = { bold: true };
+  ws.getCell(`C${r}`).alignment = { horizontal: 'center' };
+  ws.mergeCells(`G${r}:I${r}`);
+  ws.getCell(`G${r}`).value = 'Booking Source';
+  ws.getCell(`G${r}`).font = { bold: true };
+  ws.getCell(`G${r}`).alignment = { horizontal: 'center' };
+  ws.mergeCells(`J${r}:K${r}`);
+  ws.getCell(`J${r}`).value = 'Inbound';
+  ws.getCell(`J${r}`).font = { bold: true };
+  ws.getCell(`J${r}`).alignment = { horizontal: 'center' };
+  r++;
+  ws.getCell(r, 1).value = 'Daily';
+  ws.getCell(r, 2).value = 'Total';
+  ws.getCell(r, 3).value = 'Occ';
+  ws.getCell(r, 4).value = 'Total';
+  ws.getCell(r, 5).value = 'Offline TA';
+  ws.getCell(r, 6).value = 'Online TA';
+  ws.getCell(r, 7).value = 'Direct Booking';
+  ws.getCell(r, 8).value = 'Tentative';
+  ws.getCell(r, 9).value = 'Confirmed';
+  ws.getCell(r, 1).font = { bold: true }; ws.getCell(r, 2).font = { bold: true }; ws.getCell(r, 3).font = { bold: true }; ws.getCell(r, 4).font = { bold: true }; ws.getCell(r, 5).font = { bold: true }; ws.getCell(r, 6).font = { bold: true }; ws.getCell(r, 7).font = { bold: true }; ws.getCell(r, 8).font = { bold: true }; ws.getCell(r, 9).font = { bold: true };
+  r++;
+
+  for (const month of data.monthlyData) {
+    for (const day of month.daily_data) {
+      ws.getCell(r, 1).value = `${day.day_name}, ${formatDateMYShort(day.date)}`;
+      ws.getCell(r, 2).value = day.daily_total;
+      ws.getCell(r, 3).value = day.running_total;
+      ws.getCell(r, 4).value = `${day.occupancy_rate}%`;
+      ws.getCell(r, 5).value = day.daily_total;
+      ws.getCell(r, 6).value = day.travel_agent;
+      ws.getCell(r, 7).value = day.ota;
+      ws.getCell(r, 8).value = day.direct_booking;
+      ws.getCell(r, 9).value = day.tentative > 0 ? day.tentative : '';
+      ws.getCell(r, 10).value = day.tentative > 0 ? '' : '✓';
+      r++;
+    }
+    ws.mergeCells(`A${r}:B${r}`);
+    ws.getCell(`A${r}`).value = 'Monthly Room Total';
+    ws.getCell(`A${r}`).font = { bold: true };
+    ws.getCell(r, 3).value = Number(month.monthly_total.toFixed(2));
+    ws.mergeCells(`C${r}:D${r}`);
+    ws.getCell(`C${r}`).value = 'Monthly Total Capacity';
+    ws.getCell(`C${r}`).font = { bold: true };
+    ws.getCell(r, 5).value = `${month.monthly_occupancy_rate}%`;
+    r++;
+    ws.mergeCells(`A${r}:B${r}`);
+    ws.getCell(`A${r}`).value = 'Monthly Room Target';
+    ws.getCell(`A${r}`).font = { bold: true };
+    ws.getCell(r, 3).value = Number(month.monthly_target.toFixed(2));
+    ws.mergeCells(`C${r}:D${r}`);
+    ws.getCell(`C${r}`).value = 'Monthly Target Operation';
+    ws.getCell(`C${r}`).font = { bold: true };
+    ws.getCell(r, 5).value = '70%';
+    r += 2;
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="calendar-operation.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+async function getDailyCheckin(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const date = params.date || formatDate(new Date());
+  const start = new Date(`${date}T00:00:00Z`);
+  const end = new Date(`${date}T23:59:59Z`);
+
+  const folios = await prisma.folios.findMany({
+    where: {
+      property_id: pid,
+      res_date: { gte: start, lte: end },
+      type_reservation: { not: 'vr' },
+      status_reservation: { notIn: [5, 2] },
+    },
+    select: { id: true, folio_number: true, company_profile_id: true, guest_profile_id: true, company_name: true, check_in_date: true, check_out_date: true, created_by: true, type_reservation: true, status_reservation: true, res_date: true },
+    orderBy: { company_name: 'asc' },
+  });
+  const folioIds = folios.map((f: any) => Number(f.id));
+  const companyIds = [...new Set(folios.map((f: any) => Number(f.company_profile_id)).filter(Boolean))];
+  const guestIds = [...new Set(folios.map((f: any) => Number(f.guest_profile_id)).filter(Boolean))];
+  const [companies, guests, users, reservations] = await Promise.all([
+    companyIds.length ? prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } }) : [],
+    guestIds.length ? prisma.guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, first_name: true, last_name: true } }) : [],
+    prisma.users.findMany({ select: { id: true, name: true } }),
+    folioIds.length
+      ? prisma.reservations.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, adult: true, child: true, is_posting: true, date: true } })
+      : [],
+  ]);
+  const companyById = new Map(companies.map((c: any) => [Number(c.id), c.name]));
+  const guestById = new Map(guests.map((g: any) => [Number(g.id), g]));
+  const userById = new Map(users.map((u: any) => [Number(u.id), u.name]));
+
+  const types = await prisma.types.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, group: true, name: true } });
+  const typeById = new Map(types.map((t: any) => [Number(t.id), t]));
+  const folioMht = folioIds.length
+    ? await prisma.model_has_types.findMany({ where: { model_type: 'App\\Models\\Folio', model_id: { in: folioIds } }, select: { type_id: true, model_id: true } })
+    : [];
+
+  const sourceOf = (folioId: number): string => {
+    for (const m of folioMht) {
+      if (Number(m.model_id) !== folioId) continue;
+      const t = typeById.get(Number(m.type_id));
+      if (t && t.group === 'source') return t.name;
+    }
+    return '';
+  };
+
+  const lastRes = (folioId: number): any => {
+    // scopeLastReservation: is_posting = 0, orderBy date asc, first
+    const list = reservations.filter((x: any) => Number(x.folio_id) === folioId && !x.is_posting).sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return list[0] || null;
+  };
+
+  const reportData: any[] = [];
+  let stt = 0;
+  for (const f of folios) {
+    stt++;
+    const rsv = lastRes(Number(f.id));
+    const gp = f.guest_profile_id ? guestById.get(Number(f.guest_profile_id)) : undefined;
+    reportData.push({
+      stt,
+      web: '',
+      name: f.company_profile_id ? (companyById.get(Number(f.company_profile_id)) ?? '') : '',
+      booking_no: f.folio_number,
+      guest_name: `${gp?.first_name ?? ''} ${gp?.last_name ?? ''}`,
+      check_in_date: formatDateMYShort(f.check_in_date),
+      pax: (Number(rsv?.adult) || 0) + (Number(rsv?.child) || 0),
+      total_nights: rsv ? diffDays(rsv.check_in_date ?? f.check_in_date, f.check_out_date) : diffDays(f.check_in_date, f.check_out_date),
+      source: sourceOf(Number(f.id)),
+      reception: f.created_by ? (userById.get(Number(f.created_by)) ?? '') : '',
+    });
+  }
+
+  const now = new Date();
+  const baseFilter = { property_id: pid, type_reservation: { not: 'vr' }, status_reservation: { notIn: [5, 2] } } as any;
+  const monthFolios = await prisma.folios.findMany({ where: { ...baseFilter, res_date: { gte: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)) } }, select: { id: true, res_date: true, check_in_date: true, check_out_date: true } });
+  const monthRes = monthFolios.length
+    ? await prisma.reservations.findMany({ where: { folio_id: { in: monthFolios.map((f: any) => Number(f.id)) }, deleted_at: null }, select: { folio_id: true, adult: true, child: true, is_posting: true, date: true } })
+    : [];
+  const monthLastRes = new Map<number, any>();
+  for (const rsv of monthRes) {
+    if (rsv.is_posting) continue;
+    const cur = monthLastRes.get(Number(rsv.folio_id));
+    if (!cur || new Date(rsv.date).getTime() < new Date(cur.date).getTime()) monthLastRes.set(Number(rsv.folio_id), rsv);
+  }
+  const monthlyStats = { thisMonth: { count: 0, guests: 0, nights: 0 }, nextMonth: { count: 0, guests: 0, nights: 0 }, twoMonths: { count: 0, guests: 0, nights: 0 }, threeMonths: { count: 0, guests: 0, nights: 0 }, continue: { count: 0, guests: 0, nights: 0 } };
+  const monthOf = (dt: Date) => dt.getUTCFullYear() * 12 + dt.getUTCMonth();
+  const nowM = monthOf(now);
+  const threeEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 4, 0));
+  for (const f of monthFolios) {
+    if (!f.res_date) continue;
+    const m = monthOf(new Date(f.res_date));
+    const rsv = monthLastRes.get(Number(f.id));
+    const guests = (Number(rsv?.adult) || 0) + (Number(rsv?.child) || 0);
+    const nights = diffDays(f.check_in_date, f.check_out_date);
+    let bucket: keyof typeof monthlyStats;
+    if (m === nowM) bucket = 'thisMonth';
+    else if (m === nowM + 1) bucket = 'nextMonth';
+    else if (m === nowM + 2) bucket = 'twoMonths';
+    else if (m === nowM + 3) bucket = 'threeMonths';
+    else if (new Date(f.res_date) > threeEnd) bucket = 'continue';
+    else continue;
+    monthlyStats[bucket].count += 1;
+    monthlyStats[bucket].guests += guests;
+    monthlyStats[bucket].nights += nights;
+  }
+
+  const dayFolios = folios;
+  const groupFolios = dayFolios.filter((f: any) => f.type_reservation === 'git');
+  const groupStats = { more_than_5: { count: 0, guests: 0, nights: 0 }, less_than_5: { count: 0, guests: 0, nights: 0 }, subtotal: { count: 0, guests: 0, nights: 0 } };
+  for (const f of groupFolios) {
+    const rsv = lastRes(Number(f.id));
+    const guests = (Number(rsv?.adult) || 0) + (Number(rsv?.child) || 0);
+    const nights = diffDays(f.check_in_date, f.check_out_date);
+    const key = nights > 5 ? 'more_than_5' : 'less_than_5';
+    groupStats[key].count += 1;
+    groupStats[key].guests += guests;
+    groupStats[key].nights += nights;
+    groupStats.subtotal.count += 1;
+    groupStats.subtotal.guests += guests;
+    groupStats.subtotal.nights += nights;
+  }
+
+  const otaCompanyIds = new Set<number>();
+  const companyTypeNames = new Map<number, string[]>();
+  if (companyIds.length) {
+    const companyMht = await prisma.model_has_types.findMany({ where: { model_type: 'App\\Models\\CompanyProfile', model_id: { in: companyIds } }, select: { type_id: true, model_id: true } });
+    const ctypeIds = [...new Set(companyMht.map((m: any) => Number(m.type_id)))];
+    const ctypes = ctypeIds.length ? await prisma.types.findMany({ where: { id: { in: ctypeIds } }, select: { id: true, name: true } }) : [];
+    const ctypeById = new Map(ctypes.map((t: any) => [Number(t.id), t]));
+    for (const m of companyMht) {
+      const t = ctypeById.get(Number(m.type_id));
+      if (!t) continue;
+      const list = companyTypeNames.get(Number(m.model_id)) || [];
+      list.push(t.name);
+      companyTypeNames.set(Number(m.model_id), list);
+      if (t.name.toUpperCase().includes('OTA')) otaCompanyIds.add(Number(m.model_id));
+    }
+  }
+
+  const companyStats: any = { ota: {} as any, walk_in: { count: 0, guests: 0, nights: 0 }, website: { count: 0, guests: 0, nights: 0 }, others: { count: 0, guests: 0, nights: 0 }, subtotal: { count: 0, guests: 0, nights: 0 } };
+  const walkInIds = new Set<number>();
+  const websiteIds = new Set<number>();
+  for (const [cid, cname] of companyById) {
+    if (!cname) continue;
+    if (cname.toLowerCase().includes('walk in')) walkInIds.add(cid);
+    if (cname.toLowerCase().includes('website')) websiteIds.add(cid);
+  }
+  for (const [cid, cname] of companyById) {
+    if (!cname) continue;
+    if (otaCompanyIds.has(cid)) companyStats.ota[cname] = { count: 0, guests: 0, nights: 0 };
+  }
+  for (const f of dayFolios) {
+    const cid = Number(f.company_profile_id);
+    const cname = companyById.get(cid);
+    if (!cname) continue;
+    const rsv = lastRes(Number(f.id));
+    const guests = (Number(rsv?.adult) || 0) + (Number(rsv?.child) || 0);
+    const nights = diffDays(f.check_in_date, f.check_out_date);
+    let bucket: any = null;
+    if (otaCompanyIds.has(cid)) bucket = companyStats.ota[cname];
+    else if (walkInIds.has(cid)) bucket = companyStats.walk_in;
+    else if (websiteIds.has(cid)) bucket = companyStats.website;
+    else bucket = companyStats.others;
+    if (bucket) {
+      bucket.count += 1; bucket.guests += guests; bucket.nights += nights;
+      companyStats.subtotal.count += 1; companyStats.subtotal.guests += guests; companyStats.subtotal.nights += nights;
+    }
+  }
+
+  const property = await prisma.properties.findUnique({ where: { id: pid }, select: { name: true } });
+
+  return {
+    reportDate: formatMonthDayYear(date),
+    hotelName: property?.name ?? '',
+    reportData,
+    monthlyStats,
+    groupStats,
+    companyStats,
+    date,
+  };
+}
+
+async function generateDailyCheckinExcel(res: any, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('DailyCheckin');
+  ws.views = [{ state: 'frozen', ySplit: 3 }];
+
+  ws.mergeCells('A1:J1');
+  ws.getCell('A1').value = `List Today Reservation for ${data.reportDate}`;
+  ws.getCell('A1').font = { bold: true, size: 14 };
+  ws.mergeCells('A2:J2');
+  ws.getCell('A2').value = data.hotelName;
+
+  const headers = ['Web', 'Name', 'STT', 'Booking No.', 'Guest Name.', 'Check-in Date', 'Pax', 'Total Night.', 'Booking Source.', 'Reception'];
+  headers.forEach((h, i) => {
+    ws.getCell(3, 1 + i).value = h;
+    ws.getCell(3, 1 + i).font = { bold: true };
+    ws.getCell(3, 1 + i).alignment = { horizontal: 'center' };
+  });
+  let r = 4;
+  for (const row of data.reportData) {
+    ws.getCell(r, 1).value = row.web;
+    ws.getCell(r, 2).value = row.name;
+    ws.getCell(r, 3).value = row.stt;
+    ws.getCell(r, 4).value = row.booking_no;
+    ws.getCell(r, 5).value = `${row.guest_name} 様`;
+    ws.getCell(r, 6).value = row.check_in_date;
+    ws.getCell(r, 7).value = row.pax;
+    ws.getCell(r, 8).value = row.total_nights;
+    ws.getCell(r, 9).value = row.source;
+    ws.getCell(r, 10).value = row.reception;
+    r++;
+  }
+
+  r += 2;
+  ws.mergeCells(`A${r}:J${r}`);
+  ws.getCell(`A${r}`).value = 'Monthly Statistics';
+  ws.getCell(`A${r}`).font = { bold: true };
+  r++;
+  ['This Month', 'Monthly', '件', '人', '泊'].forEach((h, i) => {
+    ws.getCell(r, 1 + i).value = h;
+    ws.getCell(r, 1 + i).font = { bold: true };
+  });
+  r++;
+  const monthlyRows = [
+    ['Next Month', data.monthlyStats.nextMonth.count, data.monthlyStats.nextMonth.guests, data.monthlyStats.nextMonth.nights],
+    ['2 Month Later', data.monthlyStats.twoMonths.count, data.monthlyStats.twoMonths.guests, data.monthlyStats.twoMonths.nights],
+    ['3 Month Later', data.monthlyStats.threeMonths.count, data.monthlyStats.threeMonths.guests, data.monthlyStats.threeMonths.nights],
+    ['Continue', data.monthlyStats.continue.count, data.monthlyStats.continue.guests, data.monthlyStats.continue.nights],
+    ['Total Amount', data.monthlyStats.thisMonth.count + data.monthlyStats.nextMonth.count + data.monthlyStats.twoMonths.count + data.monthlyStats.threeMonths.count + data.monthlyStats.continue.count, data.monthlyStats.thisMonth.guests + data.monthlyStats.nextMonth.guests + data.monthlyStats.twoMonths.guests + data.monthlyStats.threeMonths.guests + data.monthlyStats.continue.guests, data.monthlyStats.thisMonth.nights + data.monthlyStats.nextMonth.nights + data.monthlyStats.twoMonths.nights + data.monthlyStats.threeMonths.nights + data.monthlyStats.continue.nights],
+  ];
+  for (const row of monthlyRows) {
+    ws.mergeCells(`A${r}:B${r}`);
+    ws.getCell(`A${r}`).value = row[0];
+    ws.getCell(r, 3).value = row[1];
+    ws.getCell(r, 4).value = row[2];
+    ws.getCell(r, 5).value = row[3];
+    r++;
+  }
+
+  r += 2;
+  ws.mergeCells(`A${r}:J${r}`);
+  ws.getCell(`A${r}`).value = 'Group & Company';
+  ws.getCell(`A${r}`).font = { bold: true };
+  r++;
+  ws.mergeCells(`A${r}:B${r}`);
+  ws.getCell(`A${r}`).value = '';
+  ws.mergeCells(`C${r}:E${r}`);
+  ws.getCell(`C${r}`).value = 'Daily';
+  ws.getCell(`C${r}`).font = { bold: true };
+  ws.getCell(`C${r}`).alignment = { horizontal: 'center' };
+  ws.mergeCells(`F${r}:J${r}`);
+  ws.getCell(`F${r}`).value = 'Month-to-Date';
+  ws.getCell(`F${r}`).font = { bold: true };
+  ws.getCell(`F${r}`).alignment = { horizontal: 'center' };
+  r++;
+  ['', '', '件', '人', '泊', 'pct', '件', '件', '泊', ''].forEach((h, i) => {
+    ws.getCell(r, 1 + i).value = h;
+    ws.getCell(r, 1 + i).font = { bold: true };
+  });
+  r++;
+
+  const g = data.groupStats;
+  const c = data.companyStats;
+  const denom = g.subtotal.nights + c.subtotal.nights;
+  const pctOf = (x: number) => (denom > 0 ? Number((x / denom * 100).toFixed(2)) : 'NAN');
+  const rowDefs: any[] = [
+    ['Group (Booked more than 5 nights)', g.more_than_5, 'count'],
+    ['Group (Booked less than 5 nights)', g.less_than_5, 'nights'],
+    ['Subtotal', g.subtotal, 'nights'],
+    ['Website', c.website, 'nights'],
+    ['Walk-In', c.walk_in, 'nights'],
+  ];
+  for (const [label, item, useCount] of rowDefs) {
+    ws.mergeCells(`A${r}:B${r}`);
+    ws.getCell(`A${r}`).value = label;
+    ws.getCell(r, 3).value = `${item.count} 件`;
+    ws.getCell(r, 4).value = `${item.guests} 人`;
+    ws.getCell(r, 5).value = `${item.nights} 泊`;
+    ws.getCell(r, 6).value = pctOf(useCount === 'count' ? item.count : item.nights);
+    ws.getCell(r, 7).value = `${item.count} 件`;
+    ws.getCell(r, 8).value = `${item.guests} 人`;
+    ws.getCell(r, 9).value = `${item.nights} 泊`;
+    r++;
+  }
+  for (const [cname, item] of Object.entries(c.ota) as [string, any][]) {
+    ws.mergeCells(`A${r}:B${r}`);
+    ws.getCell(`A${r}`).value = cname;
+    ws.getCell(r, 3).value = `${item.count} 件`;
+    ws.getCell(r, 4).value = `${item.guests} 人`;
+    ws.getCell(r, 5).value = `${item.nights} 泊`;
+    ws.getCell(r, 6).value = pctOf(item.nights);
+    ws.getCell(r, 7).value = `${item.count} 件`;
+    ws.getCell(r, 8).value = `${item.guests} 人`;
+    ws.getCell(r, 9).value = `${item.nights} 泊`;
+    r++;
+  }
+  ws.mergeCells(`A${r}:B${r}`);
+  ws.getCell(`A${r}`).value = 'Others';
+  ws.getCell(r, 3).value = `${c.others.count} 件`;
+  ws.getCell(r, 4).value = `${c.others.guests} 人`;
+  ws.getCell(r, 5).value = `${c.others.nights} 泊`;
+  ws.getCell(r, 6).value = pctOf(c.others.nights);
+  ws.getCell(r, 7).value = `${c.others.count} 件`;
+  ws.getCell(r, 8).value = `${c.others.guests} 人`;
+  ws.getCell(r, 9).value = `${c.others.nights} 泊`;
+  r++;
+  ws.mergeCells(`A${r}:B${r}`);
+  ws.getCell(`A${r}`).value = 'Subtotal';
+  ws.getCell(`A${r}`).font = { bold: true };
+  ws.getCell(r, 3).value = `${c.subtotal.count} 件`;
+  ws.getCell(r, 4).value = `${c.subtotal.guests} 人`;
+  ws.getCell(r, 5).value = `${c.subtotal.nights} 泊`;
+  ws.getCell(r, 6).value = pctOf(c.subtotal.nights);
+  ws.getCell(r, 7).value = `${c.subtotal.count} 件`;
+  ws.getCell(r, 8).value = `${c.subtotal.guests} 人`;
+  ws.getCell(r, 9).value = `${c.subtotal.nights} 泊`;
+  r++;
+  ws.mergeCells(`A${r}:B${r}`);
+  ws.getCell(`A${r}`).value = 'Grand Total';
+  ws.getCell(`A${r}`).font = { bold: true };
+  ws.getCell(r, 3).value = `${g.subtotal.count + c.subtotal.count} 件`;
+  ws.getCell(r, 4).value = `${g.subtotal.guests + c.subtotal.guests} 人`;
+  ws.getCell(r, 5).value = `${g.subtotal.nights + c.subtotal.nights} 泊`;
+  ws.getCell(r, 6).value = Number(100.0.toFixed(2));
+  ws.getCell(r, 7).value = `${g.subtotal.count + c.subtotal.count} 件`;
+  ws.getCell(r, 8).value = `${g.subtotal.guests + c.subtotal.guests} 人`;
+  ws.getCell(r, 9).value = `${g.subtotal.nights + c.subtotal.nights} 泊`;
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="daily-checkin-list.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+async function getCompanyProfile(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const search = (params.search || '').toString().trim();
+  const sortParam = (params.sort || '').toString().trim();
+  const sortCols = ['account', 'type_company', 'short_code', 'name', 'status_company', 'billing_country', 'telp', 'mobile_phone', 'email', 'billing_city', 'term', 'credit_limit', 'status'];
+  let orderBy: any = { account: 'asc' };
+  if (sortParam) {
+    const desc = sortParam.startsWith('-');
+    const col = desc ? sortParam.slice(1) : sortParam;
+    if (sortCols.includes(col)) orderBy = { [col]: desc ? 'desc' : 'asc' };
+  }
+  const where: any = { property_id: pid, deleted_at: null, status: 1 };
+  if (search) {
+    where.OR = ['account', 'type_company', 'short_code', 'name', 'status_company', 'billing_country', 'telp', 'mobile_phone'].map((f) => ({ [f]: { contains: search, mode: 'insensitive' as any } }));
+  }
+  const list = await prisma.company_profiles.findMany({ where, select: { account: true, name: true, type_company: true, short_code: true, telp: true, mobile_phone: true, email: true, billing_city: true, billing_country: true, term: true, credit_limit: true, status: true, status_company: true }, orderBy });
+  const reportData = list.map((row: any) => ({
+    account: row.account ?? '-',
+    name: row.name ?? '-',
+    type_company: row.type_company ?? '-',
+    short_code: row.short_code ?? '-',
+    telp: row.telp !== undefined && row.telp !== null ? row.telp : (row.mobile_phone ?? '-'),
+    email: row.email ?? '-',
+    billing_city: row.billing_city ?? '-',
+    billing_country: row.billing_country ?? '-',
+    term: row.term ?? '-',
+    credit_limit: Number(row.credit_limit || 0).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, '.'),
+    status: row.status === 1 ? 'Active' : 'Inactive',
+    status_company: row.status_company ?? '-',
+  }));
+  const printedAt = (() => {
+    const n = new Date();
+    return `${String(n.getDate()).padStart(2, '0')}/${String(n.getMonth() + 1).padStart(2, '0')}/${n.getFullYear()} ${String(n.getHours()).padStart(2, '0')}:${String(n.getMinutes()).padStart(2, '0')}`;
+  })();
+  return { reportData, total: reportData.length, printedAt };
+}
+
+async function generateCompanyProfileExcel(res: any, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('CompanyProfile');
+  ws.views = [{ state: 'frozen', ySplit: 2 }];
+
+  ws.mergeCells('A1:L1');
+  ws.getCell('A1').value = 'Company Profile Report';
+  ws.getCell('A1').font = { bold: true, size: 14 };
+  ws.mergeCells('A2:L2');
+  ws.getCell('A2').value = `Total: ${data.total} companies`;
+  ws.getCell('A2').font = { bold: true };
+
+  const headers = ['No', 'Account', 'Name', 'Type', 'Short Code', 'Phone', 'Email', 'City', 'Country', 'Term', 'Credit Limit', 'Status'];
+  headers.forEach((h, i) => {
+    ws.getCell(3, 1 + i).value = h;
+    ws.getCell(3, 1 + i).font = { bold: true };
+    ws.getCell(3, 1 + i).alignment = { horizontal: 'center' };
+  });
+  data.reportData.forEach((row: any, i: number) => {
+    const r = 4 + i;
+    ws.getCell(r, 1).value = i + 1;
+    ws.getCell(r, 2).value = row.account;
+    ws.getCell(r, 3).value = row.name;
+    ws.getCell(r, 4).value = row.type_company;
+    ws.getCell(r, 5).value = row.short_code;
+    ws.getCell(r, 6).value = row.telp;
+    ws.getCell(r, 7).value = row.email;
+    ws.getCell(r, 8).value = row.billing_city;
+    ws.getCell(r, 9).value = row.billing_country;
+    ws.getCell(r, 10).value = row.term;
+    ws.getCell(r, 11).value = row.credit_limit;
+    ws.getCell(r, 12).value = row.status;
+  });
+  const footer = data.reportData.length + 5;
+  ws.mergeCells(`A${footer}:L${footer}`);
+  ws.getCell(`A${footer}`).value = `Printed On: ${data.printedAt}`;
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="company-profile.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+async function getGuestListingReport(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const columnsParam = (params.columns || '').toString();
+  const selectedColumns = columnsParam.split(',').map((s: string) => s.trim()).filter(Boolean);
+  const allowedColumns: Record<string, string> = {
+    account: 'gp.account AS account',
+    name_combine: `CONCAT(CASE WHEN gp.gender = 'Male' THEN 'MR ' WHEN gp.gender = 'Female' THEN 'MRS ' ELSE '' END, COALESCE(gp.first_name, ''), ' ', COALESCE(gp.last_name, '')) AS name_combine`,
+    nationality: 'na.name AS nationality',
+    country: 'co.name AS country',
+    city: 'c.name AS city',
+    gender: 'gp.gender',
+    birth_of_date: 'gp.birth_of_date',
+    age: `CASE WHEN gp.birth_of_date IS NULL OR gp.birth_of_date = '0000-00-00' THEN NULL ELSE TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) END AS age`,
+    stay: 'COALESCE(fn.totalStay, 0) AS stay',
+    last_checkout_date: 'fn.last_checkout_date AS last_checkout_date',
+    address: 'gp.address',
+    telp: `COALESCE(NULLIF(gp.telp, ''), gp.mobile_phone) AS telp`,
+    email: 'gp.email',
+  };
+  let selectFields = selectedColumns.map((c: string) => allowedColumns[c]).filter(Boolean);
+  if (!selectFields.length) selectFields = ['gp.account AS account', allowedColumns.name_combine];
+  const select = selectFields.join(',\n  ');
+
+  const bindings: any[] = [pid];
+  const where: string[] = ['f.property_id = ?', 'f.deleted_at IS NULL'];
+  if (params.gender) { where.push('gp.gender = ?'); bindings.push(params.gender); }
+  if (params.min_age) { where.push('TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) >= ?'); bindings.push(Number(params.min_age)); }
+  if (params.max_age) { where.push('TIMESTAMPDIFF(YEAR, gp.birth_of_date, CURDATE()) <= ?'); bindings.push(Number(params.max_age)); }
+  const dobType = params.dob_filter_type;
+  if (dobType === 'month' && params.dob_month) { where.push('MONTH(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_month)); }
+  if (dobType === 'year' && params.dob_year) { where.push('YEAR(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_year)); }
+  if (dobType === 'month_year' && params.dob_month && params.dob_year) { where.push('MONTH(gp.birth_of_date) = ? AND YEAR(gp.birth_of_date) = ?'); bindings.push(Number(params.dob_month), Number(params.dob_year)); }
+  if (dobType === 'month_range' && params.dob_from_month && params.dob_to_month) { where.push('MONTH(gp.birth_of_date) BETWEEN ? AND ?'); bindings.push(Number(params.dob_from_month), Number(params.dob_to_month)); }
+  if (params.nationality_id) { where.push('gp.nationality_id = ?'); bindings.push(Number(params.nationality_id)); }
+  if (params.country_id) { where.push('gp.country_id = ?'); bindings.push(Number(params.country_id)); }
+  if (params.city_id) { where.push('gp.city_id = ?'); bindings.push(Number(params.city_id)); }
+  if (params.last_checkout_date) {
+    where.push('EXISTS (SELECT 1 FROM folio_night fn2 WHERE fn2.folio_id = f.id AND DATE(fn2.last_checkout_date) = ?)');
+    bindings.push(params.last_checkout_date);
+  }
+  if (params.stay_value && params.stay_operator) {
+    const op = ['>=', '<=', '>', '<', '='].includes(params.stay_operator) ? params.stay_operator : '>=';
+    where.push(`EXISTS (SELECT 1 FROM folio_night fn3 WHERE fn3.folio_id = f.id AND fn3.totalStay ${op} ?)`);
+    bindings.push(Number(params.stay_value));
+  }
+
+  const sql = `WITH folio_night AS (
+  SELECT f.id AS folio_id,
+    SUM(CASE WHEN r.check_in_date IS NOT NULL AND r.check_out_date IS NOT NULL THEN DATEDIFF(r.check_out_date, r.check_in_date) ELSE 0 END) AS totalNight,
+    COUNT(DISTINCT CASE WHEN f.status = 1 AND (f.folio_number LIKE 'F%' OR (f.type_reservation = 'git' AND f.parent != 0)) THEN f.id END) AS totalStay,
+    MAX(COALESCE(r.check_out_date, f.check_out_date)) AS last_checkout_date
+  FROM folios f
+  LEFT JOIN reservations r ON r.folio_id = f.id
+  WHERE f.property_id = ? AND f.deleted_at IS NULL
+  GROUP BY f.id
+)
+SELECT
+  ${select}
+FROM folios f
+JOIN guest_profiles gp ON gp.id = f.guest_profile_id
+LEFT JOIN countries na ON na.id = gp.nationality_id
+LEFT JOIN countries co ON co.id = gp.country_id
+LEFT JOIN cities c ON c.id = gp.city_id
+LEFT JOIN folio_night fn ON fn.folio_id = f.id
+WHERE ${where.join(' AND ')}
+ORDER BY COALESCE(fn.totalStay, 0) DESC, gp.account`;
+
+  const rows = await prisma.$queryRawUnsafe(sql, ...bindings);
+  const safeRows = Array.isArray(rows) ? rows.map((x: any) => bigintToNumber(x)) : [];
+
+  return {
+    reportTitle: 'Guest Listing Report',
+    reportData: safeRows,
+    selectedColumns: selectedColumns.length ? selectedColumns : ['account', 'name_combine'],
+    date: params.date || formatDate(new Date()),
+  };
+}
+
+async function generateGuestListingExcel(res: any, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('GuestListing');
+  ws.views = [{ state: 'frozen', ySplit: 2 }];
+
+  ws.mergeCells('A1:K1');
+  ws.getCell('A1').value = data.reportTitle;
+  ws.getCell('A1').font = { bold: true, size: 14 };
+
+  const labelMap: Record<string, string> = {
+    account: 'Account', status_profile: 'Status Profile', name_combine: 'Guest Name', gender: 'Gender', age: 'Age',
+    birth_of_date: 'DOB', stay: 'Stay', last_checkout_date: 'Last C/O', telp: 'Telephone', email: 'Email',
+    address: 'Address', city: 'City', nationality: 'Nationality', country: 'Country',
+  };
+  const cols = data.selectedColumns;
+  const headerCols = ['account', 'status_profile', 'name_combine', 'gender', 'age', 'birth_of_date', 'stay', 'last_checkout_date', 'telp', 'email', 'address', 'city', 'nationality', 'country'].filter((c) => cols.includes(c));
+  headerCols.forEach((c, i) => {
+    ws.getCell(2, 2 + i).value = labelMap[c] || c;
+    ws.getCell(2, 2 + i).font = { bold: true };
+    ws.getCell(2, 2 + i).alignment = { horizontal: 'center' };
+  });
+  ws.getCell(2, 1).value = 'No';
+  ws.getCell(2, 1).font = { bold: true };
+
+  const up = (v: any) => (v === undefined || v === null ? '-' : String(v).trim().toUpperCase() || '-');
+  const fmt = (v: any) => (v === undefined || v === null || v === '' ? '-' : formatDMYDash(v));
+  data.reportData.forEach((row: any, i: number) => {
+    const r = 3 + i;
+    ws.getCell(r, 1).value = i + 1;
+    headerCols.forEach((c, j) => {
+      let v: any = '-';
+      if (c === 'account') v = row.account ?? '-';
+      else if (c === 'status_profile') v = row.status_profile ?? '-';
+      else if (c === 'name_combine') v = up(row.name_combine);
+      else if (c === 'gender') v = row.gender ?? '-';
+      else if (c === 'age') v = row.age ?? '-';
+      else if (c === 'birth_of_date') v = fmt(row.birth_of_date);
+      else if (c === 'stay') v = row.stay ?? '0';
+      else if (c === 'last_checkout_date') v = fmt(row.last_checkout_date);
+      else if (c === 'telp') v = row.telp ?? '-';
+      else if (c === 'email') v = up(row.email);
+      else if (c === 'address') v = up(row.address);
+      else if (c === 'city') v = up(row.city);
+      else if (c === 'nationality') v = up(row.nationality);
+      else if (c === 'country') v = up(row.country);
+      ws.getCell(r, 2 + j).value = v;
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="guest-listing-report.xlsx"`);
   await workbook.xlsx.write(res);
   res.end();
 }
@@ -6573,6 +7596,16 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/housekeeping/room-utilization-report/view': getRoomUtilizationReport,
   'account/tax-breakdown-detail-report/view': getTaxBreakdownDetail,
   'account/transaction-report-detail/view': getAccountTransactionReportDetail,
+  'report/weekly-booking': getWeeklyBooking,
+  'report/calendar-operation': getCalendarOperation,
+  'report/daily-checkin': getDailyCheckin,
+  'report/company-profile': getCompanyProfile,
+  'batch/frontoffice/guest-listing-report': getGuestListingReport,
+  'report/weekly-booking/view': getWeeklyBooking,
+  'report/calendar-operation/view': getCalendarOperation,
+  'report/daily-checkin/view': getDailyCheckin,
+  'report/company-profile/view': getCompanyProfile,
+  'batch/frontoffice/guest-listing-report/view': getGuestListingReport,
 };
 
 // â”€â”€ Controller â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -6707,7 +7740,7 @@ export class ReportController {
       const rawPathParam = (req.params && (req.params[0] !== undefined ? req.params[0] : req.params.path)) as any;
       const path = typeof rawPathParam === 'string' ? rawPathParam : Array.isArray(rawPathParam) ? rawPathParam.join('/') : (rawPathParam || '');
       const pid = req.user?.lastProperty ?? 0n;
-      const params = { ...parseReportParams(req), propertyId: pid, folioId: req.query.folio_id as string || '' };
+      const params = { ...parseReportParams(req), ...(req.query as any), propertyId: pid, folioId: req.query.folio_id as string || '' };
 
       const segments = path.split('/').filter(Boolean);
       const typeOps = req.query.typeOps as string || '';
@@ -6816,6 +7849,26 @@ export class ReportController {
           }
           if (reportKey === 'batch/housekeeping/room-utilization-report/view') {
             await generateRoomUtilizationExcel(res, data);
+            return;
+          }
+          if (reportKey === 'report/weekly-booking/view') {
+            await generateWeeklyBookingExcel(res, data);
+            return;
+          }
+          if (reportKey === 'report/calendar-operation/view') {
+            await generateCalendarOperationExcel(res, data);
+            return;
+          }
+          if (reportKey === 'report/daily-checkin/view') {
+            await generateDailyCheckinExcel(res, data);
+            return;
+          }
+          if (reportKey === 'report/company-profile/view') {
+            await generateCompanyProfileExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/guest-listing-report/view') {
+            await generateGuestListingExcel(res, data);
             return;
           }
           if (reportKey === 'account/owi-revenue-report/view') {
