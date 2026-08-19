@@ -49,6 +49,29 @@ function formatDateDMY(d: any): string {
   return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
 }
 
+function formatDateMYShort(d: any): string {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return `${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}-${String(dt.getFullYear()).slice(2)}`;
+}
+
+const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function formatLongDate(d: any): string {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return `${dt.getDate()} ${LONG_MONTHS[dt.getMonth()]} ${dt.getFullYear()}`;
+}
+
+function diffDays(a: any, b: any): number {
+  const da = new Date(a);
+  const db = new Date(b);
+  if (isNaN(da.getTime()) || isNaN(db.getTime())) return 0;
+  return Math.round((db.getTime() - da.getTime()) / 86400000);
+}
+
 async function revenueBetween(pid: any, s: Date, e: Date, type?: string): Promise<number> {
   // Generic revenue aggregator for reports. Matches previous behaviour: sum of `amount` in `transactions`.
   const where: any = { property_id: pid, date: { gte: s, lte: e }, deleted_at: null };
@@ -937,7 +960,7 @@ function formatDateTimeLocal(d: any): string {
   return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getFullYear()).slice(2)} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}:${String(dt.getSeconds()).padStart(2, '0')}`;
 }
 
-async function generateTaxBreakdownDetailExcel(res: Response, data: any): Promise<void> {
+async function generateTaxBreakdownDetailExcel(res: Response, data: any, filename = 'tax-breakdown-detail'): Promise<void> {
   const workbook = new ExcelJS.Workbook();
   const ws = workbook.addWorksheet('Tax Breakdown Detail');
   const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
@@ -989,7 +1012,7 @@ async function generateTaxBreakdownDetailExcel(res: Response, data: any): Promis
   });
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="tax-breakdown-detail.xlsx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
   await workbook.xlsx.write(res);
   res.end();
 }
@@ -1045,6 +1068,813 @@ async function generateTaxBreakdownSummaryExcel(res: Response, data: any): Promi
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="tax-breakdown-summary.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Account Transaction Report Detail ──
+// Laravel parity: AccountTransactionReportDetailController raw SQL + account-transaction-report-detail.blade.php
+// Same data as tax-breakdown-detail but STAFF defaults to 'System'.
+
+async function getAccountTransactionReportDetail(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const staffName = params.staffId || 'System';
+
+  const rows: any = await prisma.$queryRaw`
+    WITH last_room AS (
+      SELECT folio_id, room_name
+      FROM (
+        SELECT folio_id, room_name, ROW_NUMBER() OVER (PARTITION BY folio_id ORDER BY id DESC) AS rn
+        FROM reservations
+      ) x
+      WHERE rn = 1
+    )
+    SELECT
+      CASE WHEN p.type = 'DEFAULT' THEN p.name WHEN p.type = 'IS_PAYMENT' OR p.type IS NULL THEN tp.name END AS "Postcode",
+      tb.date,
+      f.folio_number,
+      lr.room_name AS room_no,
+      CONCAT(f.first_name, ' ', f.last_name) AS "Guest_Name",
+      f.company_name,
+      CONCAT(COALESCE(tb.type, ''), ' - ', TRIM(CONCAT_WS(' ', NULLIF(tb.remark, ''), NULLIF(tb.last_digit_card::text, ''), NULLIF(tb.card_name, ''), NULLIF(tb.voucher, ''), NULLIF(tb.receipt, '')))) AS description,
+      tb.created_at AS "Posting_date",
+      CASE WHEN tb.type = 'Room_Revenue' THEN ${staffName} WHEN tb.receipt IS NOT NULL THEN 'POS SYSTEM' ELSE u.name END AS "STAFF",
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.amount AS DECIMAL(18,2)) ELSE CAST(tb.amount AS DECIMAL(18,2)) END AS "Charge",
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.pb1 AS DECIMAL(18,2)) ELSE CAST(tb.pb1 AS DECIMAL(18,2)) END AS "Govt_tax",
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.svr_chrg AS DECIMAL(18,2)) ELSE CAST(tb.svr_chrg AS DECIMAL(18,2)) END AS svr_chrg,
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.surcharge AS DECIMAL(18,2)) ELSE CAST(tb.surcharge AS DECIMAL(18,2)) END AS surcharge,
+      CASE WHEN tb.type_amount = 'Minus' THEN -CAST(tb.total AS DECIMAL(18,2)) ELSE CAST(tb.total AS DECIMAL(18,2)) END AS total
+    FROM transaction_breakdowns tb
+    JOIN folios f ON tb.folio_id = f.id
+    JOIN code_posts p ON tb.code = p.id::text
+    LEFT JOIN users u ON tb.created_by = u.id
+    LEFT JOIN type_payments tp ON tp.id = tb.type_payment_id
+    LEFT JOIN last_room lr ON lr.folio_id = f.id
+    WHERE f.property_id = ${pid}
+      AND tb.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T23:59:59Z`)}
+      AND p.type IN ('DEFAULT', 'IS_PAYMENT')
+    ORDER BY p.type, p.id, tb.created_at`;
+
+  const reportData: Record<string, any> = {};
+  let grandTotalCharge = 0, grandTotalGovtTax = 0, grandTotalSvcCharge = 0, grandTotalSurcharge = 0, grandTotal = 0, totalTransactions = 0;
+  for (const r of rows) {
+    const code = r.Postcode || 'UNKNOWN';
+    if (!reportData[code]) reportData[code] = { transactions: [], count: 0, totalCharge: 0, totalGovtTax: 0, totalSvcCharge: 0, totalSurcharge: 0, totalAmount: 0 };
+    const g = reportData[code];
+    g.transactions.push({
+      date: r.date ? formatDate(r.date) : '',
+      folio_number: r.folio_number || '',
+      room_no: r.room_no || '',
+      Guest_Name: r.Guest_Name || '',
+      company_name: r.company_name || '',
+      description: r.description || '',
+      STAFF: r.STAFF || '',
+      Posting_date: r.Posting_date ? formatDateTimeLocal(r.Posting_date) : '',
+      Charge: Number(r.Charge || 0),
+      Govt_tax: Number(r.Govt_tax || 0),
+      svr_chrg: Number(r.svr_chrg || 0),
+      surcharge: Number(r.surcharge || 0),
+      total: Number(r.total || 0),
+    });
+    g.count++;
+    g.totalCharge += Number(r.Charge || 0);
+    g.totalGovtTax += Number(r.Govt_tax || 0);
+    g.totalSvcCharge += Number(r.svr_chrg || 0);
+    g.totalSurcharge += Number(r.surcharge || 0);
+    g.totalAmount += Number(r.total || 0);
+    grandTotalCharge += Number(r.Charge || 0);
+    grandTotalGovtTax += Number(r.Govt_tax || 0);
+    grandTotalSvcCharge += Number(r.svr_chrg || 0);
+    grandTotalSurcharge += Number(r.surcharge || 0);
+    grandTotal += Number(r.total || 0);
+    totalTransactions++;
+  }
+
+  return {
+    reportTitle: 'Account Transaction Report',
+    startDate,
+    endDate,
+    reportData,
+    grandTotalCharge,
+    grandTotalGovtTax,
+    grandTotalSvcCharge,
+    grandTotalSurcharge,
+    grandTotal,
+    totalTransactions,
+  };
+}
+
+// ── Transaction Report (Before Night Audit) ──
+// Laravel parity: TransactionRptController + transaction-rpt.blade.php
+// Single date, grouped by post code name; guest bug-for-bug = first_name duplicated.
+
+async function getTransactionRpt(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const date = params.date || formatDate(new Date());
+  const start = new Date(`${date}T00:00:00Z`);
+  const end = new Date(`${date}T23:59:59Z`);
+
+  const transactions = await prisma.transactions.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null },
+    select: { id: true, folio_id: true, code_name: true, description: true, amount: true, tax3: true, total: true, created_at: true, created_by: true },
+    orderBy: { id: 'asc' },
+  });
+
+  const folioIds = transactions.map((t: any) => t.folio_id);
+  const [folios, reservations, gps, users] = await Promise.all([
+    prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, folio_number: true, guest_profile_id: true } }),
+    prisma.reservations.findMany({ where: { folio_id: { in: folioIds } }, select: { id: true, folio_id: true, room_name: true }, orderBy: { id: 'asc' } }),
+    prisma.guest_profiles.findMany({ where: { id: { in: folioIds } }, select: { id: true, first_name: true, last_name: true } }),
+    prisma.users.findMany({ where: { id: { in: transactions.map((t: any) => t.created_by).filter(Boolean) } }, select: { id: true, name: true } }),
+  ]);
+
+  const folioMap = new Map(folios.map((f: any) => [f.id, f]));
+  const gpMap = new Map(gps.map((g: any) => [g.id, g]));
+  const userMap = new Map(users.map((u: any) => [u.id, u.name]));
+  const firstRoom = new Map<string, string>();
+  for (const r of reservations) {
+    if (!firstRoom.has(r.folio_id.toString())) firstRoom.set(r.folio_id.toString(), r.room_name || '');
+  }
+
+  const mapped = transactions.map((t: any) => {
+    const f = folioMap.get(t.folio_id);
+    const gp = f ? gpMap.get(f.guest_profile_id) : null;
+    return {
+      category: t.code_name || '',
+      folio: f?.folio_number || '',
+      guest: gp ? `${gp.first_name || ''} ${gp.first_name || ''}` : '',
+      room: firstRoom.get(t.folio_id.toString()) || '',
+      description: t.description || '',
+      staff: userMap.get(t.created_by) || '',
+      post_date_time: t.created_at ? formatDateDMY(t.created_at) : '',
+      excl_tax: Number(t.amount || 0),
+      gst: Number(t.tax3 || 0),
+      total: Number(t.total || 0),
+    };
+  }).sort((a: any, b: any) => a.category.localeCompare(b.category));
+
+  const categories: Record<string, any> = {};
+  const totals = { excl_tax: 0, gst: 0, total: 0 };
+  for (const row of mapped) {
+    if (!categories[row.category]) categories[row.category] = { transactions: [], subtotal: { excl_tax: 0, gst: 0, total: 0 } };
+    categories[row.category].transactions.push(row);
+    categories[row.category].subtotal.excl_tax += row.excl_tax;
+    categories[row.category].subtotal.gst += row.gst;
+    categories[row.category].subtotal.total += row.total;
+    totals.excl_tax += row.excl_tax;
+    totals.gst += row.gst;
+    totals.total += row.total;
+  }
+
+  return { reportTitle: 'Transaction Report', startDate: date, endDate: date, categories, totals };
+}
+
+async function generateTransactionRptExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Transaction Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio', 'Guest/Group', 'Room/Staff', 'Description', 'Post Date/Time', 'Excl Tax', 'GST', 'Total'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 8);
+  const title = ws.getCell(1, 1);
+  title.value = 'TRANSACTION REPORT';
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 8);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Date: ${data.startDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  let rn = 3;
+  for (const [categoryName, categoryData] of Object.entries<any>(data.categories || {})) {
+    ws.getRow(rn).values = [categoryName];
+    ws.mergeCells(rn, 1, rn, 8);
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    ws.getRow(rn).values = HEADERS;
+    ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const t of categoryData.transactions || []) {
+      ws.getRow(rn).values = [t.folio, t.guest, t.room, t.description, t.post_date_time, nf(t.excl_tax), nf(t.gst), nf(t.total)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = [`Subtotal for ${categoryName}`, '', '', '', '', nf(categoryData.subtotal.excl_tax), nf(categoryData.subtotal.gst), nf(categoryData.subtotal.total)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['Grand Total:', '', '', '', '', nf(data.totals.excl_tax), nf(data.totals.gst), nf(data.totals.total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn >= 6 ? 'right' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="transaction-rpt.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Tax Breakdown (After Night Audit) ──
+// Laravel parity: TaxBreakdownController + tax-breakdown.blade.php
+// From transactions table, grouped by payment type.
+
+async function getTaxBreakdownAfterNA(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const date = params.date || params.startDate || formatDate(new Date());
+  const start = new Date(`${date}T00:00:00Z`);
+  const end = new Date(`${date}T23:59:59Z`);
+
+  const transactions = await prisma.transactions.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null },
+    select: { id: true, folio_id: true, code_name: true, code_item_name: true, description: true, type_payment_name: true, amount: true, pb1: true, svr_chrg: true, total: true, created_at: true, created_by: true },
+    orderBy: { id: 'asc' },
+  });
+
+  const folioIds = transactions.map((t: any) => t.folio_id);
+  const [folios, gps, companies, reservations, users] = await Promise.all([
+    prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, folio_number: true, guest_profile_id: true, company_profile_id: true, booking_agent_id: true } }),
+    prisma.guest_profiles.findMany({ where: { id: { in: folioIds } }, select: { id: true, first_name: true, last_name: true } }),
+    prisma.company_profiles.findMany({ where: { id: { in: folioIds } }, select: { id: true, name: true } }),
+    prisma.reservations.findMany({ where: { folio_id: { in: folioIds } }, select: { id: true, folio_id: true, room_name: true }, orderBy: { id: 'asc' } }),
+    prisma.users.findMany({ where: { id: { in: transactions.map((t: any) => t.created_by).filter(Boolean) } }, select: { id: true, name: true } }),
+  ]);
+
+  const folioMap = new Map(folios.map((f: any) => [f.id, f]));
+  const gpMap = new Map(gps.map((g: any) => [g.id, g]));
+  const companyMap = new Map(companies.map((c: any) => [c.id, c]));
+  const userMap = new Map(users.map((u: any) => [u.id, u.name]));
+  const lastRoom = new Map<string, string>();
+  for (const r of reservations) {
+    lastRoom.set(r.folio_id.toString(), r.room_name || '');
+  }
+
+  const groupedTransactions: Record<string, any> = {};
+  const totals = { charge: 0, govt_tax: 0, svc_charge: 0, total: 0 };
+  let totalTransactions = 0;
+
+  for (const t of transactions) {
+    const f = folioMap.get(t.folio_id);
+    const gp = f ? gpMap.get(f.guest_profile_id) : null;
+    const company = f ? companyMap.get(f.company_profile_id) : null;
+    const paymentType = t.type_payment_name || 'N/A';
+    if (!groupedTransactions[paymentType]) groupedTransactions[paymentType] = { transactions: [], count: 0, charge: 0, govt_tax: 0, svc_charge: 0, total: 0 };
+    const g = groupedTransactions[paymentType];
+    const row = {
+      payment_type: paymentType,
+      folio: f?.folio_number || 'N/A',
+      room: lastRoom.get(t.folio_id.toString()) || 'N/A',
+      guest: gp ? `${gp.first_name || ''} ${gp.last_name || ''}` : (company ? company.name : 'N/A'),
+      booking_agent: f?.booking_agent_id ? (companyMap.get(f.booking_agent_id)?.name || 'N/A') : 'N/A',
+      description: t.description || (t.code_name ? t.code_name + (t.code_item_name ? ' - ' + t.code_item_name : '') : 'N/A'),
+      post_date_time: t.created_at ? formatDateTimeLocal(t.created_at) : '',
+      staff: userMap.get(t.created_by) || 'SYSTEM',
+      charge: Number(t.amount || 0),
+      govt_tax: Number(t.pb1 || 0),
+      svc_charge: Number(t.svr_chrg || 0),
+      total: Number(t.total || 0),
+    };
+    g.transactions.push(row);
+    g.count++;
+    g.charge += row.charge;
+    g.govt_tax += row.govt_tax;
+    g.svc_charge += row.svc_charge;
+    g.total += row.total;
+    totals.charge += row.charge;
+    totals.govt_tax += row.govt_tax;
+    totals.svc_charge += row.svc_charge;
+    totals.total += row.total;
+    totalTransactions++;
+  }
+
+  return { reportTitle: 'Tax Breakdown', startDate: date, endDate: date, groupedTransactions, totals, totalTransactions };
+}
+
+async function generateTaxBreakdownAfterNAExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Tax Breakdown');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Folio', 'Room', 'Guest', 'Booking Agent', 'Description', 'Staff', 'Post Date/Time', 'Charge', 'Govt Tax', 'Svc Charge', 'Total'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 11);
+  const title = ws.getCell(1, 1);
+  title.value = 'TAX BREAKDOWN';
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 11);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Period: ${data.startDate || ''} - ${data.endDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  let rn = 3;
+  for (const [paymentType, group] of Object.entries<any>(data.groupedTransactions || {})) {
+    ws.getRow(rn).values = [paymentType];
+    ws.mergeCells(rn, 1, rn, 11);
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    ws.getRow(rn).values = HEADERS;
+    ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    for (const t of group.transactions || []) {
+      ws.getRow(rn).values = [t.folio, t.room, t.guest, t.booking_agent, t.description, t.staff, t.post_date_time, nf(t.charge), nf(t.govt_tax), nf(t.svc_charge), nf(t.total)];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+    ws.getRow(rn).values = [`Number of Transactions: ${group.count}`, '', '', '', '', '', '', nf(group.charge), nf(group.govt_tax), nf(group.svc_charge), nf(group.total)];
+    ws.getRow(rn).font = { bold: true };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = [`Total Transactions: ${data.totalTransactions || 0}`, '', '', '', '', '', '', nf(data.totals.charge), nf(data.totals.govt_tax), nf(data.totals.svc_charge), nf(data.totals.total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn >= 8 ? 'right' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="tax-breakdown.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Tax Breakdown Summary (After Night Audit) ──
+// Laravel parity: TaxBreakdownSummaryController + tax-breakdown-summary.blade.php
+// Payments (MINUS) + Postings (PLUS) grouped by code + Resort Business Done.
+
+async function getTaxBreakdownSummaryAfterNA(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const date = params.date || params.startDate || formatDate(new Date());
+  const start = new Date(`${date}T00:00:00Z`);
+  const end = new Date(`${date}T23:59:59Z`);
+
+  const transactions = await prisma.transactions.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, deleted_at: null },
+    select: { id: true, code: true, code_name: true, type_payment_name: true, type_amount: true, amount: true, tax3: true, svr_chrg: true, total: true },
+    orderBy: { id: 'asc' },
+  });
+
+  const buildGroups = (rows: any[], wantMinus: boolean) => {
+    const groups = new Map<string, { description: string; charge: number; govtTax: number; svcCharge: number; total: number }>();
+    for (const t of rows) {
+      const isMinus = (t.type_amount || '').toUpperCase() === 'MINUS';
+      if (wantMinus !== isMinus) continue;
+      const key = String(t.code || '');
+      if (!groups.has(key)) {
+        groups.set(key, {
+          description: wantMinus ? (t.type_payment_name || 'Unknown') : (t.code_name || 'Unknown'),
+          charge: 0, govtTax: 0, svcCharge: 0, total: 0,
+        });
+      }
+      const g = groups.get(key)!;
+      const abs = wantMinus ? -1 : 1;
+      g.charge += Number(t.amount || 0) * abs;
+      g.govtTax += Number(t.tax3 || 0) * abs;
+      g.svcCharge += Number(t.svr_chrg || 0) * abs;
+      g.total += Number(t.total || 0) * abs;
+    }
+    return Array.from(groups.values());
+  };
+
+  const payments = buildGroups(transactions, true);
+  const postings = buildGroups(transactions, false);
+
+  const sum = (arr: any[], key: string) => arr.reduce((acc, x) => acc + (x[key] || 0), 0);
+  const totalPayment = { charge: sum(payments, 'charge'), govtTax: sum(payments, 'govtTax'), svcCharge: sum(payments, 'svcCharge'), total: sum(payments, 'total') };
+  const totalPostings = { charge: sum(postings, 'charge'), govtTax: sum(postings, 'govtTax'), svcCharge: sum(postings, 'svcCharge'), total: sum(postings, 'total') };
+  const resortBusinessDone = totalPostings.total - totalPayment.total;
+
+  return {
+    reportTitle: 'Tax Breakdown Summary',
+    businessDate: formatDateDMY(date),
+    payments,
+    postings,
+    totalPayment,
+    totalPostings,
+    resortBusinessDone,
+    startDate: date,
+    endDate: date,
+  };
+}
+
+async function generateTaxBreakdownSummaryAfterNAExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Tax Breakdown Summary');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Posting Description', 'Charge', 'Govt Tax', 'Svc Charge', 'Total'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 5);
+  const title = ws.getCell(1, 1);
+  title.value = 'TAX BREAKDOWN SUMMARY';
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 5);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Business Date: ${data.businessDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  let rn = 4;
+  ws.getRow(rn).values = HEADERS;
+  ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+  for (const p of data.payments || []) {
+    ws.getRow(rn).values = [p.description, nf(p.charge), nf(p.govtTax), nf(p.svcCharge), nf(p.total)];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['Total Payment:', nf(data.totalPayment.charge), nf(data.totalPayment.govtTax), nf(data.totalPayment.svcCharge), nf(data.totalPayment.total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+  for (const p of data.postings || []) {
+    ws.getRow(rn).values = [p.description, nf(p.charge), nf(p.govtTax), nf(p.svcCharge), nf(p.total)];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+  ws.getRow(rn).values = ['Total Postings:', nf(data.totalPostings.charge), nf(data.totalPostings.govtTax), nf(data.totalPostings.svcCharge), nf(data.totalPostings.total)];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+  ws.getRow(rn).values = ['Resort Business Done :', `(${nf(Math.abs(data.resortBusinessDone || 0))})`];
+  ws.getRow(rn).font = { bold: true };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 4) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn === 1 ? 'left' : 'right' };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="tax-breakdown-summary-after-na.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Transfer Transaction ──
+// Laravel parity: TransferTransactionController + transfer-transaction.blade.php
+
+async function getTransferTransaction(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const transactions = await prisma.transactions.findMany({
+    where: { property_id: pid, date: { gte: start, lte: end }, is_transfer: 1, deleted_at: null },
+    select: { id: true, folio_id: true, remark: true, code_name: true, total: true, date: true, created_by: true },
+    orderBy: { id: 'asc' },
+  });
+
+  const folioIds = transactions.map((t: any) => t.folio_id);
+  const cleanedNumbers = Array.from(new Set(transactions.map((t: any) => (t.remark || '').replace('To - ', '')))).filter(Boolean) as string[];
+
+  const [folios, toFolios, users] = await Promise.all([
+    prisma.folios.findMany({ where: { id: { in: folioIds } }, select: { id: true, folio_number: true } }),
+    prisma.folios.findMany({ where: { folio_number: { in: cleanedNumbers } }, select: { id: true, folio_number: true } }),
+    prisma.users.findMany({ where: { id: { in: transactions.map((t: any) => t.created_by).filter(Boolean) } }, select: { id: true, name: true } }),
+  ]);
+
+  const allFolioIds = Array.from(new Set([...folioIds, ...toFolios.map((f: any) => f.id)]));
+  const reservations = await prisma.reservations.findMany({
+    where: { folio_id: { in: allFolioIds } },
+    select: { id: true, folio_id: true, room_name: true, is_posting: true, date: true },
+    orderBy: [{ date: 'asc' }, { id: 'asc' }],
+  });
+
+  const folioMap = new Map(folios.map((f: any) => [f.id, f]));
+  const toFolioMap = new Map(toFolios.map((f: any) => [f.folio_number, f]));
+  const userMap = new Map(users.map((u: any) => [u.id, u.name]));
+
+  const lastReservation = (folioId: any): any => {
+    if (folioId == null) return null;
+    for (const r of reservations) {
+      if (r.folio_id === folioId && r.is_posting === 0) return r;
+    }
+    return null;
+  };
+  const firstReservation = (folioId: any): any => {
+    if (folioId == null) return null;
+    for (const r of reservations) {
+      if (r.folio_id === folioId) return r;
+    }
+    return null;
+  };
+
+  const reportData = transactions.map((t: any) => {
+    const f = folioMap.get(t.folio_id);
+    const fromRes = lastReservation(f?.id);
+    const cleaned = (t.remark || '').replace('To - ', '');
+    const isTransferFolio = /^[A-Za-z]{1}[0-9]+$/.test(cleaned) && /^[FGV]/.test(cleaned);
+    const toFolio = isTransferFolio ? (toFolioMap.get(cleaned) || { folio_number: cleaned }) : f;
+    const toRoom = isTransferFolio
+      ? (firstReservation(toFolio?.id)?.room_name || 'N/A')
+      : (fromRes?.room_name || 'N/A');
+    return {
+      date: t.date ? formatDateDMY(t.date) : '',
+      fromFolio: f?.folio_number,
+      fromRoomNumber: fromRes?.room_name || 'N/A',
+      toFolio: toFolio?.folio_number,
+      toRoomNumber: toRoom,
+      postcode: t.code_name || 'N/A',
+      amount: Number(t.total || 0),
+      staff: userMap.get(t.created_by) || '',
+    };
+  });
+
+  return { reportTitle: 'Transfer Transaction', startDate: formatDateDMY(startDate), endDate: formatDateDMY(endDate), reportData };
+}
+
+async function generateTransferTransactionExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Transfer Transaction');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['Date', 'From Folio', 'From Room Number', 'To Folio', 'To Room Number', 'Post Code', 'Amount', 'Staff'];
+  const nf = (v: any) => Number(v || 0).toFixed(2);
+
+  ws.mergeCells(1, 1, 1, 8);
+  const title = ws.getCell(1, 1);
+  title.value = 'TRANSFER TRANSACTION';
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 8);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Date From ${data.startDate || ''} To ${data.endDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  ws.getRow(4).values = HEADERS;
+  ws.getRow(4).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  ws.getRow(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+  ws.getRow(4).eachCell((c: any) => { c.border = border; });
+
+  let rn = 5;
+  for (const t of data.reportData || []) {
+    ws.getRow(rn).values = [t.date, t.fromFolio, t.fromRoomNumber, t.toFolio, t.toRoomNumber, t.postcode, nf(t.amount), t.staff];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  }
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 4) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn === 7 ? 'right' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="transfer-transaction.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── In House Guest Detail ──
+// Laravel parity: InHouseGuestDetailController raw SQL + in-house-guest-detail.blade.php
+
+async function getInHouseGuestDetail(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+
+  const rows: any = await prisma.$queryRaw`
+    SELECT
+      r.name AS room_name,
+      f.check_in_date,
+      f.check_out_date,
+      CONCAT(g.first_name, ' ', g.last_name) AS full_name,
+      g.card_type,
+      g.card_number,
+      g.email,
+      g.telp AS phone,
+      g.gender,
+      g.birth_of_date,
+      g.address,
+      c.nationality,
+      ci.name AS city_name
+    FROM folios f
+    JOIN reservations res ON f.id = res.folio_id
+    JOIN rooms r ON res.room_id = r.id
+    JOIN guest_profiles g ON f.guest_profile_id = g.id
+    LEFT JOIN countries c ON g.nationality_id = c.id
+    LEFT JOIN cities ci ON g.city_id = ci.id
+    WHERE f.property_id = ${pid}
+      AND f.type_reservation <> 'vr'
+      AND res.date BETWEEN ${new Date(`${startDate}T00:00:00Z`)} AND ${new Date(`${endDate}T23:59:59Z`)}
+      AND r.name IS NOT NULL
+    ORDER BY r.name`;
+
+  return { reportTitle: 'In House Guest Detail Report', guests: bigintToNumber(rows), startDate, endDate };
+}
+
+async function generateInHouseGuestDetailExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('In House Guest Detail');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['No', 'Room No', 'Guest Name', 'Arrival', 'Departure', 'ID Type', 'ID Number', 'Phone', 'Email', 'Gender', 'Birth Date', 'Nationality', 'City', 'Address'];
+
+  ws.mergeCells(1, 1, 1, 14);
+  const title = ws.getCell(1, 1);
+  title.value = 'IN HOUSE GUEST DETAIL REPORT';
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 14);
+  const meta = ws.getCell(2, 1);
+  meta.value = `Period: ${data.startDate || ''} - ${data.endDate || ''}`;
+  meta.font = { size: 10 };
+  meta.alignment = { horizontal: 'center' };
+
+  ws.getRow(4).values = HEADERS;
+  ws.getRow(4).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  ws.getRow(4).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+  ws.getRow(4).eachCell((c: any) => { c.border = border; });
+
+  let rn = 5;
+  const guests = data.guests || [];
+  if (guests.length === 0) {
+    ws.mergeCells(rn, 1, rn, 14);
+    ws.getRow(rn).values = ['No guests found in selected period.'];
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+  } else {
+    for (const [index, g] of guests.entries()) {
+      const gender = g.gender === 'M' ? 'Male' : (g.gender === 'F' ? 'Female' : '-');
+      ws.getRow(rn).values = [
+        index + 1,
+        g.room_name,
+        g.full_name,
+        g.check_in_date ? formatDateDMY(g.check_in_date) : '-',
+        g.check_out_date ? formatDateDMY(g.check_out_date) : '-',
+        g.card_type || '-',
+        g.card_number || '-',
+        g.phone || '-',
+        g.email || '-',
+        gender,
+        g.birth_of_date ? formatDateDMY(g.birth_of_date) : '-',
+        g.nationality || '-',
+        g.city_name || '-',
+        g.address || '-',
+      ];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+  }
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 4) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn === 1 || (cn >= 4 && cn <= 6) || cn === 10 || cn === 11 ? 'center' : 'left', wrapText: true };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="in-house-guest-detail-report.xlsx"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
+
+// ── Room Utilization Report ──
+// Laravel parity: ReportService::room_utilization_report + room-utilization-report.blade.php
+
+async function getRoomUtilizationReport(params: any): Promise<any> {
+  const pid = params.propertyId;
+  const startDate = params.startDate || params.date || formatDate(new Date());
+  const endDate = params.endDate || startDate;
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T23:59:59Z`);
+
+  const [roomTypes, rooms, folios] = await Promise.all([
+    prisma.room_types.findMany({ where: { property_id: pid, deleted_at: null, status: 1 }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+    prisma.rooms.findMany({ where: { property_id: pid, deleted_at: null, status: 1 }, select: { id: true, name: true, room_type_id: true }, orderBy: { id: 'asc' } }),
+    prisma.folios.findMany({ where: { property_id: pid, deleted_at: null, check_in_date: { gte: start, lte: end } }, select: { id: true, folio_number: true, first_name: true, last_name: true, check_in_date: true, check_out_date: true } }),
+  ]);
+
+  const folioIds = folios.map((f: any) => f.id);
+  const roomIds = rooms.map((r: any) => r.id);
+  const reservations = folioIds.length && roomIds.length
+    ? await prisma.reservations.findMany({ where: { folio_id: { in: folioIds }, room_id: { in: roomIds } }, select: { folio_id: true, room_id: true } })
+    : [];
+
+  const folioResCount = new Map<string, number>();
+  for (const r of reservations) {
+    const key = `${r.folio_id}:${r.room_id}`;
+    folioResCount.set(key, (folioResCount.get(key) || 0) + 1);
+  }
+
+  const roomsByType = new Map<string, any[]>();
+  for (const room of rooms) {
+    const key = room.room_type_id.toString();
+    if (!roomsByType.has(key)) roomsByType.set(key, []);
+    roomsByType.get(key)!.push(room);
+  }
+
+  const reportData = roomTypes.map((rt: any) => ({
+    name: rt.name,
+    room: (roomsByType.get(rt.id.toString()) || []).map((room: any) => {
+      const roomFolios = folios.filter((f: any) => (folioResCount.get(`${f.id}:${room.id}`) || 0) > 0);
+      return {
+        name: room.name,
+        folios: roomFolios.map((f: any) => ({
+          folio_number: f.folio_number,
+          check_in_date: f.check_in_date ? formatDate(f.check_in_date) : '',
+          check_out_date: f.check_out_date ? formatDate(f.check_out_date) : '',
+          guest_name: (f.first_name || '') !== '' || (f.last_name || '') !== ''
+            ? `${f.first_name || ''} ${f.last_name || ''}`.trim()
+            : '',
+          noNight: folioResCount.get(`${f.id}:${room.id}`) || 0,
+        })),
+      };
+    }).filter((room: any) => room.folios.length > 0),
+  }));
+
+  return { reportTitle: 'Room Utilization Report', rooms: reportData, startDate, endDate };
+}
+
+async function generateRoomUtilizationExcel(res: Response, data: any): Promise<void> {
+  const workbook = new ExcelJS.Workbook();
+  const ws = workbook.addWorksheet('Room Utilization Report');
+  const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  const HEADERS = ['FOLIO', 'CHECK - IN', 'CHECK-OUT', 'GUEST NAME', 'No. Night'];
+
+  ws.mergeCells(1, 1, 1, 5);
+  const title = ws.getCell(1, 1);
+  title.value = `ROOM UTILIZATION REPORT FROM ${data.startDate || ''} TO ${data.endDate || ''}`;
+  title.font = { bold: true, size: 14 };
+  title.alignment = { horizontal: 'center' };
+
+  let rn = 3;
+  ws.getRow(rn).values = HEADERS;
+  ws.getRow(rn).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  ws.getRow(rn).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF323A50' } };
+  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  rn++;
+
+  for (const roomType of data.rooms || []) {
+    ws.getRow(rn).values = [roomType.name];
+    ws.mergeCells(rn, 1, rn, 5);
+    ws.getRow(rn).font = { bold: true, size: 12 };
+    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    rn++;
+    if (roomType.room.length > 0) {
+      for (const room of roomType.room) {
+        ws.getRow(rn).values = [`ROOM : ${room.name}`];
+        ws.mergeCells(rn, 1, rn, 2);
+        ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+        ws.getCell(rn, 3).value = `Total : ${room.folios.reduce((acc: number, f: any) => acc + (f.noNight || 0), 0)} Nite`;
+        ws.mergeCells(rn, 3, rn, 5);
+        ws.getRow(rn).font = { bold: true };
+        ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+        rn++;
+        for (const f of room.folios) {
+          ws.getRow(rn).values = [f.folio_number, f.check_in_date, f.check_out_date, f.guest_name, f.noNight];
+          ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+          rn++;
+        }
+      }
+    } else {
+      ws.mergeCells(rn, 1, rn, 5);
+      ws.getRow(rn).values = ['No data'];
+      ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+      rn++;
+    }
+  }
+
+  ws.eachRow({ includeEmpty: false }, (r: any, rn2: number) => {
+    if (rn2 < 3) return;
+    r.eachCell({ includeEmpty: false }, (c: any, cn: number) => {
+      c.alignment = { horizontal: cn === 5 ? 'right' : 'left' };
+    });
+  });
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="room-utilization-report.xlsx"`);
   await workbook.xlsx.write(res);
   res.end();
 }
@@ -5727,6 +6557,22 @@ const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/sales-marketing/nationality-statistics-detailed/view': getNationalityStatisticsDetailed,
   'batch/sales-marketing/staff-sales-summary/view': getStaffSalesSummary,
   'batch/sales-marketing/room-occupancy-chart/view': getRoomOccupancyChart,
+  'batch/after-night-audit/tax-breakdown': getTaxBreakdownAfterNA,
+  'batch/after-night-audit/tax-breakdown-summary': getTaxBreakdownSummaryAfterNA,
+  'batch/before-night-audit/transaction-rpt': getTransactionRpt,
+  'batch/frontoffice/transfer-transaction': getTransferTransaction,
+  'batch/frontoffice/in-house-guest-detail': getInHouseGuestDetail,
+  'batch/housekeeping/room-utilization-report': getRoomUtilizationReport,
+  'account/tax-breakdown-detail-report': getTaxBreakdownDetail,
+  'account/transaction-report-detail': getAccountTransactionReportDetail,
+  'batch/after-night-audit/tax-breakdown/view': getTaxBreakdownAfterNA,
+  'batch/after-night-audit/tax-breakdown-summary/view': getTaxBreakdownSummaryAfterNA,
+  'batch/before-night-audit/transaction-rpt/view': getTransactionRpt,
+  'batch/frontoffice/transfer-transaction/view': getTransferTransaction,
+  'batch/frontoffice/in-house-guest-detail/view': getInHouseGuestDetail,
+  'batch/housekeeping/room-utilization-report/view': getRoomUtilizationReport,
+  'account/tax-breakdown-detail-report/view': getTaxBreakdownDetail,
+  'account/transaction-report-detail/view': getAccountTransactionReportDetail,
 };
 
 // â”€â”€ Controller â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5938,6 +6784,38 @@ export class ReportController {
           }
           if (reportKey === 'account/tax-breakdown-summary/view') {
             await generateTaxBreakdownSummaryExcel(res, data);
+            return;
+          }
+          if (reportKey === 'account/tax-breakdown-detail-report/view') {
+            await generateTaxBreakdownDetailExcel(res, data, 'tax-breakdown-detail-report');
+            return;
+          }
+          if (reportKey === 'account/transaction-report-detail/view') {
+            await generateTaxBreakdownDetailExcel(res, data, 'account-transaction-report-detail');
+            return;
+          }
+          if (reportKey === 'batch/before-night-audit/transaction-rpt/view') {
+            await generateTransactionRptExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/tax-breakdown/view') {
+            await generateTaxBreakdownAfterNAExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/after-night-audit/tax-breakdown-summary/view') {
+            await generateTaxBreakdownSummaryAfterNAExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/transfer-transaction/view') {
+            await generateTransferTransactionExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/frontoffice/in-house-guest-detail/view') {
+            await generateInHouseGuestDetailExcel(res, data);
+            return;
+          }
+          if (reportKey === 'batch/housekeeping/room-utilization-report/view') {
+            await generateRoomUtilizationExcel(res, data);
             return;
           }
           if (reportKey === 'account/owi-revenue-report/view') {
