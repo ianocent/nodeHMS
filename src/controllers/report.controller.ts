@@ -42,6 +42,13 @@ function formatDate(d: any): string {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 
+function formatDateDMY(d: any): string {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return `${String(dt.getDate()).padStart(2, '0')}/${String(dt.getMonth() + 1).padStart(2, '0')}/${dt.getFullYear()}`;
+}
+
 async function revenueBetween(pid: any, s: Date, e: Date, type?: string): Promise<number> {
   // Generic revenue aggregator for reports. Matches previous behaviour: sum of `amount` in `transactions`.
   const where: any = { property_id: pid, date: { gte: s, lte: e }, deleted_at: null };
@@ -1048,9 +1055,9 @@ async function generateTaxBreakdownSummaryExcel(res: Response, data: any): Promi
 
 async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
   const pid = params.propertyId;
-  const startDate = params.startDate || params.date || formatDate(new Date());
-  const endDate = params.endDate || startDate;
-  const date = params.date || startDate;
+  const date = params.date || params.startDate || formatDate(new Date());
+  const startDate = date;
+  const endDate = date;
 
   const typeIds = cashOnly
     ? (await prisma.type_payments.findMany({
@@ -1059,11 +1066,14 @@ async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
       })).map((t: any) => t.id)
     : undefined;
 
-  const transactions = await prisma.transactions.findMany({
+  // Laravel CashDetailedController reads `transactions` (Transaction model); every transaction
+  // is mirrored into `transaction_breakdowns` (Transaction::created hook), which is the populated
+  // table in this DB. Use tb as source for parity.
+  const transactions = await prisma.transaction_breakdowns.findMany({
     where: {
       property_id: pid,
       deleted_at: null,
-      date: { gte: new Date(`${startDate}T00:00:00Z`), lte: new Date(`${endDate}T23:59:59Z`) },
+      date: { gte: new Date(`${date}T00:00:00Z`), lte: new Date(`${date}T23:59:59Z`) },
       ...(typeIds ? { type_payment_id: { in: typeIds } } : { type: { in: ['payment', 'paidout', 'refund'] } }),
     },
     orderBy: { id: 'asc' },
@@ -1097,7 +1107,7 @@ async function getCashDetailed(params: any, cashOnly = true): Promise<any> {
     const surcharge = Number(t.surcharge || 0) * sign;
     const total = Number(t.total || 0) * sign;
     g.transaksi.push({
-      date: t.date ? formatDate(t.date) : '',
+      date: t.date ? formatDateDMY(t.date) : '',
       folio_number: (t.folios as any)?.folio_number || '-',
       description: parts.join(' - '),
       staff: userMap.get(t.created_by as any) || 'Unknown',
