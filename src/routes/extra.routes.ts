@@ -465,18 +465,15 @@ router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async 
 
       const page = Number(req.query.page || 1);
       const limit = 999;
-      return success(res, {
-        data,
-        code: 200,
-        message: 'Success',
+      return success(res, data, 'Success', 200, {
         table,
-        pagging: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
+        pagination: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
         permission: { view: true, edit: true },
       });
     }
 
     // Plain fallback (type == 'available' or others): date/room_type/room from reservations
-    const data = folio.reservations.map((r: any) => ({
+    const fallbackData = folio.reservations.map((r: any) => ({
       id: Number(r.id),
       date: r.date ? r.date.toISOString().slice(0, 10) : '',
       room_type_id: r.room_type_id ? Number(r.room_type_id) : null,
@@ -485,20 +482,17 @@ router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async 
       room: r.rooms?.name ?? '',
     }));
 
-    const table = [
+    const fallbackTable = [
       { label: 'date', key: 'date', type: 'none', is_search: false },
       { label: 'Room Type', key: 'room_type_id', type: 'none', is_search: false },
       { label: 'Room', key: 'room_id', type: 'none', is_search: false },
     ];
 
-    const page = Number(req.query.page || 1);
-    const limit = 999;
-    success(res, {
-      data,
-      code: 200,
-      message: 'Success',
-      table,
-      pagging: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
+    const fallbackPage = Number(req.query.page || 1);
+    const fallbackLimit = 999;
+    return success(res, fallbackData, 'Success', 200, {
+      table: fallbackTable,
+      pagination: { current_page: fallbackPage, last_page: Math.ceil(fallbackData.length / fallbackLimit), per_page: fallbackLimit, total: fallbackData.length, from: (fallbackPage - 1) * fallbackLimit + 1, to: Math.min(fallbackPage * fallbackLimit, fallbackData.length) },
       permission: { view: true, edit: true },
     });
   } catch (err: any) {
