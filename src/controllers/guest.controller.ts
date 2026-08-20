@@ -377,8 +377,7 @@ export class GuestController {
         address,
         postal_code,
         car_reg_number,
-        guest_status,
-        status: status || 1,
+        status: status === true || status === 1 || status === '1' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status?.value === false || status?.value === 0 ? 0 : (status ?? 1)),
         image: imagePath,
         property_id: propertyId,
         account: newAccount
@@ -403,14 +402,16 @@ export class GuestController {
       }
 
       // Sync types via model_has_types
-      if (guest_title) {
+      const guestTitleId = guest_title?.value ?? guest_title;
+      const guestStatusId = guest_status?.value ?? guest_status;
+      if (guestTitleId) {
         await prisma.model_has_types.create({
-          data: { model_id: guest.id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guest_title) }
+          data: { model_id: guest.id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestTitleId) }
         });
       }
-      if (guest_status) {
+      if (guestStatusId) {
         await prisma.model_has_types.create({
-          data: { model_id: guest.id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guest_status) }
+          data: { model_id: guest.id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestStatusId) }
         });
       }
 
@@ -567,7 +568,7 @@ export class GuestController {
         address,
         postal_code,
         car_reg_number,
-        status,
+        status: status === true || status === 1 || status === '1' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status?.value === false || status?.value === 0 ? 0 : status),
         image: imagePath
       };
 
@@ -584,14 +585,16 @@ export class GuestController {
 
       // Sync types
       await prisma.model_has_types.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' } });
-      if (guest_title) {
+      const guestTitleId = guest_title?.value ?? guest_title;
+      const guestStatusId = guest_status?.value ?? guest_status;
+      if (guestTitleId) {
         await prisma.model_has_types.create({
-          data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guest_title) }
+          data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestTitleId) }
         });
       }
-      if (guest_status) {
+      if (guestStatusId) {
         await prisma.model_has_types.create({
-          data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guest_status) }
+          data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestStatusId) }
         });
       }
 
