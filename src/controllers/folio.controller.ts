@@ -36,6 +36,27 @@ function idParam(val: any): bigint {
   return BigInt(val);
 }
 
+// Laravel Room::AvailableRoom parity (simplified): room blocked if it has availability hold, active work order, or overlapping reservation in [start, end)
+async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: string, end: string, excludeFolioId?: bigint): Promise<boolean> {
+  const s = new Date(start + 'T00:00:00.000Z');
+  const e = new Date(end + 'T23:59:59.999Z');
+  const [room, avail, workOrders, reservations] = await Promise.all([
+    prisma.rooms.findUnique({ where: { id: roomId }, select: { id: true, deleted_at: true } }),
+    prisma.room_availabilities.findMany({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: s, lte: e } }, select: { id: true } }),
+    prisma.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: roomId, date: { gte: s }, end_date: { lte: e } }, select: { id: true } }),
+    prisma.reservations.findMany({
+      where: {
+        date: { gte: s, lte: e },
+        status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
+        ...(excludeFolioId ? { folio_id: { not: excludeFolioId } } : {}),
+        OR: [{ room_id: roomId }, { room_id_next: roomId }],
+      },
+      select: { id: true },
+    }),
+  ]);
+  return !!room && !room.deleted_at && avail.length === 0 && workOrders.length === 0 && reservations.length === 0;
+}
+
 function formatFolioBrief(f: any) {
   return {
     id: Number(f.id),
@@ -354,6 +375,106 @@ export class FolioController {
       }
 
       const updateData: any = { updated_at: new Date() };
+
+      // Laravel Folio.php parity: confirm/cancel change room (room swap actions)
+      if (status_reservation === 'confirm_change_room' || status_reservation === 'cancel_change_room') {
+        if (String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0) {
+          badRequest(res, 'Action not allowed');
+          return;
+        }
+        const resvs = await prisma.reservations.findMany({ where: { folio_id: id, deleted_at: null } });
+        const propertyId = req.user?.lastProperty ?? 0n;
+        const businessDate = new Date().toISOString().slice(0, 10);
+        const isCheckedIn = folio.status_reservation === STATUS_RESERVATION.check_in.id;
+
+        if (status_reservation === 'confirm_change_room') {
+          for (const resv of resvs) {
+            if (resv.room_id_next == null && resv.room_type_id_next == null) continue;
+            if (resv.room_id_next != null) {
+              const room = await prisma.rooms.findUnique({ where: { id: resv.room_id_next } });
+              if (!room) {
+                badRequest(res, 'Room Not Found');
+                return;
+              }
+              const start = resv.date ? resv.date.toISOString().slice(0, 10) : businessDate;
+              const end = new Date(new Date(start + 'T00:00:00.000Z').getTime() + 86400000).toISOString().slice(0, 10);
+              const available = await isRoomAvailableFor(propertyId, resv.room_id_next, start, end, id);
+              if (!available) {
+                badRequest(res, 'Room Not Available');
+                return;
+              }
+            }
+            if (resv.room_id_next != null) {
+              if (resv.room_id != null && isCheckedIn) {
+                await prisma.rooms.update({
+                  where: { id: resv.room_id },
+                  data: { room_status: 0, maid_status: 1, updated_at: new Date() },
+                });
+              }
+              const dateStr = resv.date ? resv.date.toISOString().slice(0, 10) : '';
+              if (dateStr === businessDate && isCheckedIn) {
+                await prisma.rooms.update({
+                  where: { id: resv.room_id_next },
+                  data: { room_status: 1, maid_status: 0, updated_at: new Date() },
+                });
+              }
+            }
+            const fromRoomId = resv.room_id;
+            const fromRoomTypeId = resv.room_type_id;
+            const toRoomId = resv.room_id_next;
+            const toRoomTypeId = resv.room_type_id_next;
+            await prisma.reservations.update({
+              where: { id: resv.id },
+              data: {
+                room_id: resv.room_id_next ?? resv.room_id,
+                room_id_next: null,
+                room_type_id: resv.room_type_id_next ?? resv.room_type_id,
+                room_type_id_next: null,
+                updated_at: new Date(),
+              },
+            });
+            if (fromRoomId != null && toRoomId != null) {
+              await prisma.room_change_histories.create({
+                data: {
+                  property_id: propertyId,
+                  folio_id: id,
+                  folio_number: folio.folio_number ?? '',
+                  check_in_date: folio.check_in_date ?? new Date(),
+                  check_out_date: folio.check_out_date ?? new Date(),
+                  from_room_id: fromRoomId,
+                  from_room_type_id: fromRoomTypeId ?? 0n,
+                  to_room_id: toRoomId,
+                  to_room_type_id: toRoomTypeId ?? 0n,
+                  user_id: userId ?? 0n,
+                  datetime: new Date(),
+                  reason: reason ?? null,
+                },
+              });
+            }
+          }
+          updateData.data = JSON.stringify({
+            ...(folio.data ? JSON.parse(folio.data as string) : {}),
+            remark_confirm_change_room: reason ?? null,
+          });
+        } else {
+          for (const resv of resvs) {
+            if (resv.room_id_next == null && resv.room_type_id_next == null) continue;
+            await prisma.reservations.update({
+              where: { id: resv.id },
+              data: { room_id_next: null, room_type_id_next: null, updated_at: new Date() },
+            });
+          }
+          updateData.data = JSON.stringify({
+            ...(folio.data ? JSON.parse(folio.data as string) : {}),
+            remark_cancel_change_room: reason ?? null,
+          });
+        }
+
+        await prisma.folios.update({ where: { id }, data: updateData });
+        const updated: any = await prisma.folios.findUnique({ where: { id } });
+        success(res, bigintToNumber(updated), 'Status updated successfully');
+        return;
+      }
 
       // Map action keys to actual status codes (Laravel parity)
       let targetStatus: number | null = null;
