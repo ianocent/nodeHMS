@@ -207,7 +207,7 @@ export class AdminController {
       const role = await getPrisma().roles.create({
         data: {
           property_id: pid, name, display_name: display_name || null,
-          guard_name: guard_name || 'web', status: status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : (status ?? 1),
+          guard_name: guard_name || 'web', status: status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : (Number(status) || 1)),
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
@@ -365,7 +365,7 @@ export class AdminController {
       if (display_name !== undefined) data.display_name = display_name;
       if (guard_name !== undefined) data.guard_name = guard_name;
       // Frontend sends status as {value,label} object (formattedRole parity) â€” coerce to int
-      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : 0;
+      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : Number(status));
 
       await getPrisma().roles.update({ where: { id }, data });
 
@@ -463,7 +463,7 @@ export class AdminController {
       const { name, guard_name, display_name, status } = req.body;
       if (!name) { badRequest(res, 'name is required'); return; }
       const perm = await getPrisma().permissions.create({
-        data: { name, guard_name: guard_name || 'web', display_name: display_name || null, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
+        data: { name, guard_name: guard_name || 'web', display_name: display_name || null, status: status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : (Number(status) || 1)), created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(perm), 'Permission created');
     } catch (err: any) { error(res, 'Failed to create permission', 500); }
@@ -488,7 +488,7 @@ export class AdminController {
       if (name !== undefined) data.name = name;
       if (guard_name !== undefined) data.guard_name = guard_name;
       if (display_name !== undefined) data.display_name = display_name;
-      if (status !== undefined) data.status = status;
+      if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : Number(status));
       await getPrisma().permissions.update({ where: { id }, data });
       success(res, null, 'Permission updated');
     } catch (err: any) { error(res, 'Failed to update permission', 500); }
@@ -547,7 +547,7 @@ export class AdminController {
           visibility: visibility || null, uri_table: uri_table || null, type_table: type_table || null,
           target: target ?? 0, media: media || null, data: data || null,
           left: left ?? 0, right: right ?? 0, child_type: child_type || null,
-          sort: sort ?? 0, status: status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : (status ?? 1),
+          sort: sort ?? 0, status: status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : (Number(status) || 1)),
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
@@ -575,7 +575,7 @@ export class AdminController {
       if (right !== undefined) upd.right = right;
       if (child_type !== undefined) upd.child_type = child_type;
       if (sort !== undefined) upd.sort = Number(sort);
-      if (status !== undefined) upd.status = status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : (status?.value === 0 || status === 0 || status === false || status === 'false' ? 0 : Number(status));
+      if (status !== undefined) upd.status = status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : Number(status));
       await getPrisma().menus.update({ where: { id }, data: upd });
       success(res, null, 'Menu updated');
     } catch (err: any) { error(res, 'Failed to update menu', 500); }

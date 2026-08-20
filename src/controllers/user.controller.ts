@@ -255,7 +255,7 @@ export class UserController {
           email,
           phone,
           password: hashedPassword,
-          status: status || STATUS.active,
+          status: status === true || status === 'true' || status === 1 || status === '1' ? STATUS.active : (status === false || status === 'false' || status === 0 || status === '0' ? 0 : (status || STATUS.active)),
           email_verified_at: new Date(),
           remember_token: require('crypto').randomBytes(30).toString('hex'),
           last_property: property_ids?.[0] || req.user?.lastProperty
@@ -296,7 +296,7 @@ export class UserController {
       if (req.body.pin_enshift) {
         await prisma.users.update({
           where: { id: user.id },
-          data: { pin_enshift: req.body.pin_enshift }
+          data: { pin_enshift: Number(req.body.pin_enshift) }
         });
       }
 
@@ -444,12 +444,15 @@ export class UserController {
         return;
       }
 
+      const sv = status && typeof status === 'object' && !Array.isArray(status) ? (status as any).value : status;
+      const statusInt = Array.isArray(status) ? (status[0]?.value ? STATUS.active : 0) : (sv === true || sv === 'true' || sv === 1 || sv === '1' ? STATUS.active : (sv === false || sv === 'false' || sv === 0 || sv === '0' ? 0 : (sv ?? STATUS.active)));
+
       const data: any = {
         name,
         username,
         email,
         phone,
-        status: Array.isArray(status) ? (status[0]?.value || STATUS.active) : status
+        status: statusInt
       };
 
       if (password) {
@@ -459,7 +462,7 @@ export class UserController {
       }
 
       if (pin_enshift !== undefined) {
-        data.pin_enshift = pin_enshift;
+        data.pin_enshift = pin_enshift === '' || pin_enshift === null ? null : Number(pin_enshift);
       }
 
       await prisma.users.update({ where: { id }, data });
