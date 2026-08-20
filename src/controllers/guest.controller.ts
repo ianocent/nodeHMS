@@ -478,8 +478,8 @@ export class GuestController {
       const normal = statusGuest.filter((s: any) => s.name.toLowerCase().includes('normal'));
       const filteredStatusGuest = [...normal, ...statusGuest.filter((s: any) => !s.name.toLowerCase().includes('normal'))];
 
-      const guestTitle = types.find(t => t.types.group === 'guest-title')?.types.id;
-      const guestStatus = types.find(t => t.types.group === 'guest-status')?.types.id;
+      const guestTitle = types.find(t => t.types.group === 'guest-title')?.types;
+      const guestStatus = types.find(t => t.types.group === 'guest-status')?.types;
 
       const master = {
         statuses: STATUSES.map(s => ({ value: s.id, label: s.name })),
@@ -493,7 +493,7 @@ export class GuestController {
         statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
       };
 
-      success(res, { ...GuestController.formatGuest(guest), guest_title: guestTitle ? Number(guestTitle) : null, guest_status: guestStatus ? Number(guestStatus) : null, master }, 'Success');
+      success(res, { ...GuestController.formatGuest(guest), guest_title: guestTitle ? { value: Number(guestTitle.id), label: guestTitle.name } : null, guest_status: guestStatus ? { value: Number(guestStatus.id), label: guestStatus.name } : null, master }, 'Success');
     } catch (err: any) {
       console.error('Guest edit error:', err);
       error(res, 'Failed to load edit data', 500);

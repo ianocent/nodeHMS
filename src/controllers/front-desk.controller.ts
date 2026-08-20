@@ -259,7 +259,7 @@ export class FrontDeskController {
           date_arrival: f.check_in_date,
           stay: 0,
           room: roomName,
-          room_next: lastReservation?.room_id_next || '',
+          room_next: lastReservation?.room_id_next ? Number(lastReservation.room_id_next) : '',
           company: f.company_name || '',
           room_type: roomTypeName,
           check_in_date: f.check_in_date,

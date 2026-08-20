@@ -92,8 +92,20 @@ export class HousekeepingController {
         prisma.housekeeping_setups.count({ where }),
       ]);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
+success(res, bigintToNumber(data), 'Success', 200, {
         permission: { view: true, add: true, edit: true, delete: true },
+        table: [
+          { label: 'Code', key: 'code', type: 'text', is_search: true },
+          { label: 'Item Name', key: 'item_name', type: 'text', is_search: true },
+          { label: 'Category', key: 'category', type: 'text', is_search: true },
+          { label: 'Used By', key: 'used_by', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'checkbox', is_search: true, options: STATUSES },
+        ],
+        search_data: [
+          { label: 'Code', key: 'code', type: 'text', is_search: true },
+          { label: 'Item Name', key: 'item_name', type: 'text', is_search: true },
+          { label: 'Status', key: 'status', type: 'select', valueOptions: STATUSES },
+        ],
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Setup list error:', err); error(res, 'Failed to list setups', 500); }
@@ -1096,7 +1108,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
       const fromDate = req.query.from_date as string;
       const toDate = req.query.to_date as string;
 
-      if (!roomIdRaw) {
+      if (!roomIdRaw || roomIdRaw === 'null' || roomIdRaw === 'undefined' || !/^\d+$/.test(roomIdRaw)) {
         success(res, [], 'No room ID provided.', 200, {
           table: housekeeperHistoryTable(),
           pagination: { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 },

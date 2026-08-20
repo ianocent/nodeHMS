@@ -339,8 +339,8 @@ const allCodePosts = await prisma.code_posts.findMany({
           min_advance_booking: min_advance_booking || 0,
           max_advance_booking: max_advance_booking || 0,
           minimum_rate: minimum_rate || 0,
-          grouping: grouping || null,
-          status: status !== undefined ? status : STATUS_ACTIVE,
+grouping: grouping || null,
+          status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? STATUS_ACTIVE)),
           created_by: userId,
         },
       });
@@ -519,7 +519,7 @@ prisma.room_types.findMany({
         max_advance_booking: max_advance_booking || 0,
         minimum_rate: minimum_rate !== undefined && minimum_rate !== null && minimum_rate !== '' ? Number(minimum_rate) : existing.minimum_rate,
         grouping: grouping || null,
-        status: status !== undefined ? status : existing.status,
+status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? existing.status)),
         updated_by: userId,
         updated_at: new Date(),
       };
@@ -1562,8 +1562,8 @@ prisma.room_types.findMany({
           property_id: propertyId!,
           rate_id: rateId,
           name,
-          time: time || 0,
-          status: status !== undefined ? status : STATUS_ACTIVE,
+time: time || 0,
+          status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? STATUS_ACTIVE)),
           created_by: userId,
         },
       });
@@ -1590,12 +1590,12 @@ prisma.room_types.findMany({
         return;
       }
 
-      const { name, time, status } = req.body;
+const { name, time, status } = req.body;
 
       const data: any = { updated_at: new Date(), updated_by: userId };
       if (name !== undefined) data.name = name;
       if (time !== undefined) data.time = time;
-      if (status !== undefined) data.status = status;
+      if (status !== undefined) data.status = status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : status);
 
       await prisma.rate_day_uses.update({ where: { id }, data });
 
@@ -1726,8 +1726,8 @@ prisma.room_types.findMany({
           rate_id: rateId,
           name,
           description: description || null,
-          image: image || null,
-          status: status !== undefined ? status : STATUS_ACTIVE,
+image: image || null,
+          status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? STATUS_ACTIVE)),
           created_by: userId,
         },
       });
@@ -1754,13 +1754,13 @@ prisma.room_types.findMany({
         return;
       }
 
-      const { name, description, image, status } = req.body;
+const { name, description, image, status } = req.body;
 
       const data: any = { updated_at: new Date(), updated_by: userId };
       if (name !== undefined) data.name = name;
       if (description !== undefined) data.description = description;
       if (image !== undefined) data.image = image;
-      if (status !== undefined) data.status = status;
+      if (status !== undefined) data.status = status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : status);
 
       await prisma.rate_configs.update({ where: { id }, data });
 

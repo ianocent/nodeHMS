@@ -112,6 +112,46 @@ export class CompanyController {
     };
   }
 
+// Sync company type selections (company_type, market_segment_1-4, source, guest_status) via model_has_types
+  static async syncCompanyTypes(companyId: bigint, body: any): Promise<void> {
+    const groups: any = {
+      company_type: 'company-type',
+      market_segment_1: 'market-segment-1',
+      market_segment_2: 'market-segment-2',
+      market_segment_3: 'market-segment-3',
+      market_segment_4: 'market-segment-4',
+      source: 'source',
+      guest_status: 'guest-status',
+    };
+    const keys = Object.keys(groups);
+    if (!keys.some((k) => body[k] !== undefined && body[k] !== null)) return;
+    await prisma.model_has_types.deleteMany({ where: { model_id: companyId, model_type: 'App\\Models\\CompanyProfile' } });
+    const rows: any[] = [];
+    for (const [k, group] of Object.entries(groups)) {
+      const raw = body[k];
+      if (raw === undefined || raw === null || raw === '') continue;
+      const ids = Array.isArray(raw) ? raw.map((o: any) => (o && typeof o === 'object' && 'value' in o ? o.value : o)) : [(raw && typeof raw === 'object' && 'value' in raw) ? raw.value : raw];
+      for (const t of ids) {
+        if (t !== undefined && t !== null && t !== '') rows.push({ model_id: companyId, model_type: 'App\\Models\\CompanyProfile', type_id: t });
+      }
+    }
+    if (rows.length) await prisma.model_has_types.createMany({ data: rows });
+  }
+
+  // Attach type selections to company data for edit form rendering
+  static async attachCompanyTypes(d: any): Promise<any> {
+    const out: any = { ...bn(d) };
+    const types = await prisma.model_has_types.findMany({ where: { model_id: d.id, model_type: 'App\\Models\\CompanyProfile' }, include: { types: true } });
+    for (const t of types) {
+      const g = t.types?.group;
+      if (g === 'company-type') out.company_type = { value: Number(t.type_id), label: t.types?.name };
+      else if (g === 'guest-status') out.guest_status = { value: Number(t.type_id), label: t.types?.name };
+      else if (g === 'source') out.source = { value: Number(t.type_id), label: t.types?.name };
+      else if (g && g.startsWith('market-segment-')) out[g.replace(/-/g, '_')] = { value: Number(t.type_id), label: t.types?.name };
+    }
+    return out;
+  }
+
   static async createForm(req: Request, res: Response): Promise<void> {
     try {
       const master = await CompanyController.buildCompanyMaster(req);
@@ -119,7 +159,7 @@ export class CompanyController {
         const id = idP(req.params.id);
         const d = await prisma.company_profiles.findUnique({ where: { id } });
         if (!d) { notFound(res); return; }
-        success(res, bn(d), 'Success', 200, { master });
+        success(res, await CompanyController.attachCompanyTypes(d), 'Success', 200, { master });
         return;
       }
       success(res, { status: 1 }, 'Success', 200, {
@@ -132,11 +172,24 @@ export class CompanyController {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const { name, type_company, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
+      const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
+      const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (!name) { badRequest(res, 'name required'); return; }
       const d = await prisma.company_profiles.create({
-        data: { property_id: pid, name, type_company: type_company || 'Corporate', email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit: credit_limit ?? 0, status: status ?? 1, code_billing_id: '', created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
+        data: {
+          property_id: pid, name, type_company: type_company || 'Corporate', email, telp, mobile_phone,
+          billing_address, billing_city, billing_country,
+          billing_region: v('billing_region'), billing_postal_code: v('billing_postal_code'),
+          mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country'), mailing_city: v('mailing_city'), mailing_postal_code: v('mailing_postal_code'),
+          term: v('term'), remarks: v('remarks'), short_code: v('short_code'), description: v('description'),
+          business_regional: v('business_regional'), IATA: v('IATA'),
+          gst: b('gst'), is_stop_credit: b('is_stop_credit'), is_pay_commission: b('is_pay_commission'), is_charge_back: b('is_charge_back'), is_surcharge_opt_out: b('is_surcharge_opt_out'),
+          commission_rate: v('commission_rate') ?? undefined, based_online_commission: v('based_online_commission') ?? undefined,
+          credit_limit: credit_limit ?? 0, status: status ?? 1, code_billing_id: '', created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
+        },
       });
-      success(res, bn(d), 'Created');
+      await CompanyController.syncCompanyTypes(d.id, req.body);
+      success(res, await CompanyController.attachCompanyTypes(d), 'Created');
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
   }
 
@@ -145,15 +198,27 @@ export class CompanyController {
       const id = idP(req.params.id); const existing = await prisma.company_profiles.findUnique({ where: { id } });
       if (!existing) { notFound(res); return; }
       const { name, type_company, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
+      const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
+      const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       const data: any = { updated_at: new Date() };
       if (name !== undefined) data.name = name; if (type_company !== undefined) data.type_company = type_company;
       if (email !== undefined) data.email = email; if (telp !== undefined) data.telp = telp;
       if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (billing_address !== undefined) data.billing_address = billing_address;
       if (billing_city !== undefined) data.billing_city = billing_city; if (billing_country !== undefined) data.billing_country = billing_country;
+      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'mailing_country', 'mailing_city', 'mailing_postal_code', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA']) {
+        if (v(k) !== undefined) data[k] = v(k);
+      }
+      for (const k of ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out']) {
+        if (b(k) !== undefined) data[k] = b(k);
+      }
+      if (v('commission_rate') !== undefined) data.commission_rate = v('commission_rate');
+      if (v('based_online_commission') !== undefined) data.based_online_commission = v('based_online_commission');
       if (credit_limit !== undefined) data.credit_limit = credit_limit; if (status !== undefined) data.status = status;
       await prisma.company_profiles.update({ where: { id }, data });
-      success(res, null, 'Updated');
-    } catch (err: any) { error(res, 'Failed', 500); }
+      await CompanyController.syncCompanyTypes(id, req.body);
+      const d = await prisma.company_profiles.findUnique({ where: { id } });
+      success(res, await CompanyController.attachCompanyTypes(d), 'Updated');
+    } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
   }
 
   static async destroy(req: Request, res: Response): Promise<void> {
