@@ -1,5 +1,5 @@
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
@@ -2576,6 +2576,9 @@ success(res, formatted, 'Success', 200, {
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // ———— GET /cms/reservation/code-item (additional item page) - filter by folio's rate
   // ——————————————————————————————————————————————————————————————————————————————
+    // GET /cms/reservation/code-item (additional item page)
+  // ———— GET /cms/reservation/code-item (additional item page) - filter by folio's rate
+  // ——————————————————————————————————————————————————————————————————————————————
   static async codeItemList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -2586,7 +2589,7 @@ success(res, formatted, 'Success', 200, {
       let where: any = { deleted_at: null };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
-      // Get folio's rate to filter code items (Laravel parity)
+      // Get folio's rate to filter code items (Laravel parity via model_has_code_items)
       let rateId: bigint | null = null;
       if (folioIdRaw && /^\d+$/.test(folioIdRaw)) {
         const folio = await prisma.folios.findUnique({
@@ -2598,8 +2601,17 @@ success(res, formatted, 'Success', 200, {
         }
       }
 
+// Filter code_items by rate via model_has_code_items (Laravel parity)
       if (rateId) {
-        where.rate_rates = { some: { rate_id: rateId } };
+        const codeItemIds = await prisma.$queryRaw<{ code_item_id: bigint }[]>(
+          Prisma.sql`SELECT DISTINCT code_item_id FROM model_has_code_items WHERE model_type = ${'App\\Models\\Rate'} AND model_id = ${rateId} AND code_item_id IS NOT NULL`
+        );
+        const ids = codeItemIds.map((r) => r.code_item_id);
+        if (ids.length > 0) {
+          where.id = { in: ids };
+        } else {
+          where.id = -1;
+        }
       }
 
       const [data, total] = await Promise.all([
