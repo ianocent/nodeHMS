@@ -23,6 +23,29 @@ const STATUS_RESERVATION = {
   pending: { id: 5, code: 'pending', name: 'Pending' },
 };
 
+// Type reservation constants (matching Laravel config/cms.php type_reservation)
+const TYPE_RESERVATION = {
+  fit: { code: 'fit', name: 'FIT' },
+  git: { code: 'git', name: 'GIT' },
+  vr: { code: 'vr', name: 'VR' },
+  'day-use': { code: 'day-use', name: 'Day Use' },
+};
+
+// Matches Laravel getColorReservation() + Folio formatData status_reservation_color
+const COLOR_RESERVATION: Record<number, string> = {
+  0: 'bg-green',
+  1: 'bg-purple',
+  2: 'bg-red',
+  3: 'bg-cyan',
+  4: 'bg-blue',
+  5: 'bg-yellow',
+};
+
+function statusReservationLabel(status: number): string {
+  const found = Object.values(STATUS_RESERVATION).find((s: any) => s.id === status);
+  return (found ? found.name : String(status)).replace(/ /g, '-');
+}
+
 const STATUS_ACTIVE = 1;
 const MENU_ID = 60; // Reservation menu ID
 
@@ -331,24 +354,44 @@ export class ReservationController {
         status_reservation: { in: [STATUS_RESERVATION.reservation.id, STATUS_RESERVATION.pending.id] },
       };
 
-      if (propertyId) where.property_id = propertyId;
+if (propertyId) where.property_id = propertyId;
       if (is_day_use) where.is_day_use = true;
-if (parentId !== null) where.parent = parentId;
+      if (parentId !== null) where.parent = parentId;
 
-      const table = [
-        { label: 'Folio No.', key: 'folio_number', type: 'none', is_search: true },
-        { label: 'Guest Name', key: 'first_name', type: 'none', is_search: true },
-        { label: 'Last Name', key: 'last_name', type: 'none', is_search: true },
-        { label: 'Company', key: 'company_name', type: 'none', is_search: true },
-        { label: 'Check In', key: 'check_in_date', type: 'date', is_search: true },
-        { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: true },
-        { label: 'Status', key: 'status_reservation', type: 'badge', is_search: false },
-        { label: 'Type', key: 'type_reservation', type: 'none', is_search: false },
-        { label: 'Property', key: 'property_name', type: 'none', is_search: false },
-        { label: 'Total', key: 'total_amount', type: 'number', is_search: false },
-        { label: 'Day Use', key: 'is_day_use', type: 'checkbox', is_search: false },
-        { label: 'House Use', key: 'is_house_use', type: 'checkbox', is_search: false },
-        { label: 'Complimentary', key: 'complimentary', type: 'checkbox', is_search: false },
+      // Filter by type_reservation (fit, git, vr, day-use) - Laravel getDisplayTypes parity
+      const displayTypes: string[] = [];
+      if (req.query.fit === '1') displayTypes.push(TYPE_RESERVATION.fit.code);
+      if (req.query.git === '1') displayTypes.push(TYPE_RESERVATION.git.code);
+      if (req.query.vr === '1') displayTypes.push(TYPE_RESERVATION.vr.code);
+      if (req.query.dayuse === '1') displayTypes.push(TYPE_RESERVATION['day-use'].code);
+      if (displayTypes.length > 0) {
+        where.type_reservation = { in: displayTypes };
+      }
+
+const table = [
+        { label: 'Res Date', key: 'res_date', type: 'date' },
+        { label: 'Type', key: 'type_reservation' },
+        { label: 'MSG', key: 'message_bool', type: 'boolean' },
+        { label: 'IGN', key: 'ign', type: 'boolean' },
+        { label: 'DND', key: 'is_do_not_disturb', type: 'boolean' },
+        { label: 'Remark', key: 'remark_bool', type: 'boolean' },
+        { label: 'Status', key: 'status_reservation_color', is_html: true },
+        { label: 'Folio', key: 'folio_number', is_link: true, uri: '/reservation/fit/reservation' },
+        { label: 'Guest Name', key: 'guest_name' },
+        { label: 'Guest', key: 'guest_status_color', is_html: true },
+        { label: 'Stay', key: 'stay' },
+        { label: 'Room', key: 'room' },
+        { label: 'Room Next', key: 'room_next' },
+        { label: 'Company', key: 'company' },
+        { label: 'Room Type', key: 'room_type' },
+        { label: 'Room Status', key: 'room_status_color', is_html: true },
+        { label: 'Clean Status', key: 'room_clean_status_color', is_html: true },
+        { label: 'Check In', key: 'check_in_date', type: 'date' },
+        { label: 'Check Out', key: 'check_out_date', type: 'date' },
+        { label: 'Balance', key: 'balance' },
+        { label: 'Sharer', key: 'sharer' },
+        { label: 'A', key: 'aa' },
+        { label: 'C', key: 'cc' },
       ];
 
       applySearchField(where, req, table);
@@ -370,35 +413,80 @@ if (parentId !== null) where.parent = parentId;
         prisma.folios.count({ where }),
       ]);
 
-      const formatted = folios.map((f: any) => ({
-        id: Number(f.id),
-        folio_number: f.folio_number,
-        parent: Number(f.parent),
-        type_reservation: f.type_reservation,
-        first_name: f.first_name,
-        last_name: f.last_name,
-        company_name: f.company_name,
-        check_in_date: f.check_in_date,
-        check_out_date: f.check_out_date,
-        status_reservation: f.status_reservation,
-        is_day_use: f.is_day_use,
-        is_walk_in: f.is_walk_in,
-        is_house_use: f.is_house_use,
-        complimentary: f.complimentary,
-        is_virtual: f.is_virtual,
-        total_amount: Number(f.total_amount),
-        guest_profile_id: f.guest_profile_id ? Number(f.guest_profile_id) : null,
-        company_profile_id: Number(f.company_profile_id),
-        property_name: f.properties?.name,
-        reservations: f.reservations?.map((r: any) => ({
-          id: Number(r.id),
-          room_type_name: r.room_type_name,
-          room_name: r.room_name,
-          rate_name: r.rate_name,
-          adult: r.adult,
-          child: r.child,
-          date: r.date,
-        })),
+const formatted = await Promise.all(folios.map(async (f: any) => {
+        let guestName = `${f.first_name || ''} ${f.last_name || ''}`.trim();
+        if (!guestName && f.guest_profile_id) {
+          const gp = await prisma.guest_profiles.findUnique({ where: { id: f.guest_profile_id } });
+          if (gp) guestName = `${gp.first_name || ''} ${gp.last_name || ''}`.trim();
+        }
+
+        const lastReservation = f.reservations?.[f.reservations.length - 1];
+        const roomName = lastReservation?.room_name || '';
+        const roomTypeName = lastReservation?.room_type_name || '';
+        const roomNext = lastReservation?.room_id_next ? (lastReservation.rooms?.name || '') : '';
+
+        // Get balance from transactions
+        const transactions = await prisma.transactions.findMany({
+          where: { folio_id: f.id, deleted_at: null },
+        });
+        const balance = transactions.reduce((sum: number, t: any) => sum + Number(t.total || 0), 0);
+
+        // Stay calculation
+        const checkIn = f.check_in_date ? new Date(f.check_in_date) : null;
+        const checkOut = f.check_out_date ? new Date(f.check_out_date) : null;
+        const stay = checkIn && checkOut ? Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+
+        // Adult/Child from last reservation
+        const aa = lastReservation?.adult || 0;
+        const cc = lastReservation?.child || 0;
+
+        // Status reservation color (matching front-desk)
+        const statusReservationColor = (folio: any): { label: string; color: string; is_color: boolean }[] => {
+          if (folio.status_reservation === STATUS_RESERVATION.reservation.id && folio.is_request_cancel) {
+            return [{ label: 'Request-Cancel', color: 'bg-yellow', is_color: true }];
+          }
+          return [{
+            label: statusReservationLabel(folio.status_reservation),
+            color: COLOR_RESERVATION[folio.status_reservation] || 'bg-success',
+            is_color: true,
+          }];
+        };
+
+        const roomStatusColor: { label: string; color: string; is_color: boolean }[] = []; // Would need room relation
+        const roomCleanStatusColor: { label: string; color: string; is_color: boolean }[] = []; // Would need room relation
+
+        return {
+          id: Number(f.id),
+          value: Number(f.id),
+          name: f.folio_number,
+          res_date: f.res_date,
+          type_reservation: f.type_reservation?.toUpperCase(),
+          message_bool: false,
+          ign: false,
+          remark_bool: !!(f.remark || f.posting_instruction || f.check_out_instruction || f.check_in_instruction),
+          is_do_not_disturb: !!f.is_do_not_disturb,
+          status_reservation_color: statusReservationColor(f),
+          room_clean_status_color: roomCleanStatusColor,
+          room_status_color: roomStatusColor,
+          folio_number: f.folio_number,
+          guest_name: guestName || '-',
+          guest_status: { label: 'Regular', color: 'bg-green' },
+          guest_status_color: [{ label: 'Regular', color: 'bg-green', is_color: true }],
+          date_arrival: f.check_in_date,
+          stay,
+          room: roomName,
+          room_next: roomNext,
+          company: f.company_name || '',
+          room_type: roomTypeName,
+          check_in_date: f.check_in_date,
+          check_out_date: f.check_out_date,
+          balance: balance.toLocaleString('id-ID', { minimumFractionDigits: 2 }),
+          sharer: '',
+          is_popup_other_guest: false,
+          aa,
+          cc,
+          actions: [],
+        };
       }));
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
