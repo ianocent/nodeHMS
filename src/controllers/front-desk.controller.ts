@@ -225,7 +225,7 @@ export class FrontDeskController {
         where[search_field] = { contains: search_value, mode: 'insensitive' };
       }
 
-      const [folios, total] = await Promise.all([
+const [folios, total] = await Promise.all([
         prisma.folios.findMany({
           where,
           orderBy: { id: 'desc' },
@@ -236,7 +236,10 @@ export class FrontDeskController {
             reservations: {
               where: { deleted_at: null },
               orderBy: { date: 'asc' },
-              include: { room_types: { select: { name: true } } },
+              include: { 
+                room_types: { select: { name: true } },
+                rooms: { select: { name: true } },
+              },
             },
           },
         }),
@@ -250,9 +253,9 @@ export class FrontDeskController {
           if (gp) guestName = `${gp.first_name || ''} ${gp.last_name || ''}`.trim();
         }
 
-        const lastReservation = f.reservations?.[f.reservations.length - 1];
-        const roomName = lastReservation?.room_name || '';
-        const roomTypeName = lastReservation?.room_type_name || '';
+const lastReservation = f.reservations?.[f.reservations.length - 1];
+        const roomName = lastReservation?.rooms?.name || lastReservation?.room_name || '';
+        const roomTypeName = lastReservation?.room_types?.name || lastReservation?.room_type_name || '';
 
         // Get balance from transactions
         const transactions = await prisma.transactions.findMany({
@@ -281,8 +284,8 @@ export class FrontDeskController {
           guest_status_color: [{ label: 'Regular', color: 'bg-green', is_color: true }],
           date_arrival: f.check_in_date,
           stay: 0,
-          room: roomName,
-          room_next: lastReservation?.room_id_next ? Number(lastReservation.room_id_next) : '',
+room: roomName,
+           room_next: lastReservation?.room_id_next ? (lastReservation.rooms?.name || '') : '',
           company: f.company_name || '',
           room_type: roomTypeName,
           check_in_date: f.check_in_date,
@@ -1093,10 +1096,14 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
       }
       const id = BigInt(idParam);
 
-      const folio = await prisma.folios.findUnique({
+const folio = await prisma.folios.findUnique({
         where: { id },
         include: {
-          reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' } },
+          reservations: { 
+            where: { deleted_at: null }, 
+            orderBy: { date: 'asc' },
+            include: { rooms: { select: { name: true } } }
+          },
           properties: { select: { name: true } },
         },
       });
@@ -1123,7 +1130,7 @@ const data = {
         id: Number(folio.id),
         folio_number: folio.folio_number,
         guest_name: guestName || '-',
-        room: lastReservation?.room_name || '',
+        room: lastReservation?.rooms?.name || lastReservation?.room_name || '',
         room_type: lastReservation?.room_type_name || '',
         check_in_date: folio.check_in_date,
         check_out_date: folio.check_out_date,
