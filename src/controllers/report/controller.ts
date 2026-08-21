@@ -3,6 +3,7 @@ import { success, error, badRequest, notFound } from '../../utils/response';
 import { prisma, parseReportParams, REPORT_PERMISSION_TABLE, bigintToNumber, formatDate } from './helpers';
 import { STATUSES } from '../../utils/cmsConfig';
 import { reportHandlers, getGenericReport } from './handlers';
+import { AuthController } from '../auth.controller';
 import {
   generateAllCompaniesRoomRevenueBreakdownExcel,
   generateAllCompaniesRoomRevenueExcel,
@@ -863,8 +864,9 @@ export class ReportController {
 
   static async nightAudit(req: Request, res: Response): Promise<void> {
     try {
-      const today = formatDate(new Date());
-      success(res, { business_date: today }, 'Success');
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const businessDate = await AuthController.getBusinessDate(propertyId);
+      success(res, { business_date: businessDate }, 'Success');
     } catch (err: any) {
       console.error('Report nightAudit error:', err);
       error(res, 'Failed to get business date', 500);

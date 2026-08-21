@@ -1568,8 +1568,9 @@ const payload = formatSystemBalanceData(
   // ==================== NIGHT AUDIT AUDIT ====================
   static async nightAuditAudit(req: Request, res: Response): Promise<void> {
     try {
-      const date = new Date().toISOString().split('T')[0];
-      success(res, { date }, 'Success');
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const businessDate = await AuthController.getBusinessDate(propertyId);
+      success(res, { date: businessDate }, 'Success');
     } catch (err: any) {
       console.error('Night audit audit error:', err);
       error(res, 'Failed to get night audit date', 500);
