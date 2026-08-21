@@ -81,7 +81,7 @@ export class BookingEngineController {
       const pid = property.id;
 
       const logAudit = await prisma.log_audits.findFirst({
-        where: { property_id: Number(pid) },
+        where: { property_id: Number(pid), deleted_at: null },
         orderBy: { date: 'desc' },
       });
       const date = logAudit ? fmtDate(dayAfter(logAudit.date)) : fmtDate(new Date());
@@ -310,7 +310,7 @@ export class BookingEngineController {
       }
 
       const logAudit = await prisma.log_audits.findFirst({
-        where: { property_id: Number(pid) },
+        where: { property_id: Number(pid), deleted_at: null },
         orderBy: { date: 'desc' },
       });
       const bizDate = logAudit ? fmtDate(dayAfter(logAudit.date)) : fmtDate(new Date());

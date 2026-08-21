@@ -486,10 +486,14 @@ export class AuthController {
   /**
    * Business date: latest log_audits.date for the property + 1 day.
    * Matches LogAudit::getBusinessDate($request).
+   * Laravel SoftDeletes adds deleted_at IS NULL automatically.
    */
   static async getBusinessDate(lastProperty: bigint | null): Promise<string> {
     const logAudit = await prisma.log_audits.findFirst({
-      where: lastProperty ? { property_id: Number(lastProperty) } : undefined,
+      where: {
+        deleted_at: null,
+        ...(lastProperty ? { property_id: Number(lastProperty) } : {}),
+      },
       orderBy: { date: 'desc' },
     });
 

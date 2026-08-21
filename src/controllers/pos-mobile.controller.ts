@@ -62,7 +62,7 @@ export class PosMobileController {
       if (!property) { res.status(404).json({ message: 'No data found.' }); return; }
 
       const logAudit = await prisma.log_audits.findFirst({
-        where: { property_id: Number(property.id) },
+        where: { property_id: Number(property.id), deleted_at: null },
         orderBy: { date: 'desc' },
       });
       const date = logAudit ? new Date(new Date(logAudit.date).getTime() + 24 * 60 * 60 * 1000) : new Date();
@@ -423,7 +423,7 @@ export class PosMobileController {
       if (!property) { notFound(res, 'Client not found.'); return; }
 
       const logAudit = await prisma.log_audits.findFirst({
-        where: { property_id: Number(property.id) },
+        where: { property_id: Number(property.id), deleted_at: null },
         orderBy: { date: 'desc' },
       });
       const businessDate = logAudit ? dayAfter(logAudit.date) : new Date();

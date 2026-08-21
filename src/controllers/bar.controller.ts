@@ -47,7 +47,7 @@ function pickValue(v: any): any {
 async function getBusinessDate(propertyId: bigint | null | undefined): Promise<string> {
   if (!propertyId) return new Date().toISOString().substring(0, 10);
   const last = await prisma.log_audits.findFirst({
-    where: { property_id: Number(propertyId) },
+    where: { property_id: Number(propertyId), deleted_at: null },
     orderBy: { date: 'desc' },
     select: { date: true },
   });
