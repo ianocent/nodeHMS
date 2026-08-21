@@ -41,7 +41,8 @@ export async function initQueue() {
       'check-expired-request-bookings',
       'pull-staah-reservations',
       'sync-staah-room-availability',
-      'dispatch-staah-availability'
+      'dispatch-staah-availability',
+      'night-audit-post'
     ];
     for (const q of queues) {
       try { await bossInstance.createQueue(q); } catch {}
@@ -68,6 +69,11 @@ export async function initQueue() {
       await processSyncStaahRoomAvailability(job);
     });
 
+    await bossInstance.work('night-audit-post', async (job: any) => {
+      const { processNightAuditPost } = await import('../queue/jobs/nightAuditPost');
+      await processNightAuditPost(job);
+    });
+
     // Dispatcher for per-property availability sync
     await bossInstance.work('dispatch-staah-availability', async (job: any) => {
       const { PrismaClient } = await import('@prisma/client');
@@ -84,6 +90,7 @@ export async function initQueue() {
     await bossInstance.schedule('pull-staah-reservations', '*/5 * * * *'); // every 5 minutes
     await bossInstance.schedule('dispatch-staah-availability', '*/5 * * * *'); // every 5 minutes
     await bossInstance.schedule('check-expired-request-bookings', '0 * * * *'); // hourly
+    await bossInstance.schedule('night-audit-post', '0 2 * * *'); // daily at 2 AM - night audit
 
     return bossInstance;
   } catch (error) {
