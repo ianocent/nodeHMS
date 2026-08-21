@@ -489,8 +489,6 @@ export class AuthController {
    * Laravel SoftDeletes adds deleted_at IS NULL automatically.
    */
   static async getBusinessDate(lastProperty: bigint | null): Promise<string> {
-    console.log('[getBusinessDate] Input lastProperty:', lastProperty, typeof lastProperty);
-    
     const logAudit = await prisma.log_audits.findFirst({
       where: {
         deleted_at: null,
@@ -499,19 +497,13 @@ export class AuthController {
       orderBy: { date: 'desc' },
     });
 
-    console.log('[getBusinessDate] Found logAudit:', logAudit ? { id: logAudit.id, property_id: logAudit.property_id, date: logAudit.date } : null);
-
     if (logAudit) {
       const [y, m, d] = logAudit.date.toISOString().substring(0, 10).split('-').map(Number);
-      const result = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().substring(0, 10);
-      console.log('[getBusinessDate] Returning:', result);
-      return result;
+      return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().substring(0, 10);
     }
 
     // Asia/Jakarta (UTC+7, no DST) — Laravel config/app.php 'timezone'
-    const fallback = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().substring(0, 10);
-    console.log('[getBusinessDate] Fallback to current date:', fallback);
-    return fallback;
+    return new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().substring(0, 10);
   }
 
   /**
