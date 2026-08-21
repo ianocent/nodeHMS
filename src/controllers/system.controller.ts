@@ -392,7 +392,7 @@ export class SystemController {
     }
   }
 
-  static async shiftConfirmationSubmit(req: Request, res: Response): Promise<void> {
+      static async shiftConfirmationSubmit(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
       const userId = req.query.user_id as string;
@@ -408,30 +408,85 @@ export class SystemController {
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
-      const existingShift = await getPrisma().shifts.findFirst({
+      // Get business date
+      const businessDate = today;
+
+      // Get transactions for balance matching (Laravel parity)
+      const transactions = await getPrisma().transactions.findMany({
         where: {
-          user_id: userIdBig,
+          property_id: propertyId,
+          date: { gte: today, lt: tomorrow },
+          is_posting: 0,
+          is_endshift: 0,
+          deleted_at: null,
+        },
+        include: { type_payments: true },
+      });
+
+      // Group by type_payment_id and calculate balances (Laravel ShiftConfirmationController parity)
+      const typePaymentIds = [...new Set(transactions.map(t => t.type_payment_id).filter((v): v is bigint => v !== null))];
+      const unbalanced = [];
+
+      for (const typePaymentId of typePaymentIds) {
+        const sum = transactions
+          .filter(t => t.type_payment_id === typePaymentId)
+          .reduce((acc, t) => {
+            const total = Number(t.total || 0);
+            return t.type_amount === 'PLUS' ? acc + total : acc - total;
+          }, 0);
+
+        if (Math.abs(sum) > 0.01) {
+          const typePayment = await getPrisma().type_payments.findUnique({ where: { id: typePaymentId } });
+          unbalanced.push({
+            type_payment_id: Number(typePaymentId),
+            name: typePayment?.name ?? 'Unknown',
+            sum: sum,
+          });
+        }
+      }
+
+      if (unbalanced.length > 0) {
+        badRequest(res, 'Balance not match', 400);
+        return;
+      }
+
+      // All balanced - mark transactions as posted and endshift
+      await getPrisma().transactions.updateMany({
+        where: {
+          property_id: propertyId,
+          date: { gte: today, lt: tomorrow },
+          is_posting: 0,
+          is_endshift: 0,
+          deleted_at: null,
+        },
+        data: { is_posting: 1, is_endshift: 1, updated_at: new Date() },
+      });
+
+      // Update or create shift
+      const userShift = await getPrisma().shifts.findFirst({
+        where: {
+          user_id: req.user?.id ?? 0n,
           property_id: propertyId,
           date: { gte: today, lt: tomorrow },
           deleted_at: null,
         },
       });
 
-      if (existingShift) {
+      if (userShift) {
         const updated = await getPrisma().shifts.update({
-          where: { id: existingShift.id },
+          where: { id: userShift.id },
           data: {
             is_posting: true,
             end: new Date(),
             updated_at: new Date(),
           },
         });
-        success(res, bigintToNumber(updated), 'Shift updated');
+        success(res, bigintToNumber(updated), 'Shift confirmed');
       } else {
         const created = await getPrisma().shifts.create({
           data: {
             property_id: propertyId,
-            user_id: userIdBig,
+            user_id: req.user?.id ?? 0n,
             start: new Date(),
             end: new Date(),
             date: today,
