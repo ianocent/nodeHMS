@@ -474,7 +474,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
     } catch (err: any) { console.error('Work order list error:', err); error(res, 'Failed to list work orders', 500); }
   }
 
-  static async workOrderStore(req: Request, res: Response): Promise<void> {
+static async workOrderStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to } = req.body;
@@ -502,6 +502,15 @@ success(res, bigintToNumber(data), 'Success', 200, {
         },
       });
       await syncWorkOrderTypes(data.id, areaId, workTypeId);
+
+      // Sync room_status=4 (OOO) if room assigned
+      if (data.room_id) {
+        await prisma.rooms.update({
+          where: { id: data.room_id },
+          data: { room_status: ROOM_STATUSES.out_of_order.id, updated_at: new Date() },
+        });
+      }
+
       success(res, bigintToNumber(data), 'Work order created', 201);
     } catch (err: any) { console.error('Work order store error:', err); error(res, 'Failed to create work order', 500); }
   }
@@ -544,10 +553,16 @@ success(res, bigintToNumber(data), 'Success', 200, {
     } catch (err: any) { error(res, 'Failed to load work order form', 500); }
   }
 
-  static async workOrderUpdate(req: Request, res: Response): Promise<void> {
+static async workOrderUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
       const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to, status_work_order, status, estimated_time, start_date, end_date, start_time, end_time } = req.body;
+
+      // Get old work order for room_id comparison
+      const oldWo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, end_date: true } });
+      if (!oldWo) { notFound(res, 'Work order not found'); return; }
+      const oldRoomId = oldWo.room_id;
+
       const data: any = { updated_at: new Date(), updated_by: req.user?.id };
       if (reported_by !== undefined) data.reported_by = reported_by ? BigInt(reported_by) : null;
       if (unique_code !== undefined) data.unique_code = unique_code;
@@ -565,7 +580,45 @@ success(res, bigintToNumber(data), 'Success', 200, {
       if (end_date !== undefined) data.end_date = end_date ? new Date(end_date) : null;
       if (start_time !== undefined) data.start_time = start_time;
       if (end_time !== undefined) data.end_time = end_time;
+
       await prisma.work_orders.update({ where: { id }, data });
+
+      const newRoomId = data.room_id ?? oldRoomId;
+      const endDateSet = data.end_date !== undefined && data.end_date !== null;
+
+      // Room status sync
+      if (oldRoomId && oldRoomId !== newRoomId) {
+        // Room changed: clear old room
+        await prisma.rooms.update({
+          where: { id: oldRoomId },
+          data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
+        });
+      }
+      if (newRoomId && newRoomId !== oldRoomId) {
+        // New room assigned: set OOO
+        await prisma.rooms.update({
+          where: { id: newRoomId },
+          data: { room_status: ROOM_STATUSES.out_of_order.id, updated_at: new Date() },
+        });
+      }
+      if (endDateSet) {
+        // Work order completed: clear OOO on current room
+        const targetRoomId = newRoomId;
+        if (targetRoomId) {
+          // Check if room has other active work orders
+          const otherWo = await prisma.work_orders.findFirst({
+            where: { room_id: targetRoomId, end_date: null, status: 1, id: { not: id } },
+            select: { id: true },
+          });
+          if (!otherWo) {
+            await prisma.rooms.update({
+              where: { id: targetRoomId },
+              data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
+            });
+          }
+        }
+      }
+
       const areaId = typeof area === 'object' && area !== null ? area?.value : area;
       const workTypeId = typeof work_type === 'object' && work_type !== null ? work_type?.value : work_type;
       if (areaId !== undefined || workTypeId !== undefined) {
@@ -576,10 +629,26 @@ success(res, bigintToNumber(data), 'Success', 200, {
     } catch (err: any) { error(res, 'Failed to update work order', 500); }
   }
 
-  static async workOrderDestroy(req: Request, res: Response): Promise<void> {
+static async workOrderDestroy(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const wo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true } });
       await prisma.work_orders.update({ where: { id }, data: { status: 0 } });
+
+      // Clear OOO on room if no other active work orders
+      if (wo?.room_id) {
+        const otherWo = await prisma.work_orders.findFirst({
+          where: { room_id: wo.room_id, end_date: null, status: 1, id: { not: id } },
+          select: { id: true },
+        });
+        if (!otherWo) {
+          await prisma.rooms.update({
+            where: { id: wo.room_id },
+            data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
+          });
+        }
+      }
+
       success(res, null, 'Work order deleted');
     } catch (err: any) { error(res, 'Failed to delete work order', 500); }
   }
