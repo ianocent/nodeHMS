@@ -2574,13 +2574,34 @@ success(res, formatted, 'Success', 200, {
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /cms/reservation/code-item (additional item page)
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ———— GET /cms/reservation/code-item (additional item page) - filter by folio's rate
+  // ——————————————————————————————————————————————————————————————————————————————
   static async codeItemList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const search = req.query.search as string;
-      const where: any = { deleted_at: null };
+      const folioIdRaw = String(req.query.folio_id ?? '');
+
+      let where: any = { deleted_at: null };
       if (search) where.name = { contains: search, mode: 'insensitive' };
+
+      // Get folio's rate to filter code items (Laravel parity)
+      let rateId: bigint | null = null;
+      if (folioIdRaw && /^\d+$/.test(folioIdRaw)) {
+        const folio = await prisma.folios.findUnique({
+          where: { id: BigInt(folioIdRaw) },
+          include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1 } },
+        });
+        if (folio?.reservations?.[0]?.rate_id) {
+          rateId = folio.reservations[0].rate_id;
+        }
+      }
+
+      if (rateId) {
+        where.rate_rates = { some: { rate_id: rateId } };
+      }
+
       const [data, total] = await Promise.all([
         prisma.code_items.findMany({
           where,
@@ -2608,23 +2629,43 @@ success(res, formatted, 'Success', 200, {
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /cms/reservation/inclusive
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ———— GET /cms/reservation/inclusive - filter by folio's rate (Laravel parity)
+  // ——————————————————————————————————————————————————————————————————————————————
   static async inclusiveList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
-      const modelIdRaw = String(req.query.subfolio_id ?? req.query.code_item_id ?? '');
-      const where: any = { model_type: 'App\\Models\\CodeItem' };
-      if (/^\d+$/.test(modelIdRaw)) where.model_id = BigInt(modelIdRaw);
+      const folioIdRaw = String(req.query.folio_id ?? req.query.subfolio_id ?? '');
+      const search = req.query.search as string;
+
+      let where: any = { deleted_at: null };
+      if (search) where.description = { contains: search, mode: 'insensitive' };
+
+      // Get folio's rate to filter inclusives (Laravel parity)
+      let rateId: bigint | null = null;
+      if (folioIdRaw && /^\d+$/.test(folioIdRaw)) {
+        const folio = await prisma.folios.findUnique({
+          where: { id: BigInt(folioIdRaw) },
+          include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1 } },
+        });
+        if (folio?.reservations?.[0]?.rate_id) {
+          rateId = folio.reservations[0].rate_id;
+        }
+      }
+
+      if (rateId) {
+        where.rate_id = rateId;
+      }
+
       const [data, total] = await Promise.all([
-        prisma.model_has_rate_inclusives.findMany({
+        prisma.rate_inclusives.findMany({
           where,
-          include: { rate_inclusives: true },
           skip: (page - 1) * limit,
           take: limit,
+          orderBy: { description: 'asc' },
         }),
-        prisma.model_has_rate_inclusives.count({ where }),
+        prisma.rate_inclusives.count({ where }),
       ]);
-      const rows = data.map(d => ({ ...reservationBn(d), ...reservationBn(d.rate_inclusives) }));
       const table = [
         { label: 'Description', key: 'description', type: 'none', is_search: false },
         { label: 'Stock', key: 'stock', type: 'none', is_search: false },
@@ -2632,7 +2673,7 @@ success(res, formatted, 'Success', 200, {
         { label: 'Cost', key: 'cost', type: 'number', is_search: false },
         { label: 'Cost On', key: 'cost_on', type: 'none', is_search: false },
       ];
-      success(res, rows, 'Success', 200, {
+      success(res, data, 'Success', 200, {
         table,
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
