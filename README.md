@@ -1,16 +1,12 @@
 # HMS Anyaman — Backend Node (Express + PostgreSQL)
 
-Backend anyar hasil migrasi dari Laravel (MySQL) ke Node.js/Express (PostgreSQL). Targetnya satu: **bisa dioper tanpa frontend berubah** — respons API harus sama persis kayak backend Laravel lama, termasuk enkripsi AES dan format tokennya.
-
-Repo: https://github.com/ianocent/nodeHMS · SSH `git@github.com:ianocent/nodeHMS.git`
-
 ## Repo lain yang nyambung
 
-| Repo | Isinya |
-|------|--------|
-| `ianocent/hms-backend` | Backend Laravel lama (sumber referensi, jangan diedit) |
-| `ianocent/hms-frontend` | Frontend Next.js asli (jangan diedit) |
-| `ianocent/nodefeHMS` | Adaptasi frontend buat backend ini |
+| Repo                    | Isinya                                  |
+| ----------------------- | --------------------------------------- |
+| `ianocent/hms-backend`  | Backend Laravel lama (sumber referensi) |
+| `ianocent/hms-frontend` | Frontend Next.js                        |
+| `ianocent/nodefeHMS`    | Adaptasi frontend buat backend ini      |
 
 ## Stack
 
@@ -46,16 +42,9 @@ npx prisma generate       # setelah schema berubah
 npx prisma migrate dev    # hati-hati, riwayat migration manual — pake migrate diff kalau error
 ```
 
-## Aturan main (baca dulu kalau mau nyumbang)
-
-- `.env`, `cookie.txt`, `login_response.txt`, `*.log` **jangan pernah di-commit**. Udah ada di `.gitignore`, jangan dipaksa `git add -f` — percaya, nggak ada alasan buat itu.
-- `APP_AES_PASSWORD` cuma dibaca dari environment. Dulu pernah ada fallback hardcoded di `aes.ts`/`encryption.ts`, itu udah dibuang karena bocor ke repo lama. Jangan ditambahin balik.
-- Kalau nyentuh endpoint, cek dulu `AuthController.php` di repo Laravel — perilaku harus nyamain itu, bukan "perbaiki" seenaknya. Frontend lama nggak bakal diubah-ubah, jadi backend yang harus nurut.
-
 ## Status migrasi
 
 - M1 Database ✅ (187 tabel, sisa mismatch cuma data yang emang ditulis app baru)
 - M2 Core + middleware ✅
-- M3 Auth ✅ (parity sama Laravel AuthController — lihat `M3_AUTH_PARITY.md`)
+- M3 Auth ✅ (parity sama Laravel AuthController)
 - M4 API endpoints 🔄 (26 controller, 14 grup route)
-- Detail lengkap: `statement.md` di root `hms-anyaman/`
