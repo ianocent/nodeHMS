@@ -5,12 +5,35 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
+import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { dataSearch, applySearchField } from '../utils/search';
 import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+
+// Laravel Room::AvailableRoom parity: room blocked if availability hold, active work order, or overlapping reservation
+async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: string, end: string, excludeFolioId?: bigint): Promise<boolean> {
+  const s = new Date(start + 'T00:00:00.000Z');
+  const e = new Date(end + 'T23:59:59.999Z');
+  const [room, avail, workOrders, reservations] = await Promise.all([
+    prisma.rooms.findUnique({ where: { id: roomId }, select: { id: true, deleted_at: true, room_status: true } }),
+    prisma.room_availabilities.findMany({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: s, lte: e } }, select: { id: true } }),
+    prisma.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: roomId, date: { gte: s }, end_date: { lte: e } }, select: { id: true } }),
+    prisma.reservations.findMany({
+      where: {
+        date: { gte: s, lte: e },
+        status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
+        ...(excludeFolioId ? { folio_id: { not: excludeFolioId } } : {}),
+        OR: [{ room_id: roomId }, { room_id_next: roomId }],
+      },
+      select: { id: true },
+    }),
+  ]);
+  const isOOO = room?.room_status === 4; // out_of_order
+  return !!room && !room.deleted_at && !isOOO && avail.length === 0 && workOrders.length === 0 && reservations.length === 0;
+}
 
 const STATUS_RESERVATION = {
   check_in: { id: 0, code: 'check_in', name: 'Check In' },
@@ -307,18 +330,22 @@ export class FrontDeskController {
     }
   }
 
-  // POST /api/front-desk/{id}/check-in
+// POST /api/front-desk/{id}/check-in
   static async checkIn(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
 
-      const folio = await prisma.folios.findUnique({ where: { id } });
+      const folio = await prisma.folios.findUnique({ 
+        where: { id },
+        include: { reservations: { where: { deleted_at: null }, select: { room_id: true, room_id_next: true } } }
+      });
       if (!folio || folio.deleted_at) {
         notFound(res, 'Not Found');
         return;
       }
 
+      // Update folio and reservations status
       await prisma.folios.update({
         where: { id },
         data: {
@@ -332,6 +359,39 @@ export class FrontDeskController {
         data: { status_reservation: STATUS_RESERVATION.check_in.id },
       });
 
+      // Check room availability before check-in (parity with Laravel)
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const checkInDate = folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+      const checkOutDate = folio.check_out_date ? folio.check_out_date.toISOString().slice(0, 10) : new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+      
+      // Update room status: occupied (1), maid_status: clean (0)
+      // Use room_id_next if exists (room change), otherwise room_id
+      const roomIds: bigint[] = [];
+      for (const resv of folio.reservations) {
+        const targetRoomId = resv.room_id_next ?? resv.room_id;
+        if (targetRoomId != null) {
+          const available = await isRoomAvailableFor(propertyId, targetRoomId, checkInDate, checkOutDate, id);
+          if (!available) {
+            badRequest(res, `Room ${targetRoomId} not available for check-in`);
+            return;
+          }
+          roomIds.push(targetRoomId);
+        }
+      }
+      if (roomIds.length > 0) {
+        const now = new Date();
+        await prisma.rooms.updateMany({
+          where: { id: { in: roomIds } },
+          data: {
+            room_status: ROOM_STATUSES.occupied.id,
+            maid_status: MAID_STATUSES.clean.id,
+            last_check_in_date: now,
+            last_check_in_time: now,
+            updated_at: now,
+          },
+        });
+      }
+
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_in.id }, 'Check-in success');
     } catch (err: any) {
       console.error('FrontDesk checkIn error:', err);
@@ -339,13 +399,16 @@ export class FrontDeskController {
     }
   }
 
-  // POST /api/front-desk/{id}/check-out
+// POST /api/front-desk/{id}/check-out
   static async checkOut(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
 
-      const folio = await prisma.folios.findUnique({ where: { id } });
+      const folio = await prisma.folios.findUnique({ 
+        where: { id },
+        include: { reservations: { where: { deleted_at: null }, select: { room_id: true, room_id_next: true } } }
+      });
       if (!folio || folio.deleted_at) {
         notFound(res, 'Not Found');
         return;
@@ -364,6 +427,26 @@ export class FrontDeskController {
         data: { status_reservation: STATUS_RESERVATION.check_out.id },
       });
 
+      // Update room status: vacant (0), maid_status: dirty (1)
+      const roomIds: bigint[] = [];
+      for (const resv of folio.reservations) {
+        if (resv.room_id_next != null) roomIds.push(resv.room_id_next);
+        else if (resv.room_id != null) roomIds.push(resv.room_id);
+      }
+      if (roomIds.length > 0) {
+        const now = new Date();
+        await prisma.rooms.updateMany({
+          where: { id: { in: roomIds } },
+          data: {
+            room_status: ROOM_STATUSES.vacant.id,
+            maid_status: MAID_STATUSES.dirty.id,
+            last_check_out_date: now,
+            last_check_out_time: now,
+            updated_at: now,
+          },
+        });
+      }
+
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_out.id }, 'Check-out success');
     } catch (err: any) {
       console.error('FrontDesk checkOut error:', err);
@@ -371,7 +454,7 @@ export class FrontDeskController {
     }
   }
 
-  // POST /api/front-desk/batch-check-out
+// POST /api/front-desk/batch-check-out
   static async batchCheckOut(req: Request, res: Response): Promise<void> {
     try {
       const { idx } = req.body;
@@ -382,6 +465,12 @@ export class FrontDeskController {
       }
 
       const ids = idx.map((id: any) => BigInt(id));
+
+      // Get all reservations for these folios to find room IDs
+      const folios = await prisma.folios.findMany({
+        where: { id: { in: ids } },
+        include: { reservations: { where: { deleted_at: null }, select: { room_id: true, room_id_next: true } } }
+      });
 
       await prisma.folios.updateMany({
         where: { id: { in: ids } },
@@ -395,6 +484,28 @@ export class FrontDeskController {
         where: { folio_id: { in: ids }, deleted_at: null },
         data: { status_reservation: STATUS_RESERVATION.check_out.id },
       });
+
+      // Update room status for all rooms: vacant (0), maid_status: dirty (1)
+      const roomIds: bigint[] = [];
+      for (const folio of folios) {
+        for (const resv of folio.reservations) {
+          if (resv.room_id_next != null) roomIds.push(resv.room_id_next);
+          else if (resv.room_id != null) roomIds.push(resv.room_id);
+        }
+      }
+      if (roomIds.length > 0) {
+        const now = new Date();
+        await prisma.rooms.updateMany({
+          where: { id: { in: roomIds } },
+          data: {
+            room_status: ROOM_STATUSES.vacant.id,
+            maid_status: MAID_STATUSES.dirty.id,
+            last_check_out_date: now,
+            last_check_out_time: now,
+            updated_at: now,
+          },
+        });
+      }
 
       success(res, { updated: ids.length }, 'Batch check-out success');
     } catch (err: any) {
@@ -1008,7 +1119,7 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
       });
       const balance = transactions.reduce((sum: number, t: any) => sum + Number(t.total || 0), 0);
 
-      const data = {
+const data = {
         id: Number(folio.id),
         folio_number: folio.folio_number,
         guest_name: guestName || '-',
@@ -1018,6 +1129,9 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
         check_out_date: folio.check_out_date,
         company: folio.company_name || '',
         balance: balance.toLocaleString('id-ID', { minimumFractionDigits: 2 }),
+        status_reservation: folio.status_reservation,
+        type_reservation: folio.type_reservation,
+        status_reservation_color: statusReservationColor(folio),
       };
 
       success(res, data, 'Success');

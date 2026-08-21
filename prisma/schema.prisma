@@ -2147,6 +2147,7 @@ model model_has_company_profiles {
   model_id           BigInt           
   notes              String?          
   company_profiles   company_profiles @relation(fields: [company_profile_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  rates              rates            @relation("rate_company_profiles", fields: [model_id], references: [id])
 
   @@id([company_profile_id, model_id, model_type])
   @@index([model_id])
@@ -2805,6 +2806,7 @@ model rates {
   rate_extra_bed_inclusives  rate_extra_bed_inclusives[]
   rate_inclusives            rate_inclusives[]
   rate_rates                 rate_rates[]
+  model_has_company_profiles model_has_company_profiles[] @relation("rate_company_profiles")
   code_posts                 code_posts                   @relation(fields: [code_post_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   properties                 properties                   @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   reservations               reservations[]

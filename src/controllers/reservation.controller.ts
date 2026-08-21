@@ -2710,9 +2710,13 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
       if (search) searchConds.push({ name: { contains: search, mode: 'insensitive' } }, { description: { contains: search, mode: 'insensitive' } });
       if (searchField && searchValue && searchConds.length === 0) searchConds.push({ [searchField]: { contains: searchValue, mode: 'insensitive' } });
 
-      let rateWhere: any = { ...baseWhere };
+let rateWhere: any = { ...baseWhere };
       if (company) {
-        rateWhere.OR = [{ company_profiles: { some: { id: company } } }, { company_profiles: { none: {} } }, ...searchConds];
+        rateWhere.OR = [
+          { model_has_company_profiles: { some: { company_profile_id: company, model_type: 'rate' } } },
+          { model_has_company_profiles: { none: { model_type: 'rate' } } },
+          ...searchConds
+        ];
       } else if (searchConds.length > 0) {
         rateWhere.OR = searchConds;
       }
@@ -2720,7 +2724,7 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
       let rates = await prisma.rates.findMany({ where: rateWhere, orderBy: { module: 'desc' } });
       let totalData = rates.length;
       if (rates.length === 0 && dayUse !== '1') {
-        const fallbackWhere: any = { ...baseWhere, company_profiles: { none: {} } };
+        const fallbackWhere: any = { ...baseWhere, model_has_company_profiles: { none: { model_type: 'rate' } } };
         if (searchConds.length > 0) fallbackWhere.OR = searchConds;
         rates = await prisma.rates.findMany({ where: fallbackWhere, orderBy: { module: 'desc' } });
         totalData = rates.length;
