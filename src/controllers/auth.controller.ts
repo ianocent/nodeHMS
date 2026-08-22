@@ -43,7 +43,11 @@ export class AuthController {
       }
 
       // Verify password
-      const validPassword = await bcrypt.compare(password, user.password);
+      // Laravel/PHP hashes use $2y$ prefix — node bcrypt only accepts $2a$/$2b$, normalize first
+      const storedHash = user.password.startsWith('$2y$')
+        ? '$2b$' + user.password.slice(4)
+        : user.password;
+      const validPassword = await bcrypt.compare(password, storedHash);
       if (!validPassword) {
         badRequest(res, 'Invalid input');
         return;

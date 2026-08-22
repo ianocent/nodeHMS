@@ -60,7 +60,7 @@ async function main() {
 
   const children = [];
   children.push(start('backend', BACKEND_DIR,
-    'npm run build && npm start',
+    'npm start',
     path.join(LOG_DIR, `backend-${stamp}.log`),
     path.join(LOG_DIR, 'latest-backend.log')));
   children.push(start('frontend', FRONTEND_DIR,
