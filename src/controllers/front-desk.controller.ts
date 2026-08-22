@@ -1987,14 +1987,16 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
       const userId = req.user?.id ?? 0n;
-      const today = new Date(); today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+      // Laravel keys shifts to the BUSINESS date, not local today (:1903 parity fix).
+      const bussinesDate = await AuthController.getBusinessDate(pid);
+      const day = new Date(`${bussinesDate}T00:00:00`);
+      const next = new Date(day.getTime() + 86400000);
 
-      const existing = await prisma.shifts.findFirst({ where: { user_id: userId, property_id: pid, date: { gte: today, lt: tomorrow }, deleted_at: null } });
+      const existing = await prisma.shifts.findFirst({ where: { user_id: userId, property_id: pid, date: { gte: day, lt: next }, deleted_at: null } });
       if (existing) { badRequest(res, 'Shift already started for today'); return; }
 
       const data = await prisma.shifts.create({
-        data: { property_id: pid, user_id: userId, start: new Date(), date: today, status: 0, created_at: new Date(), created_by: userId },
+        data: { property_id: pid, user_id: userId, start: new Date(), date: day, status: 0, created_at: new Date(), created_by: userId },
       });
       success(res, bigintToNumber(data), 'Shift started', 201);
     } catch (err: any) { console.error('Shift start error:', err); error(res, 'Failed to start shift', 500); }
@@ -2004,13 +2006,16 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
       const userId = req.user?.id;
-      const today = new Date(); today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+      const bussinesDate = await AuthController.getBusinessDate(pid);
+      const day = new Date(`${bussinesDate}T00:00:00`);
+      const next = new Date(day.getTime() + 86400000);
 
-      const shift = await prisma.shifts.findFirst({ where: { user_id: userId, property_id: pid, date: { gte: today, lt: tomorrow }, deleted_at: null } });
+      const shift = await prisma.shifts.findFirst({ where: { user_id: userId, property_id: pid, date: { gte: day, lt: next }, deleted_at: null } });
       if (!shift) { badRequest(res, 'No active shift found'); return; }
 
-      await prisma.shifts.update({ where: { id: shift.id }, data: { end: new Date(), is_posting: true, updated_at: new Date(), updated_by: userId } });
+      // Laravel sets ONLY `end` here (:452-456) — writing is_posting=true would
+      // weaken the night-audit close guard.
+      await prisma.shifts.update({ where: { id: shift.id }, data: { end: new Date(), updated_at: new Date(), updated_by: userId } });
       success(res, null, 'Shift ended');
     } catch (err: any) { console.error('Shift end error:', err); error(res, 'Failed to end shift', 500); }
   }

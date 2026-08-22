@@ -9,6 +9,7 @@ import { encrypt } from '../utils/encryption';
 import { badRequest, error, notFound, success } from '../utils/response';
 import { crudPermission, laravelPaging, postCodeBudgetTable, setupTable } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
+import { TokenService } from '../services/token.service';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { getColorReservation, getColorMaid, getColorRoom, STATUS_RESERVATION_MAP, ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 
@@ -735,111 +736,179 @@ export class SystemController {
       static async shiftConfirmationSubmit(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
-      const userId = req.query.user_id as string;
+      const authUserId = req.user?.id ?? 0n;
 
-      if (!userId) {
-        badRequest(res, 'user_id is required');
-        return;
+      // Laravel :321-330 — user_id may be "trx-<id>", a SHIFT id, or absent
+      // (defaults to the authenticated user).
+      let targetUserId: bigint | null = null;
+      const rawUserId = req.query.user_id as string | undefined;
+      if (rawUserId && rawUserId.includes('trx')) {
+        targetUserId = BigInt(String(rawUserId).split('-')[1]);
+      } else if (rawUserId && /^\d+$/.test(rawUserId)) {
+        const shiftRow = await getPrisma().shifts.findUnique({ where: { id: BigInt(rawUserId) }, select: { user_id: true } });
+        targetUserId = shiftRow?.user_id ?? null;
       }
+      if (!targetUserId) targetUserId = authUserId;
+      const isSelf = targetUserId === authUserId;
 
-      const userIdBig = BigInt(userId);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      // Business date — NOT local today (Laravel LogAudit::getBusinessDate :333).
+      const bussinesDateStr = await AuthController.getBusinessDate(propertyId);
+      const day = new Date(`${bussinesDateStr}T00:00:00`);
+      const nextDay = new Date(day.getTime() + 86400000);
+      const dateRange = { gte: day, lt: nextDay };
 
-      // Get business date
-      const businessDate = today;
+      // Flag a transaction AND its breakdowns as posted (Laravel :352-364/:377-389).
+      const flagPosted = async (txnId: bigint) => {
+        await getPrisma().transactions.update({ where: { id: txnId }, data: { is_posting: 1 } });
+        await getPrisma().transaction_breakdowns.updateMany({
+          where: { transaction_id: txnId },
+          data: { is_posting: 1 },
+        });
+      };
+      const sumOf = (items: any[]) =>
+        items.reduce((s, t) => s + (t.type_amount === 'PLUS' ? Number(t.total ?? 0) : -Number(t.total ?? 0)), 0);
 
-      // Get transactions for balance matching (Laravel parity)
-      const transactions = await getPrisma().transactions.findMany({
+      let open = await getPrisma().transactions.findMany({
         where: {
           property_id: propertyId,
-          date: { gte: today, lt: tomorrow },
+          created_by: targetUserId,
+          date: dateRange,
           is_posting: 0,
           is_endshift: 0,
           deleted_at: null,
         },
-        include: { type_payments: true },
       });
+      const debug: { id: string; name: string; sum: number }[] = [];
+      let remaining = open.length;
 
-      // Group by type_payment_id and calculate balances (Laravel ShiftConfirmationController parity)
-      const typePaymentIds = [...new Set(transactions.map(t => t.type_payment_id).filter((v): v is bigint => v !== null))];
-      const unbalanced = [];
-
-      for (const typePaymentId of typePaymentIds) {
-        const sum = transactions
-          .filter(t => t.type_payment_id === typePaymentId)
-          .reduce((acc, t) => {
-            const total = Number(t.total || 0);
-            return t.type_amount === 'PLUS' ? acc + total : acc - total;
-          }, 0);
-
-        if (Math.abs(sum) > 0.01) {
-          const typePayment = await getPrisma().type_payments.findUnique({ where: { id: typePaymentId } });
-          unbalanced.push({
-            type_payment_id: Number(typePaymentId),
-            name: typePayment?.name ?? 'Unknown',
-            sum: sum,
-          });
+      // ── Balancing pass A: TypePayment sums == 0 → auto-post (Laravel :343-370) ──
+      const typePayments = await getPrisma().type_payments.findMany({ where: { status: 1, deleted_at: null } });
+      for (const tp of typePayments) {
+        const items = open.filter((t) => t.type_payment_id === tp.id);
+        if (!items.length) continue;
+        const sum = sumOf(items);
+        debug.push({ id: `${tp.id}-payment`, name: tp.name ?? '', sum });
+        if (Math.round(sum) === 0) {
+          for (const t of items) await flagPosted(t.id);
+          const ids = new Set(items.map((i) => i.id));
+          open = open.filter((t) => !ids.has(t.id));
+          remaining -= items.length;
         }
       }
 
-      if (unbalanced.length > 0) {
-        badRequest(res, 'Balance not match', 400);
+      // ── Balancing pass B: DEFAULT code_posts sums == 0 → auto-post (:372-400) ──
+      const defaultCodes = await getPrisma().code_posts.findMany({ where: { type: 'DEFAULT', deleted_at: null } });
+      for (const cp of defaultCodes) {
+        const items = open.filter((t) => String(t.code ?? '') === String(cp.id));
+        if (!items.length) continue;
+        const sum = sumOf(items);
+        debug.push({ id: `${cp.id}-code`, name: cp.name ?? '', sum });
+        if (Math.round(sum) === 0) {
+          for (const t of items) await flagPosted(t.id);
+          const ids = new Set(items.map((i) => i.id));
+          open = open.filter((t) => !ids.has(t.id));
+          remaining -= items.length;
+        }
+      }
+
+      // Unbalanced → HTTP 200 with status:'error' + details (Laravel :417-430)
+      if (remaining > 0) {
+        const details = [...new Set(debug.filter((d) => Math.round(d.sum) !== 0).map((d) => d.name.toUpperCase()))];
+        success(res, { code: '200', status: 'error', details, debug, count: remaining }, undefined as any);
         return;
       }
 
-      // All balanced - mark transactions as posted and endshift
-      await getPrisma().transactions.updateMany({
-        where: {
-          property_id: propertyId,
-          date: { gte: today, lt: tomorrow },
-          is_posting: 0,
-          is_endshift: 0,
-          deleted_at: null,
-        },
-        data: { is_posting: 1, is_endshift: 1, updated_at: new Date() },
+      // Laravel :432-448 — post ALL remaining open transactions for the user
+      // (no date filter here, mirroring base).
+      const rest = await getPrisma().transactions.findMany({
+        where: { created_by: targetUserId, is_posting: 0, deleted_at: null },
+        select: { id: true },
       });
+      for (const t of rest) await flagPosted(t.id);
 
-      // Update or create shift
-      const userShift = await getPrisma().shifts.findFirst({
-        where: {
-          user_id: req.user?.id ?? 0n,
-          property_id: propertyId,
-          date: { gte: today, lt: tomorrow },
-          deleted_at: null,
-        },
+      // Close the OPEN shift for the target user on the business date — `end` only.
+      const openShift = await getPrisma().shifts.findFirst({
+        where: { property_id: propertyId, user_id: targetUserId, date: dateRange, end: null, deleted_at: null },
       });
-
-      if (userShift) {
-        const updated = await getPrisma().shifts.update({
-          where: { id: userShift.id },
-          data: {
-            is_posting: true,
-            end: new Date(),
-            updated_at: new Date(),
-          },
+      if (openShift) {
+        await getPrisma().shifts.update({
+          where: { id: openShift.id },
+          data: { end: new Date(), updated_at: new Date(), updated_by: req.user?.id },
         });
-        success(res, bigintToNumber(updated), 'Shift confirmed');
-      } else {
-        const created = await getPrisma().shifts.create({
-          data: {
-            property_id: propertyId,
-            user_id: req.user?.id ?? 0n,
-            start: new Date(),
-            end: new Date(),
-            date: today,
-            is_posting: true,
-            status: 0,
-            created_at: new Date(),
-          },
-        });
-        success(res, bigintToNumber(created), 'Shift created', 201);
       }
+
+      // Token revocation (Laravel :476-484 deletes the target user's tokens).
+      await TokenService.revokeAllUserTokens(targetUserId);
+
+      const propertyRow: any = await getPrisma().properties.findUnique({ where: { id: propertyId } });
+
+      const payload: any = {
+        code: 200,
+        name: propertyRow?.name ?? '',
+        image: '',
+        is_self: isSelf,
+        message: 'Success',
+      };
+
+      // Cross-user confirmation → fresh token for the CALLER plus shift state
+      // (Laravel :498-530).
+      if (!isSelf) {
+        const authUser: any = await getPrisma().users.findUnique({
+          where: { id: authUserId },
+          select: { email: true, username: true, name: true },
+        });
+        const { plainTextToken } = await TokenService.createToken(authUserId, authUser?.email ?? String(authUserId), [`can-${propertyId}`]);
+
+        // Next business date from latest log audit.
+        const lastAudit = await getPrisma().log_audits.findFirst({
+          where: { property_id: Number(propertyId) },
+          orderBy: { date: 'desc' },
+        });
+        const nextBd = lastAudit?.date
+          ? new Date(new Date(lastAudit.date).getTime() + 86400000).toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
+        const nbStart = new Date(`${nextBd}T00:00:00`);
+        const nbEnd = new Date(nbStart.getTime() + 86400000);
+        const shiftCount = await getPrisma().shifts.count({
+          where: { property_id: propertyId, user_id: authUserId, date: { gte: nbStart, lt: nbEnd }, end: null },
+        });
+
+        // is_need_shift: any role menu with visibility 'transaction' (Laravel :529).
+        let isNeedShift = false;
+        try {
+          const roleLinks = await getPrisma().model_has_roles.findMany({
+            where: { model_type: 'App\\Models\\User', model_id: authUserId },
+            select: { role_id: true },
+          });
+          const roleIds = roleLinks.map((r) => r.role_id);
+          const rm = roleIds.length ? await getPrisma().role_menu_crud.findMany({ where: { role_id: { in: roleIds } }, select: { menu_id: true } }) : [];
+          const menuIds = rm.map((m) => m.menu_id);
+          if (menuIds.length) {
+            const txMenus = await getPrisma().menus.count({
+              where: { id: { in: menuIds }, visibility: 'transaction' },
+            });
+            isNeedShift = txMenus > 0;
+          }
+        } catch { isNeedShift = true; }
+
+        payload.data = {
+          name: authUser?.name ?? '',
+          role: [],
+          username: authUser?.username ?? '',
+          email: authUser?.email ?? '',
+          access_token: plainTextToken,
+          expires_token: new Date().toISOString().slice(0, 19).replace('T', ' '),
+          force_change_password: false,
+          is_shift: shiftCount > 0,
+          is_need_shift: isNeedShift,
+          bussinesDate: nextBd,
+        };
+      }
+
+      success(res, payload);
     } catch (err: any) {
       console.error('Shift confirmation submit error:', err);
-      error(res, 'Failed to submit shift confirmation', 500);
+      error(res, err?.message ?? 'Failed to submit shift confirmation', 500);
     }
   }
 
