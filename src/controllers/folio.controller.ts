@@ -3,6 +3,8 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { folioBalanceWithoutPosting, transferTransactionsForCheckout } from './front-desk.controller';
+import { AuthController } from './auth.controller';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -486,17 +488,21 @@ export class FolioController {
           targetStatusCode = 'reservation';
         } else if (status_reservation === 'un_check_out') {
           targetStatusCode = 'check_in';
+        } else if (status_reservation === 'un_cancel_reservation') {
+          // handled in dedicated branch below — skip generic mapping
+          targetStatusCode = null;
         } else {
           targetStatusCode = status_reservation;
         }
 
-        const found = Object.values(STATUS_RESERVATION).find((s) => s.code === targetStatusCode);
-        if (!found) {
-          badRequest(res, `Invalid status: ${status_reservation}`);
-          return;
+        if (targetStatusCode !== null) {
+          const found = Object.values(STATUS_RESERVATION).find((s) => s.code === targetStatusCode);
+          if (!found) {
+            badRequest(res, `Invalid status: ${status_reservation}`);
+            return;
+          }
+          updateData.status_reservation = found.id;
         }
-        targetStatus = found.id;
-        updateData.status_reservation = targetStatus;
       }
 
       if (check_in_date) updateData.check_in_date = new Date(check_in_date);
@@ -504,32 +510,113 @@ export class FolioController {
 
       // Laravel parity: handle special actions
       if (status_reservation === 'cancel_reservation') {
-        updateData.data = JSON.stringify({
-          ...(folio.data ? JSON.parse(folio.data as string) : {}),
-          cancel_reason: reason || null,
-          cancelled_at: new Date().toISOString(),
-          cancelled_by: Number(userId),
-        });
-      }
-
-      if (status_reservation === 'un_check_in') {
-        // Validate: can only un_check_in if check_in_date == business date
-        const businessDate = new Date();
-        const bdate = businessDate.toISOString().slice(0, 10);
-        const folioCheckIn = folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : '';
-        if (folioCheckIn !== bdate) {
-          badRequest(res, 'Unable to un check-in');
+        // Laravel parity (Folio.php:1515-1586)
+        if (!reason) { badRequest(res, 'The remark field is required.'); return; }
+        if (![STATUS_RESERVATION.reservation.id, STATUS_RESERVATION.pending.id].includes(folio.status_reservation)) {
+          badRequest(res, 'Failed to cancel reservation, only reservation and pending status can be canceled');
           return;
         }
-        if (reason) {
-          updateData.data = JSON.stringify({
-            ...(folio.data ? JSON.parse(folio.data as string) : {}),
-            remark_un_check_in: reason,
+        const balance = await folioBalanceWithoutPosting(folio);
+        if (![0, 1, -1].includes(Math.ceil(balance))) {
+          badRequest(res, 'Payment required');
+          return;
+        }
+        const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+        await transferTransactionsForCheckout(folio, businessDate);
+
+        // reset room change pointers
+        await prisma.reservations.updateMany({
+          where: { folio_id: id, deleted_at: null },
+          data: { room_id_next: null, room_type_id_next: null },
+        });
+
+        updateData.status_reservation = STATUS_RESERVATION.cancel_reservation.id;
+        updateData.data = JSON.stringify({
+          ...(folio.data ? JSON.parse(folio.data as string) : {}),
+          remark_cancel_reservation: reason || null,
+          reason_cancel_reservation: (reason && typeof reason === 'object' ? reason.value : reason) || null,
+        });
+
+        // GIT parent → cascade cancel to child folios
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        if (isGitParent) {
+          await prisma.folios.updateMany({
+            where: { parent: id },
+            data: { status_reservation: STATUS_RESERVATION.cancel_reservation.id },
           });
         }
       }
 
+      if (status_reservation === 'un_cancel_reservation') {
+        // Laravel parity (Folio.php:1588-1614)
+        if (folio.status_reservation !== STATUS_RESERVATION.cancel_reservation.id) {
+          badRequest(res, 'Status reservation is not cancel_reservation');
+          return;
+        }
+        updateData.status_reservation = STATUS_RESERVATION.reservation.id;
+        updateData.data = JSON.stringify({
+          ...(folio.data ? JSON.parse(folio.data as string) : {}),
+          remark_un_cancel_reservation: reason || null,
+        });
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        if (isGitParent) {
+          await prisma.folios.updateMany({
+            where: { parent: id, status_reservation: STATUS_RESERVATION.cancel_reservation.id },
+            data: { status_reservation: STATUS_RESERVATION.reservation.id },
+          });
+        }
+      }
+
+      if (status_reservation === 'un_check_in') {
+        // Laravel parity (Folio.php:1422-1513)
+        if (!reason) { badRequest(res, 'The remark field is required.'); return; }
+        // Validate: can only un_check_in if check_in_date == business date
+        const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+        const folioCheckIn = folio.check_in_date ? new Date(folio.check_in_date.getTime() - folio.check_in_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10) : '';
+        if (folioCheckIn !== businessDate) {
+          badRequest(res, 'Unable to un check-in');
+          return;
+        }
+
+        updateData.status_reservation = STATUS_RESERVATION.reservation.id;
+
+        // restore rooms: vacant + dirty
+        const resvs = await prisma.reservations.findMany({
+          where: { folio_id: id, deleted_at: null },
+          select: { room_id: true, room_id_next: true },
+        });
+        const roomIds = resvs.map(r => r.room_id_next ?? r.room_id).filter((x): x is bigint => x != null);
+        if (roomIds.length > 0) {
+          await prisma.rooms.updateMany({
+            where: { id: { in: roomIds } },
+            data: { room_status: 0, maid_status: 1, updated_at: new Date() },
+          });
+        }
+
+        updateData.data = JSON.stringify({
+          ...(folio.data ? JSON.parse(folio.data as string) : {}),
+          remark_un_check_in: reason,
+        });
+
+        // GIT parent → children back to reservation with room restore
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        if (isGitParent) {
+          const children = await prisma.folios.findMany({
+            where: { parent: id, status_reservation: STATUS_RESERVATION.check_in.id },
+          });
+          for (const child of children) {
+            await prisma.folios.update({ where: { id: child.id }, data: { status_reservation: STATUS_RESERVATION.reservation.id } });
+            const childResvs = await prisma.reservations.findMany({ where: { folio_id: child.id, deleted_at: null }, select: { room_id: true, room_id_next: true } });
+            const cRoomIds = childResvs.map(r => r.room_id_next ?? r.room_id).filter((x): x is bigint => x != null);
+            if (cRoomIds.length > 0) {
+              await prisma.rooms.updateMany({ where: { id: { in: cRoomIds } }, data: { room_status: 0, maid_status: 1, updated_at: new Date() } });
+            }
+          }
+        }
+      }
+
       if (status_reservation === 'un_check_out') {
+        // Laravel parity (Folio.php:1823-1940)
         // Validate: must be in check_out status
         if (folio.status_reservation !== STATUS_RESERVATION.check_out.id) {
           badRequest(res, 'Status reservation is not check out');
@@ -539,6 +626,13 @@ export class FolioController {
           badRequest(res, 'Remark required');
           return;
         }
+        const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+        const bStart = new Date(businessDate + 'T00:00:00.000Z');
+        const bEnd = new Date(bStart.getTime() + 86400000);
+        const checkoutIsToday = folio.check_out_date
+          ? new Date(folio.check_out_date.getTime() - folio.check_out_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10) === businessDate
+          : false;
+
         if (folio.check_out_date && folio.check_out_date < new Date()) {
           updateData.check_out_date = new Date();
           updateData.type_reservation = 'vr';
@@ -546,11 +640,59 @@ export class FolioController {
         if (to_virtual) {
           updateData.type_reservation = 'vr';
         }
-        if (reason) {
-          updateData.data = JSON.stringify({
-            ...(folio.data ? JSON.parse(folio.data as string) : {}),
-            remark_un_check_out: reason,
+        updateData.status_reservation = STATUS_RESERVATION.check_in.id;
+        updateData.data = JSON.stringify({
+          ...(folio.data ? JSON.parse(folio.data as string) : {}),
+          remark_un_check_out: reason,
+        });
+
+        // room restore: occupied/due_out unless another active reservation holds the room
+        if (to_virtual != 1) {
+          const lastResv = await prisma.reservations.findFirst({
+            where: { folio_id: id, deleted_at: null },
+            orderBy: { date: 'desc' },
+            select: { room_id: true, room_id_next: true },
           });
+          const roomId = lastResv?.room_id_next ?? lastResv?.room_id;
+          if (roomId != null) {
+            const others = await prisma.reservations.count({
+              where: {
+                folio_id: { not: id },
+                deleted_at: null,
+                date: { gte: bStart, lt: bEnd },
+                status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
+                OR: [{ room_id: roomId }, { room_id_next: roomId }],
+              },
+            });
+            if (others > 0) {
+              // keep occupied — another guest holds the room
+            } else if (checkoutIsToday) {
+              await prisma.rooms.update({ where: { id: roomId }, data: { room_status: 2, updated_at: new Date() } });
+            } else {
+              await prisma.rooms.update({ where: { id: roomId }, data: { room_status: 1, updated_at: new Date() } });
+            }
+          }
+        }
+
+        // GIT parent → children back to check_in with due_out rooms
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        if (isGitParent) {
+          const children = await prisma.folios.findMany({
+            where: { parent: id, status_reservation: STATUS_RESERVATION.check_out.id },
+          });
+          for (const child of children) {
+            const data: any = { status_reservation: STATUS_RESERVATION.check_in.id };
+            if (to_virtual == 1 && child.check_out_date
+              && new Date(child.check_out_date.getTime() - child.check_out_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10) === businessDate) {
+              data.type_reservation = 'vr';
+            }
+            await prisma.folios.update({ where: { id: child.id }, data });
+            const childResvs = await prisma.reservations.findMany({ where: { folio_id: child.id, deleted_at: null }, select: { room_id: true, room_id_next: true } });
+            const cRoomIds = childResvs.map(r => r.room_id_next ?? r.room_id).filter((x): x is bigint => x != null);
+            if (cRoomIds.length > 0) {
+              await prisma.rooms.updateMany({ where: { id: { in: cRoomIds } }, data: { room_status: 2, updated_at: new Date() } });
+            }
+          }
         }
       }
 

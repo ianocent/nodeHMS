@@ -37,6 +37,18 @@ router.post('/front-desk/batch-check-out', authMiddleware, requirePermission(63,
 // Transaction
 router.get('/transactions', authMiddleware, FrontDeskController.transactionList);
 router.post('/transactions', authMiddleware, FrontDeskController.transactionStore);
+// Laravel route shape: POST transaction/void?folio_id= (static path BEFORE :id routes)
+router.post('/transactions/void', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionVoidBulk);
+router.post('/transaction/void', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionVoidBulk);
+// Laravel cms.php:1138-1148 — transfer/consolidate/split/refund
+router.post('/transaction/transfer', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionTransfer);
+router.post('/transactions/transfer', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionTransfer);
+router.post('/transaction/consolidate', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionConsolidate);
+router.post('/transactions/consolidate', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionConsolidate);
+router.post('/transaction/split', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionSplit);
+router.post('/transactions/split', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionSplit);
+router.post('/transaction/refund', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionRefund);
+router.post('/transactions/refund', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.transactionRefund);
 router.get('/transactions/:id', authMiddleware, FrontDeskController.transactionShow);
 router.post('/transactions/:id/void', authMiddleware, FrontDeskController.transactionVoid);
 
