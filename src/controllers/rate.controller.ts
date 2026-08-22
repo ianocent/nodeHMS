@@ -2311,10 +2311,12 @@ const { name, description, image, status } = req.body;
       const limit = parseInt(req.query.limit as string) || 10;
       const search = req.query.search as string;
 
-      const links = await prisma.model_has_rates.findMany({
-        where: { rate_id: rateId, model_type: 'App\\Models\\CompanyProfile' },
+      const links = await prisma.model_has_company_profiles.findMany({
+        // Laravel morph pivot: CompanyProfile::Rate() = morphedByMany(Rate, 'model',
+        // 'model_has_company_profiles') — NOT model_has_rates (:590-682).
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
       });
-      const companyIds = links.map(l => l.model_id);
+      const companyIds = links.map(l => l.company_profile_id);
       const where: any = { id: { in: companyIds }, deleted_at: null };
       if (search) where.OR = [
         { name: { contains: search, mode: 'insensitive' } },
@@ -2333,7 +2335,7 @@ const { name, description, image, status } = req.body;
       ];
       success(res, bigintToNumber(companies), 'Success', 200, {
         table,
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, MENU_ID),
         pagination: {
           current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total,
           from: (page - 1) * limit + 1, to: Math.min(page * limit, total),
@@ -2351,17 +2353,17 @@ const { name, description, image, status } = req.body;
       let idx: any[] = req.body.idx || [];
       if (!Array.isArray(idx)) idx = [idx];
       const selectedIds = idx.filter((i: any) => /^\d+$/.test(String(i))).map((i: any) => BigInt(i));
-      await prisma.model_has_rates.deleteMany({
-        where: { rate_id: rateId, model_type: 'App\\Models\\CompanyProfile' },
+      // Laravel $rate->companyProfile()->sync($idx) (:641-647) — pivot
+      // model_has_company_profiles (model_type Rate, model_id = rate id).
+      await prisma.model_has_company_profiles.deleteMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
       });
       if (selectedIds.length > 0) {
-        await prisma.model_has_rates.createMany({
+        await prisma.model_has_company_profiles.createMany({
           data: selectedIds.map(cid => ({
-            rate_id: rateId,
-            model_type: 'App\\Models\\CompanyProfile',
-            model_id: cid,
-            status: 1,
-            temp_status: 1,
+            company_profile_id: cid,
+            model_type: 'App\\Models\\Rate',
+            model_id: rateId,
           })),
           skipDuplicates: true,
         });
@@ -2378,8 +2380,9 @@ const { name, description, image, status } = req.body;
       const rateId = BigInt(String(req.query.rate_id ?? req.body.rate_id ?? ''));
       const id = String(req.params.id);
       if (!/^\d+$/.test(id)) { notFound(res, 'Not found'); return; }
-      await prisma.model_has_rates.deleteMany({
-        where: { rate_id: rateId, model_type: 'App\\Models\\CompanyProfile', model_id: BigInt(id) },
+      // Laravel detach (:650-664)
+      await prisma.model_has_company_profiles.deleteMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate', company_profile_id: BigInt(id) },
       });
       success(res, null, 'Success');
     } catch (err: any) {
