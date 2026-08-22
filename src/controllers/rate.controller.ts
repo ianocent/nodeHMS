@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -7,6 +7,7 @@ import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
 import { getStatusLabel } from '../utils/cmsConfig';
 import { enqueueJob } from '../config/queue';
+import { processSyncStaahAvailability } from '../queue/jobs/syncStaahAvailability';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -2388,6 +2389,264 @@ const { name, description, image, status } = req.body;
     } catch (err: any) {
       console.error('Rate company delete error:', err);
       error(res, 'Failed to delete company applicable', 500);
+    }
+  }
+
+  // ── RateRelationController::package parity (cms.php:801-803) ──
+  // Pivot: $rate->package() = morphToMany(Package, 'model', 'model_has_packages').
+  static async ratePackage(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdRaw = String(req.query.rate_id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { notFound(res, 'Rate is not found'); return; }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+
+      const links = await prisma.model_has_packages.findMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+      });
+      const packageIds = links.map((l) => l.package_id);
+      const where: any = { id: { in: packageIds }, deleted_at: null };
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+      const [data, total] = await Promise.all([
+        prisma.packages.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { id: 'asc' } }),
+        prisma.packages.count({ where }),
+      ]);
+      success(res, bigintToNumber(data), 'Success', 200, {
+        permission: getPermissionFlags(req.user, MENU_ID),
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / limit)), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Rate package list error:', err); error(res, 'Failed to load packages', 500); }
+  }
+
+  static async ratePackageStore(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.body.rate_id ?? ''));
+      let idx: any[] = req.body.idx || [];
+      if (!Array.isArray(idx)) idx = [idx];
+      const selectedIds = idx.filter((i: any) => /^\d+$/.test(String(i))).map((i: any) => BigInt(i));
+      // Laravel $rate->package()->sync($idx) (:727-733)
+      await prisma.model_has_packages.deleteMany({ where: { model_id: rateId, model_type: 'App\\Models\\Rate' } });
+      if (selectedIds.length > 0) {
+        await prisma.model_has_packages.createMany({
+          data: selectedIds.map((pid) => ({ package_id: pid, model_type: 'App\\Models\\Rate', model_id: rateId })),
+          skipDuplicates: true,
+        });
+      }
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Rate package store error:', err); error(res, 'Failed to save packages', 500); }
+  }
+
+  static async ratePackageDelete(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.query.rate_id ?? req.body.rate_id ?? ''));
+      const id = String(req.params.id);
+      if (!/^\d+$/.test(id)) { notFound(res, 'Not found'); return; }
+      // Laravel $rate->package()->detach($id) (:743-760)
+      await prisma.model_has_packages.deleteMany({ where: { model_id: rateId, model_type: 'App\\Models\\Rate', package_id: BigInt(id) } });
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Rate package delete error:', err); error(res, 'Failed to delete package', 500); }
+  }
+
+  // ── RateRelationController::codeItem parity (cms.php:805-808) ──
+  // Pivot: $rate->codeItem() = morphToMany(CodeItem, 'model', 'model_has_code_items');
+  // sales override lives on the pivot row itself.
+  static async rateCodeItemList(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdRaw = String(req.query.rate_id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { notFound(res, 'Rate is not found'); return; }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+
+      const pivots: any[] = await prisma.$queryRaw`
+        SELECT code_item_id, sales FROM model_has_code_items
+        WHERE model_type = ${'App\\Models\\Rate'} AND model_id = ${rateId}
+      `;
+      const itemIds = pivots.map((p) => p.code_item_id);
+      const where: any = { id: { in: itemIds }, deleted_at: null };
+      if (search) where.name = { contains: search, mode: 'insensitive' };
+
+      const [items, total] = await Promise.all([
+        prisma.code_items.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { id: 'asc' } }),
+        prisma.code_items.count({ where }),
+      ]);
+      const salesByItem = new Map(pivots.map((p) => [Number(p.code_item_id), p.sales]));
+      const data = items.map((it: any) => ({ ...it, sales: salesByItem.get(Number(it.id)) ?? it.sales }));
+
+      const codePosts = await prisma.code_posts.findMany({
+        where: { type: 'DEFAULT', status: STATUS_ACTIVE, deleted_at: null },
+        select: { id: true, name: true },
+      });
+      const table = [
+        { label: 'Code', key: 'code', type: 'none', is_search: false },
+        { label: 'Name', key: 'name', type: 'none', is_search: false },
+        { label: 'Sales', key: 'sales', type: 'number', is_search: false },
+        { label: 'Code Post', key: 'code_post_id', type: 'select', options: codePosts.map((c: any) => ({ value: Number(c.id), label: c.name })), is_search: false },
+      ];
+      success(res, bigintToNumber(data), 'Success', 200, {
+        table,
+        permission: getPermissionFlags(req.user, MENU_ID),
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / limit)), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Rate code item list error:', err); error(res, 'Failed to load code items', 500); }
+  }
+
+  static async rateCodeItemStore(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.body.rate_id ?? ''));
+      let idx: any[] = req.body.idx || [];
+      if (!Array.isArray(idx)) idx = [idx];
+
+      for (const value of idx) {
+        if (!/^\d+$/.test(String(value))) continue;
+        const dup: any[] = await prisma.$queryRaw`
+          SELECT code_item_id FROM model_has_code_items
+          WHERE code_item_id = ${BigInt(value)} AND model_type = ${'App\\Models\\Rate'} AND model_id = ${rateId} LIMIT 1`;
+        if (dup.length > 0) continue;
+
+        const ci: any = await prisma.code_items.findUnique({ where: { id: BigInt(value) }, include: { code_posts: { select: { id: true } } } });
+        // Laravel quirk preserved: code_post_id stores CodeItem->codePost->id here
+        // (this controller uses the REAL relation, unlike storeAdditionalItem).
+        await prisma.$executeRaw`
+          INSERT INTO model_has_code_items
+            (model_id, model_type, code_item_id, reason, sales, process_on, code_post_id, name, description)
+          VALUES
+            (${rateId}, ${'App\\Models\\Rate'}, ${BigInt(value)}, '',
+             ${ci?.sales ?? null}, ${ci?.process_on ?? null},
+             ${ci?.code_posts?.id ? Number(ci.code_posts.id) : Number(ci?.code_post_id ?? 0)},
+             ${ci?.name ?? null}, ${ci?.description ?? null})
+        `;
+      }
+      await prisma.rates.update({ where: { id: rateId }, data: { updated_at: new Date() } });
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Rate code item store error:', err); error(res, 'Failed to store code items', 500); }
+  }
+
+  static async rateCodeItemUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.body.rate_id ?? ''));
+      const id = String(req.params.id);
+      if (!/^\d+$/.test(id)) { notFound(res, 'Code Item is not found'); return; }
+      await prisma.$executeRaw`
+        UPDATE model_has_code_items SET sales = ${req.body.sales ?? null}
+        WHERE code_item_id = ${BigInt(id)} AND model_type = ${'App\\Models\\Rate'} AND model_id = ${rateId}
+      `;
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Rate code item update error:', err); error(res, 'Failed to update code item', 500); }
+  }
+
+  static async rateCodeItemDelete(req: Request, res: Response): Promise<void> {
+    try {
+      const rateId = BigInt(String(req.query.rate_id ?? req.body.rate_id ?? ''));
+      const id = String(req.params.id);
+      if (!/^\d+$/.test(id)) { notFound(res, 'Not found'); return; }
+      // Laravel $rate->codeItem()->detach($id)
+      await prisma.$executeRaw`
+        DELETE FROM model_has_code_items
+        WHERE code_item_id = ${BigInt(id)} AND model_type = ${'App\\Models\\Rate'} AND model_id = ${rateId}
+      `;
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Rate code item delete error:', err); error(res, 'Failed to delete code item', 500); }
+  }
+
+  // ── RateController@delete force (cms.php:817) ──
+  // Purge prices on Booking Engine (when configured) then hard-delete the rate.
+  static async forceDelete(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = BigInt(rateIdParam);
+      const rate = await prisma.rates.findUnique({ where: { id } });
+      if (!rate) { notFound(res, 'Not Found'); return; }
+
+      const beUrl = process.env.BOOKING_ENGINE_URL;
+      if (beUrl) {
+        try {
+          await fetch(`${beUrl}/webhook/delete-room-price-by-rate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ property_id: Number(rate.property_id), rate_id: Number(rate.id) }),
+          });
+        } catch (e: any) { console.error('BE price purge failed:', e?.message); }
+      }
+
+      await prisma.rates.delete({ where: { id } });
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Rate force delete error:', err); error(res, 'Failed to force delete rate', 500); }
+  }
+
+  // ── RateController@syncStaah (cms.php:1551) ──
+  // Guards -> push rate plan (New→Overlay fallback) -> ARI push per calendar year
+  // chunk (inline SyncStaahAvailability parity) -> mark sync_staah.
+  static async syncStaah(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = BigInt(rateIdParam);
+      const rate: any = await prisma.rates.findUnique({ where: { id } });
+      if (!rate) { notFound(res, 'Not Found'); return; }
+      if (!rate.staah) { badRequest(res, 'Rate ini belum diaktifkan untuk Staah'); return; }
+      if (!rate.status) { badRequest(res, 'Rate ini tidak aktif'); return; }
+      const hasRateRate = await prisma.rate_rates.count({ where: { rate_id: id } }) > 0;
+      if (!hasRateRate) { badRequest(res, 'Rate ini belum punya data harga per kamar/tanggal'); return; }
+
+      const staahService = new (await import('../services/staah.service')).StaahService();
+      const mapping = await prisma.staah_rate_mappings.findFirst({ where: { rate_id: id, deleted_at: null } });
+      const iface = mapping
+        ? await prisma.staah_interfaces.findUnique({ where: { id: mapping.staah_interface_id } })
+        : null;
+
+      if (mapping && iface) {
+        const base = {
+          hotelid: iface.hotel_id,
+          rateplanid: mapping.staah_rate_plan_id,
+          mealplanid: mapping.meal_plan_id,
+          name: rate.name,
+          description: rate.description ?? undefined,
+        };
+        const action = mapping.last_sync_at ? 'Overlay' : 'New';
+        try {
+          await staahService.createUpdateDeleteRatePlan({ ...base, action });
+        } catch (firstErr: any) {
+          const msg = String(firstErr?.message ?? '');
+          if (action === 'New' && msg.includes('already exists')) {
+            await staahService.createUpdateDeleteRatePlan({ ...base, action: 'Overlay' });
+          } else if (action === 'Overlay' && msg.includes('not exists')) {
+            await staahService.createUpdateDeleteRatePlan({ ...base, action: 'New' });
+          } else {
+            throw firstErr;
+          }
+        }
+      }
+
+      // ARI push per calendar-year chunk starting today (skip past dates).
+      const { processSyncStaahAvailability } = await import('../queue/jobs/syncStaahAvailability');
+      const todayStr = formatDate(new Date());
+      let periodStart = rate.start_date ? formatDate(new Date(rate.start_date)) : todayStr;
+      const periodEnd = rate.end_date ? formatDate(new Date(rate.end_date)) : periodStart;
+      if (periodStart < todayStr) periodStart = todayStr;
+
+      if (periodStart <= periodEnd) {
+        let yearCursorStart = `${periodStart.slice(0, 4)}-01-01`;
+        while (yearCursorStart <= periodEnd) {
+          const yearEnd = `${yearCursorStart.slice(0, 4)}-12-31`;
+          const chunkFrom = yearCursorStart < periodStart ? periodStart : yearCursorStart;
+          const chunkTo = yearEnd > periodEnd ? periodEnd : yearEnd;
+          await processSyncStaahAvailability({ data: { propertyId: Number(rate.property_id), dateFrom: chunkFrom, dateTo: chunkTo, rateId: Number(rate.id) } });
+          yearCursorStart = `${Number(yearCursorStart.slice(0, 4)) + 1}-01-01`;
+        }
+      }
+
+      await prisma.rates.update({ where: { id: rate.id }, data: { sync_staah: true } });
+      success(res, null, 'Rate & harga berhasil di-sync ke Staah');
+    } catch (err: any) {
+      console.error('Rate sync-staah error:', err);
+      error(res, err?.message ?? 'Failed to sync rate to Staah', 500);
     }
   }
 }

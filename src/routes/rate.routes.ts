@@ -4,7 +4,6 @@ import { DynamicRateController } from '../controllers/dynamic-rate.controller';
 import { PromotionController } from '../controllers/promotion.controller';
 import { RateAddonController } from '../controllers/rate-addon.controller';
 import { CompanyContractRateController } from '../controllers/company-contract-rate.controller';
-import { ReservationController } from '../controllers/reservation.controller';
 import { BarController } from '../controllers/bar.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
@@ -92,9 +91,15 @@ router.post('/rate/rate-link-listing/apply', authMiddleware, requirePermission(8
 router.get('/rate/company-applicable', authMiddleware, requirePermission(86, 'view'), RateController.rateCompany);
 router.post('/rate/company-applicable', authMiddleware, requirePermission(86, 'edit'), RateController.rateCompanyStore);
 router.delete('/rate/company-applicable/:id', authMiddleware, requirePermission(86, 'delete'), RateController.rateCompanyDelete);
-// /rate/code-item alias (rate-promotion modal, must precede /rate/:id)
-router.get('/rate/code-item', authMiddleware, requirePermission(83, 'view'), ReservationController.codeItemList);
-router.post('/rate/code-item', authMiddleware, requirePermission(83, 'add'), ReservationController.codeItemList);
+// /rate/code-item — RateRelationController::codeItem parity (must precede /rate/:id)
+router.get('/rate/code-item', authMiddleware, requirePermission(86, 'view'), RateController.rateCodeItemList);
+router.post('/rate/code-item', authMiddleware, requirePermission(86, 'add'), RateController.rateCodeItemStore);
+router.put('/rate/code-item/:id', authMiddleware, requirePermission(86, 'edit'), RateController.rateCodeItemUpdate);
+router.delete('/rate/code-item/:id', authMiddleware, requirePermission(86, 'delete'), RateController.rateCodeItemDelete);
+// /rate/package — RateRelationController::package parity (cms.php:801-803)
+router.get('/rate/package', authMiddleware, requirePermission(86, 'view'), RateController.ratePackage);
+router.post('/rate/package', authMiddleware, requirePermission(86, 'edit'), RateController.ratePackageStore);
+router.delete('/rate/package/:id', authMiddleware, requirePermission(86, 'delete'), RateController.ratePackageDelete);
 // ── /rate/promotion — RateRelationController::promotion parity (must precede /rate/:id) ──
 router.get('/rate/promotion', authMiddleware, requirePermission(88, 'view'), PromotionController.ratePromotionList);
 router.post('/rate/promotion', authMiddleware, requirePermission(88, 'edit'), PromotionController.ratePromotionStore);
@@ -103,7 +108,10 @@ router.get('/rate/:id', authMiddleware, requirePermission(86, 'view'), RateContr
 router.get('/rate/:id/edit', authMiddleware, requirePermission(86, 'edit'), RateController.edit);
 router.put('/rate/:id', authMiddleware, requirePermission(86, 'edit'), RateController.update);
 router.delete('/rate/:id', authMiddleware, requirePermission(86, 'delete'), RateController.destroy);
+router.delete('/rate/:id/delete', authMiddleware, requirePermission(86, 'delete'), RateController.forceDelete);
 router.post('/rate/:id/restore', authMiddleware, requirePermission(86, 'edit'), RateController.restore);
+// Laravel RateController@syncStaah (cms.php:1551) — push rate plan + ARI to Staah
+router.post('/rate/:id/sync-staah', authMiddleware, requirePermission(86, 'edit'), RateController.syncStaah);
 
 // ── Rate Grid (rate_rates calendar) (menuId: 86) ──
 router.get('/rates/:rateId/grid', authMiddleware, requirePermission(86, 'view'), RateController.rateGrid);

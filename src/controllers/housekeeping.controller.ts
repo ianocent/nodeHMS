@@ -10,6 +10,34 @@ import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { TABLES } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
 import { firebaseService } from '../services/firebase.service';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Laravel WorkOrderController:229-248 parity — decode base64 data-URIs and write
+// to local storage. Root dir configurable via STORAGE_PATH (default ./storage).
+function saveWorkOrderImages(workOrderId: number, images: any[]): string[] {
+  const saved: string[] = [];
+  const root = process.env.STORAGE_PATH || path.join(process.cwd(), 'storage');
+  for (const raw of images) {
+    if (typeof raw !== 'string') continue;
+    // Existing paths pass through untouched (= Laravel update behavior).
+    if (!raw.startsWith('data:image')) { saved.push(raw); continue; }
+    const m = raw.match(/^data:image\/(\w+);base64,(.*)$/);
+    if (!m) continue;
+    try {
+      const ext = m[1].toLowerCase();
+      const buf = Buffer.from(m[2], 'base64');
+      const dir = path.join(root, 'work-orders');
+      fs.mkdirSync(dir, { recursive: true });
+      const fileName = `${workOrderId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      fs.writeFileSync(path.join(dir, fileName), buf);
+      saved.push(`/work-orders/${fileName}`);
+    } catch (e: any) {
+      console.error('WO image save failed:', e?.message);
+    }
+  }
+  return saved;
+}
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -631,6 +659,14 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
       });
       await syncWorkOrderTypes(data.id, areaId, workTypeId);
 
+      // Image upload — Laravel WorkOrderController:229-248 (base64 -> storage/work-orders).
+      if (Array.isArray(req.body.images) && req.body.images.length > 0) {
+        const paths = saveWorkOrderImages(Number(data.id), req.body.images);
+        if (paths.length) {
+          await prisma.work_orders.update({ where: { id: data.id }, data: { images: JSON.stringify(paths) } });
+        }
+      }
+
       // Sync room_status=OOO — hanya jika tanggal WO == business date (Laravel :208-212)
       if (data.room_id && date && bussinesDate === String(date).slice(0, 10)) {
         await prisma.rooms.update({
@@ -712,7 +748,7 @@ static async workOrderUpdate(req: Request, res: Response): Promise<void> {
       const id = idParam(req.params.id);
       const { area, work_type, assign_to, status_work_order, start_date, end_date, start_time, end_time, work_description, notes } = req.body;
 
-      const oldWo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, start_date: true, assign_to: true, deleted_at: true } });
+      const oldWo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, start_date: true, assign_to: true, deleted_at: true, images: true } });
       if (!oldWo || oldWo.deleted_at) { notFound(res, 'Work order not found'); return; }
 
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -728,6 +764,15 @@ static async workOrderUpdate(req: Request, res: Response): Promise<void> {
       if (notes !== undefined) data.notes = notes;
       if (status_work_order !== undefined) data.status_work_order = num(status_work_order, 0);
       if (assignToVal !== null && assignToVal !== undefined) data.assign_to = BigInt(assignToVal);
+
+      // Images: keep existing paths, decode new base64 entries (:402-430).
+      if (Array.isArray(req.body.images)) {
+        const existingImages: string[] = (() => {
+          try { const arr = JSON.parse(String((oldWo as any).images ?? '[]')); return Array.isArray(arr) ? arr : []; } catch { return []; }
+        })();
+        const merged = saveWorkOrderImages(Number(id), req.body.images);
+        data.images = JSON.stringify(merged.length ? merged : existingImages);
+      }
 
       // start/end dipaksa ke business date + waktu sekarang (Laravel :370-389)
       if (start_date !== undefined && start_date !== null) {

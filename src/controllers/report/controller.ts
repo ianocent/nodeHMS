@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { success, error, badRequest, notFound } from '../../utils/response';
 import { prisma, parseReportParams, REPORT_PERMISSION_TABLE, bigintToNumber, formatDate } from './helpers';
 import { STATUSES } from '../../utils/cmsConfig';
-import { reportHandlers, getGenericReport } from './handlers';
+import { reportHandlers } from './handlers';
 import { generateFolioDocumentPdf } from './folioDocuments';
 import { generateBanquetEventOrder, generateBreakdownCalculation } from './eventReports';
 import { AuthController } from '../auth.controller';
@@ -533,17 +533,9 @@ export class ReportController {
           });
         }
       } else {
-        const data = getGenericReport(path, params);
-        success(res, data, 'Success', 200, {
-          pagination: {
-            current_page: 1,
-            last_page: 1,
-            per_page: data.length,
-            total: data.length,
-            from: 0,
-            to: data.length,
-          },
-        });
+        // No handler mapped for this report path — fail loudly instead of the
+        // old silent fake-success row (Laravel has no such fallback).
+        notFound(res, `Report not implemented: ${path}`);
       }
     } catch (err: any) {
       console.error('Report handleReport error:', err);
