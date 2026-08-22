@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -889,7 +889,7 @@ export class GuestController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, 84),
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Document list error:', err); error(res, 'Failed to list documents', 500); }

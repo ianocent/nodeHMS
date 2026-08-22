@@ -1208,7 +1208,60 @@ export class SystemController {
       // safe to re-run; kept outside the atomic block because it manages its own client.
       await storeSystemBalance(dateObj, prevObj, propertyId);
 
-      success(res, { bussinesDate: dateStr, name: req.user?.name ?? '', image: '' }, 'Success');
+      // Response contract (= Laravel NightAuditController:851-891): fresh token,
+      // shift state, next business date.
+      const authUserId = req.user?.id ?? 0n;
+      const authUser: any = await getPrisma().users.findUnique({
+        where: { id: authUserId },
+        select: { email: true, username: true, name: true },
+      });
+      const { plainTextToken } = await TokenService.createToken(authUserId, authUser?.email ?? String(authUserId), [`can-${propertyId}`]);
+
+      const lastAudit = await getPrisma().log_audits.findFirst({
+        where: { property_id: Number(propertyId) },
+        orderBy: { date: 'desc' },
+      });
+      const nextBd = lastAudit?.date
+        ? new Date(new Date(lastAudit.date).getTime() + 86400000).toISOString().slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
+      const nbStart = new Date(`${nextBd}T00:00:00`);
+      const nbEnd = new Date(nbStart.getTime() + 86400000);
+      const shiftCount = await getPrisma().shifts.count({
+        where: { property_id: Number(propertyId), user_id: authUserId, date: { gte: nbStart, lt: nbEnd }, end: null },
+      });
+
+      let isNeedShift = false;
+      try {
+        const roleLinks = await getPrisma().model_has_roles.findMany({
+          where: { model_type: 'App\\Models\\User', model_id: authUserId },
+          select: { role_id: true },
+        });
+        const roleIds = roleLinks.map((r) => r.role_id);
+        const rm = roleIds.length ? await getPrisma().role_menu_crud.findMany({ where: { role_id: { in: roleIds } }, select: { menu_id: true } }) : [];
+        const menuIds = rm.map((m) => m.menu_id);
+        if (menuIds.length) {
+          const txMenus = await getPrisma().menus.count({ where: { id: { in: menuIds }, visibility: 'transaction' } });
+          isNeedShift = txMenus > 0;
+        }
+      } catch { isNeedShift = true; }
+
+      success(res, {
+        code: 200,
+        name: (await getPrisma().properties.findUnique({ where: { id: BigInt(propertyId) }, select: { name: true } }))?.name ?? '',
+        image: '',
+        data: {
+          name: authUser?.name ?? req.user?.name ?? '',
+          role: [],
+          username: authUser?.username ?? '',
+          email: authUser?.email ?? '',
+          access_token: plainTextToken,
+          expires_token: new Date().toISOString().slice(0, 19).replace('T', ' '),
+          force_change_password: false,
+          is_shift: shiftCount > 0,
+          is_need_shift: isNeedShift,
+          bussinesDate: nextBd,
+        },
+      });
     } catch (err: any) {
       console.error('Night audit post error:', err);
       error(res, 'Failed to post night audit', 500);

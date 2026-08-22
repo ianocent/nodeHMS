@@ -43,6 +43,45 @@ function idParam(val: any): bigint | null {
 
 const AUDIT_KEYS = ['id', 'created_at', 'updated_at', 'deleted_at', 'created_by', 'updated_by', 'deleted_by', 'undefined'];
 
+// Laravel ShiftRosterController::buildAndValidateRanges (:163-209):
+// max 3 ranges, per-range cap 8 jam (overnight wraps +24h), total cap 16 jam,
+// index 0 selalu sinkron dengan time_start/time_end.
+function validateShiftRosterRanges(body: any): string | null {
+  let ranges: { start: any; end: any }[] =
+    Array.isArray(body.time_ranges) && body.time_ranges.length > 0
+      ? body.time_ranges.map((r: any) => ({ start: r.start, end: r.end }))
+      : [{ start: body.time_start, end: body.time_end }];
+  if (!ranges.length) ranges = [{ start: body.time_start, end: body.time_end }];
+
+  // index 0 always mirrors the scalar fields
+  ranges[0] = { start: body.time_start, end: body.time_end };
+
+  if (ranges.length > 3) return 'Maksimal 3 time range per shift.';
+
+  const toMin = (t: any): number | null => {
+    const s = String(t ?? '');
+    if (!/^\d{1,2}:\d{2}$/.test(s)) return null;
+    const [h, m] = s.split(':').map(Number);
+    return h * 60 + m;
+  };
+
+  let totalHours = 0;
+  for (let i = 0; i < ranges.length; i++) {
+    const sm = toMin(ranges[i].start);
+    const em = toMin(ranges[i].end);
+    if (sm === null || em === null) return 'Format jam harus H:i.';
+    let durMinutes = em - sm;
+    if (durMinutes <= 0) durMinutes += 24 * 60; // overnight shift
+    const durHours = durMinutes / 60;
+    if (durHours > 8) return `Range ${i + 1} tidak boleh lebih dari 8 jam.`;
+    totalHours += durHours;
+  }
+  if (totalHours > 16) return 'Total jam kerja tidak boleh lebih dari 16 jam.';
+
+  body.time_ranges = ranges;
+  return null;
+}
+
 const TIME_ONLY_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
 
 function sanitizeBody(body: any): any {
@@ -376,6 +415,17 @@ export class GenericController {
     try {
       const model = String(req.params.model);
       const modelDelegate = this.getPrismaModel(model);
+
+      // Laravel ShiftRosterController@store validation parity
+      if (model === 'shift_roster') {
+        if (!req.body.name || !req.body.time_start || !req.body.time_end) {
+          badRequest(res, 'name, time_start and time_end are required');
+          return;
+        }
+        const rangeError = validateShiftRosterRanges(req.body);
+        if (rangeError) { badRequest(res, rangeError); return; }
+      }
+
       const data = sanitizeBody(req.body);
       if (!data.property_id && req.user?.lastProperty) data.property_id = BigInt(req.user.lastProperty);
       data.created_at = new Date();
@@ -409,6 +459,17 @@ async update(req: Request, res: Response): Promise<void> {
       if (parsedId === null) { notFound(res, 'Record not found'); return; }
       const existing = await modelDelegate.findUnique({ where: { id: parsedId } });
       if (!existing) { notFound(res, 'Record not found'); return; }
+
+      // Laravel ShiftRosterController@update validation parity
+      if (model === 'shift_roster') {
+        if (!req.body.name || !req.body.time_start || !req.body.time_end) {
+          badRequest(res, 'name, time_start and time_end are required');
+          return;
+        }
+        const rangeError = validateShiftRosterRanges(req.body);
+        if (rangeError) { badRequest(res, rangeError); return; }
+      }
+
       const data = sanitizeBody(req.body);
       data.updated_at = new Date();
       const record = await modelDelegate.update({ where: { id: parsedId }, data });
