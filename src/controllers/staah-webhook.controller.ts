@@ -1,8 +1,10 @@
 import { Request, Response } from 'express';
+import { timingSafeEqual } from 'crypto';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, notFound } from '../utils/response';
+import { enqueueJob } from '../config/queue';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -27,13 +29,64 @@ function toBigInt(val: any): bigint {
   return BigInt(val);
 }
 
+// Laravel validateBasicAuth parity (StaahWebhookController.php:221-268):
+// - BYPASS env flag
+// - credentials from Basic Authorization header (getUser/getPassword) or username/password fields
+// - UNCONFIGURED credentials -> open webhook (never 401)
+// - timing-safe comparison (hash_equals)
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length === bb.length && ab.length > 0) return timingSafeEqual(ab, bb);
+  // Length mismatch / empty: burn a compare to keep timing uniform, then fail.
+  timingSafeEqual(ab, ab);
+  return false;
+}
+
+function parseWebhookCredentials(req: Request): { username: string | null; password: string | null } {
+  const header = req.headers.authorization;
+  if (header && /^basic\s+/i.test(header)) {
+    try {
+      const decoded = Buffer.from(header.replace(/^basic\s+/i, ''), 'base64').toString('utf8');
+      const idx = decoded.indexOf(':');
+      if (idx >= 0) return { username: decoded.slice(0, idx), password: decoded.slice(idx + 1) };
+    } catch {
+      // fall through to field-based lookup
+    }
+  }
+  const body: any = req.body ?? {};
+  const username =
+    (req.headers.username as string) ||
+    (req.query.username as string) ||
+    (typeof body.username === 'string' ? body.username : null);
+  const password =
+    (req.headers.password as string) ||
+    (req.query.password as string) ||
+    (typeof body.password === 'string' ? body.password : null);
+  return { username, password };
+}
+
 function validateStaahWebhookAuth(req: Request): boolean {
   if (process.env.STAAH_WEBHOOK_BYPASS_AUTH === 'true') return true;
-  const username = req.headers['username'] as string || req.query.username as string;
-  const password = req.headers['password'] as string || req.query.password as string;
+
   const validUsername = process.env.STAAH_WEBHOOK_USERNAME;
   const validPassword = process.env.STAAH_WEBHOOK_PASSWORD;
-  return username === validUsername && password === validPassword;
+  // Laravel parity (:234-238): no credentials configured -> skip auth entirely.
+  if (!validUsername && !validPassword) return true;
+
+  const { username, password } = parseWebhookCredentials(req);
+  if (!username || !password) return false;
+  return safeEqual(validUsername!, username) && safeEqual(validPassword!, password);
+}
+
+// STAAH ack shape (Laravel StaahWebhookController:186-191)
+function ackSuccess(res: Response, notificationId: any): void {
+  res.status(200).json({
+    Status: 'Success',
+    reservation_notif: {
+      reservation_notif_id: notificationId ? [String(notificationId)] : [],
+    },
+  });
 }
 
 export class StaahWebhookController {
@@ -44,7 +97,8 @@ export class StaahWebhookController {
   static async handleReservationPush(req: Request, res: Response): Promise<void> {
     try {
       if (!validateStaahWebhookAuth(req)) {
-        error(res, 'Unauthorized', 401);
+        // Plain JSON — STAAH cannot read the encrypted app envelope (Laravel :153-155)
+        res.status(401).json({ code: 401, message: 'Unauthorized' });
         return;
       }
       const payload = req.body;
@@ -52,7 +106,7 @@ export class StaahWebhookController {
       // Extract reservation data
       const reservation = extractReservation(payload);
       if (!reservation) {
-        error(res, 'No reservation data in payload', 400);
+        res.status(400).json({ code: 400, message: 'No reservation data in payload' });
         return;
       }
 
@@ -60,7 +114,7 @@ export class StaahWebhookController {
       const hotelId = reservation.hotel_id || reservation.hotelid || reservation.Su_hotelid
         || payload.hotel_id || payload.hotelid || payload.Su_hotelid;
       if (!hotelId) {
-        error(res, 'Hotel ID not found in payload', 400);
+        res.status(400).json({ code: 400, message: 'Hotel ID not found in payload' });
         return;
       }
 
@@ -76,7 +130,7 @@ export class StaahWebhookController {
         where: { hotel_id: hotelId, deleted_at: null },
       });
       if (!interface_) {
-        error(res, `Hotel ${hotelId} not registered`, 404);
+        res.status(400).json({ code: 400, message: `Hotel ${hotelId} not registered` });
         return;
       }
 
@@ -87,7 +141,9 @@ export class StaahWebhookController {
           where: { booking_id: existingBookingId, staah_interface_id: interface_.id },
         });
         if (existing && existing.reservation_id) {
-          success(res, { notification_id: notificationId, booking_id: existingBookingId }, 'Already processed');
+          // Laravel still acks Success for already-linked bookings (StaahWebhookService
+          // links to existing folio and returns the notification id).
+          ackSuccess(res, existing.notification_id ?? notificationId);
           return;
         }
       }
@@ -151,15 +207,12 @@ export class StaahWebhookController {
         },
       });
 
-      success(res, {
-        id: Number(staahRes.id),
-        notification_id: notificationId,
-        booking_id: existingBookingId,
-        status: 'pending',
-      }, 'Saved to Staah Reservations');
+      // STAAH ack contract (Laravel StaahWebhookController:186-191): plain JSON,
+      // exact shape — NOT the encrypted app envelope.
+      ackSuccess(res, notificationId);
     } catch (err: any) {
       console.error('Staah webhook error:', err);
-      error(res, 'Webhook processing failed: ' + err.message, 500);
+      res.status(500).json({ code: 500, message: 'Webhook processing failed: ' + err.message });
     }
   }
 
@@ -182,101 +235,16 @@ export class StaahWebhookController {
         return;
       }
 
-      const reservationData = staahRes.mapped_data as any || (staahRes.payload as any);
+      const reservationData = (staahRes.mapped_data as any) || (staahRes.payload as any);
       if (!reservationData) {
         error(res, 'No mapped_data or payload found', 400);
         return;
       }
 
-      // Step 1: Find or create guest profile
-      const propertyId = Number(interface_.property_id);
-      const guestProfile = await findOrCreateGuestProfile(propertyId, reservationData);
-
-      // Step 2: Resolve company from OTA/channel mapping
-      const companyProfileId = await resolveCompanyProfileId(propertyId, reservationData);
-
-      // Step 3: Find room + rate mappings
-      const rooms = extractRooms(reservationData);
-      const room = rooms[0] || {};
-      const staahRoomId = extractValue(room, ['id', 'roomid', 'room_id', 'RoomID', 'InvCode']);
-      const staahRateId = extractValue(room, ['rate_id', 'rateplanid', 'rate_plan_id', 'RatePlanID']);
-
-      const roomMapping = await findRoomMapping(Number(interface_.id), staahRoomId);
-      const rateMapping = await findRateMapping(Number(interface_.id), staahRateId);
-
-      if (!roomMapping || !rateMapping) {
-        error(res, `Room or rate mapping not found: room=${staahRoomId}, rate=${staahRateId}`, 404);
-        return;
-      }
-
-      // Step 4: Generate booking number and create folio
-      const bookingNo = await generateBookingNo(propertyId);
-      const checkInDate = extractDate(reservationData, ['arrival_date', 'checkindate', 'check_in_date', 'arrivaldate', 'arrival']);
-      const checkOutDate = extractDate(reservationData, ['departure_date', 'checkoutdate', 'check_out_date', 'departuredate', 'departure']);
-
-      const folio = await prisma.folios.create({
-        data: {
-          property_id: BigInt(propertyId),
-          type_reservation: 'fit',
-          guest_profile_id: BigInt(guestProfile.id),
-          company_profile_id: companyProfileId ? BigInt(companyProfileId) : 0n,
-          is_compliment_tour_leader: false,
-          first_name: guestProfile.first_name,
-          last_name: guestProfile.last_name,
-          email: guestProfile.email,
-          telp: guestProfile.mobile_phone,
-          check_in_date: checkInDate ? new Date(checkInDate) : null,
-          check_out_date: checkOutDate ? new Date(checkOutDate) : null,
-          booking_no: bookingNo,
-          status_reservation: 1,
-          status: 1,
-          is_booking_engine: false,
-          parent: 0n,
-          created_at: new Date(),
-          updated_at: new Date(),
-        },
-      });
-
-      // Step 5: Create reservation records per night
-      const nightDiff = checkInDate && checkOutDate
-        ? Math.ceil((new Date(checkOutDate).getTime() - new Date(checkInDate).getTime()) / (1000 * 60 * 60 * 24))
-        : 0;
-
-      for (let i = 0; i < nightDiff; i++) {
-        const date = checkInDate ? new Date(checkInDate) : new Date();
-        date.setDate(date.getDate() + i);
-
-        await prisma.reservations.create({
-          data: {
-            property_id: BigInt(propertyId),
-            rate_id: BigInt(rateMapping.rate_id),
-            folio_id: folio.id,
-            room_type_id: BigInt(roomMapping.room_type_id),
-            check_in_date: checkInDate ? new Date(checkInDate) : null,
-            check_out_date: checkOutDate ? new Date(checkOutDate) : null,
-            date: date,
-            night: nightDiff,
-            adult: room.numberofadults || room.adult || 2,
-            child: room.numberofchildren || room.child || 0,
-            status_reservation: 1,
-            status: 1,
-          },
-        });
-      }
-
-      // Step 6: Update StaahReservation with folio reference
-      await prisma.staah_reservations.update({
-        where: { id: staahRes.id },
-        data: {
-          status: '1',
-          folio_id: folio.id,
-          reservation_id: folio.id,
-          message: 'Confirmed',
-          processed_at: new Date(),
-        },
-      });
-
-      success(res, { folio_id: Number(folio.id), booking_no: bookingNo }, 'Booking confirmed');
+      const result = await createStaahBookingCore(Number(interface_.id), reservationData);
+      // Laravel StaahWebhookService pushes availability after booking creation (:864)
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(interface_.property_id) });
+      success(res, { folio_id: Number(result.folioId), booking_no: result.bookingNo }, 'Booking confirmed');
     } catch (err: any) {
       console.error('Staah confirm booking error:', err);
       error(res, 'Failed to confirm booking: ' + err.message, 500);
@@ -285,6 +253,93 @@ export class StaahWebhookController {
 }
 
 // ── Helper functions ──
+
+// Core booking creation shared by the manual confirm endpoint AND the
+// CreateStaahBooking queue job (Laravel StaahWebhookService::createBooking).
+export async function createStaahBookingCore(
+  staahInterfaceId: number,
+  reservationData: any
+): Promise<{ folioId: bigint; bookingNo: string }> {
+  const interface_: any = await prisma.staah_interfaces.findUnique({ where: { id: BigInt(staahInterfaceId) } });
+  if (!interface_) throw new Error('Staah interface not found');
+
+  // Step 1: Find or create guest profile
+  const propertyId = Number(interface_.property_id);
+  const guestProfile = await findOrCreateGuestProfile(propertyId, reservationData);
+
+  // Step 2: Resolve company from OTA/channel mapping
+  const companyProfileId = await resolveCompanyProfileId(propertyId, reservationData);
+
+  // Step 3: Find room + rate mappings
+  const rooms = extractRooms(reservationData);
+  const room = rooms[0] || {};
+  const staahRoomId = extractValue(room, ['id', 'roomid', 'room_id', 'RoomID', 'InvCode']);
+  const staahRateId = extractValue(room, ['rate_id', 'rateplanid', 'rate_plan_id', 'RatePlanID']);
+
+  const roomMapping = await findRoomMapping(staahInterfaceId, staahRoomId);
+  const rateMapping = await findRateMapping(staahInterfaceId, staahRateId);
+
+  if (!roomMapping || !rateMapping) {
+    throw new Error(`Room or rate mapping not found: room=${staahRoomId}, rate=${staahRateId}`);
+  }
+
+  // Step 4: Generate booking number and create folio
+  const bookingNo = await generateBookingNo(propertyId);
+  const checkInDate = extractDate(reservationData, ['arrival_date', 'checkindate', 'check_in_date', 'arrivaldate', 'arrival']);
+  const checkOutDate = extractDate(reservationData, ['departure_date', 'checkoutdate', 'check_out_date', 'departuredate', 'departure']);
+
+  const folio = await prisma.folios.create({
+    data: {
+      property_id: BigInt(propertyId),
+      type_reservation: 'fit',
+      guest_profile_id: BigInt(guestProfile.id),
+      company_profile_id: companyProfileId ? BigInt(companyProfileId) : 0n,
+      is_compliment_tour_leader: false,
+      first_name: guestProfile.first_name,
+      last_name: guestProfile.last_name,
+      email: guestProfile.email,
+      telp: guestProfile.mobile_phone,
+      check_in_date: checkInDate ? new Date(checkInDate) : null,
+      check_out_date: checkOutDate ? new Date(checkOutDate) : null,
+      booking_no: bookingNo,
+      status_reservation: 1,
+      status: 1,
+      is_booking_engine: false,
+      parent: 0n,
+      created_at: new Date(),
+      updated_at: new Date(),
+    },
+  });
+
+  // Step 5: Create reservation records per night
+  const nightDiff = checkInDate && checkOutDate
+    ? Math.ceil((new Date(checkOutDate).getTime() - new Date(checkInDate).getTime()) / (1000 * 60 * 60 * 24))
+    : 0;
+
+  for (let i = 0; i < nightDiff; i++) {
+    const date = checkInDate ? new Date(checkInDate) : new Date();
+    date.setDate(date.getDate() + i);
+
+    await prisma.reservations.create({
+      data: {
+        property_id: BigInt(propertyId),
+        rate_id: BigInt(rateMapping.rate_id),
+        folio_id: folio.id,
+        room_type_id: BigInt(roomMapping.room_type_id),
+        check_in_date: checkInDate ? new Date(checkInDate) : null,
+        check_out_date: checkOutDate ? new Date(checkOutDate) : null,
+        date: date,
+        night: nightDiff,
+        adult: room.numberofadults || room.adult || 2,
+        child: room.numberofchildren || room.child || 0,
+        status_reservation: 1,
+        status: 1,
+      },
+    });
+  }
+
+  return { folioId: folio.id, bookingNo };
+}
 
 function extractReservation(payload: any): any | null {
   const reservations = payload.reservations || payload.Reservations

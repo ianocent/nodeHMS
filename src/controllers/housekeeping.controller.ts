@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -93,7 +93,7 @@ export class HousekeepingController {
       ]);
 
 success(res, bigintToNumber(data), 'Success', 200, {
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, 158),
         table: [
           { label: 'Code', key: 'code', type: 'text', is_search: true },
           { label: 'Item Name', key: 'item_name', type: 'text', is_search: true },
@@ -114,12 +114,52 @@ success(res, bigintToNumber(data), 'Success', 200, {
   static async setupStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { code, item_name, category, used_by, description, is_required, sort, status } = req.body;
+      const { code, item_name, category, used_by, description, is_required, mandatory_inspection, sort, status, room_types_detail = [], rooms_detail = [] } = req.body;
       if (!code || !item_name) { badRequest(res, 'code and item_name are required'); return; }
 
+      // Laravel HousekeepingSetupController@store (:139-186): setup + qty pivots.
       const data = await prisma.housekeeping_setups.create({
-        data: { property_id: pid, code, item_name, category, used_by, description, is_required: is_required ?? true, sort: num(sort, 0), status: status ?? true, created_at: new Date(), created_by: req.user?.id },
+        data: {
+          property_id: pid,
+          code: String(code).toUpperCase(),
+          item_name,
+          category,
+          used_by,
+          description,
+          is_required: is_required ?? true,
+          mandatory_inspection: mandatory_inspection ?? false,
+          sort: num(sort, 0),
+          status: status ?? true,
+          created_at: new Date(),
+          created_by: req.user?.id,
+        },
       });
+
+      for (const row of room_types_detail) {
+        if (!row?.room_type_id) continue;
+        await prisma.housekeeping_setup_room_types.create({
+          data: {
+            property_id: pid,
+            housekeeping_setup_id: data.id,
+            room_type_id: BigInt(row.room_type_id),
+            qty: Number(row.qty ?? 1),
+            is_required: row.is_required ?? true,
+          },
+        });
+      }
+      for (const row of rooms_detail) {
+        if (!row?.room_id) continue;
+        await prisma.housekeeping_setup_rooms.create({
+          data: {
+            property_id: pid,
+            housekeeping_setup_id: data.id,
+            room_id: BigInt(row.room_id),
+            qty: Number(row.qty ?? 1),
+            is_required: row.is_required ?? true,
+          },
+        });
+      }
+
       success(res, bigintToNumber(data), 'Setup created', 201);
     } catch (err: any) { console.error('Setup store error:', err); error(res, 'Failed to create setup', 500); }
   }
@@ -127,7 +167,14 @@ success(res, bigintToNumber(data), 'Success', 200, {
   static async setupShow(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const data = await prisma.housekeeping_setups.findUnique({ where: { id } });
+      // Laravel edit() returns the setup WITH its rooms/room-types qty details.
+      const data = await prisma.housekeeping_setups.findUnique({
+        where: { id },
+        include: {
+          housekeeping_setup_room_types: { select: { room_type_id: true, qty: true, is_required: true } },
+          housekeeping_setup_rooms: { select: { room_id: true, qty: true, is_required: true } },
+        },
+      });
       if (!data) { notFound(res, 'Setup not found'); return; }
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to load setup', 500); }
@@ -136,21 +183,55 @@ success(res, bigintToNumber(data), 'Success', 200, {
   static async setupUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const { code, item_name, category, used_by, description, is_required, sort, status } = req.body;
+      const { code, item_name, category, used_by, description, is_required, mandatory_inspection, sort, status, room_types_detail = [], rooms_detail = [] } = req.body;
       const data: any = {};
-      if (code !== undefined) data.code = code;
+      if (code !== undefined) data.code = String(code).toUpperCase();
       if (item_name !== undefined) data.item_name = item_name;
       if (category !== undefined) data.category = category;
       if (used_by !== undefined) data.used_by = used_by;
       if (description !== undefined) data.description = description;
       if (is_required !== undefined) data.is_required = is_required;
+      if (mandatory_inspection !== undefined) data.mandatory_inspection = mandatory_inspection;
       if (sort !== undefined) data.sort = num(sort, 0);
       if (status !== undefined) data.status = status;
       data.updated_at = new Date();
       data.updated_by = req.user?.id;
       await prisma.housekeeping_setups.update({ where: { id }, data });
+
+      // Laravel update (:344-378): full replace both qty pivots.
+      if (Array.isArray(room_types_detail)) {
+        await prisma.housekeeping_setup_room_types.deleteMany({ where: { housekeeping_setup_id: id } });
+        for (const row of room_types_detail) {
+          if (!row?.room_type_id) continue;
+          await prisma.housekeeping_setup_room_types.create({
+            data: {
+              property_id: BigInt(req.user?.lastProperty ?? 0),
+              housekeeping_setup_id: id,
+              room_type_id: BigInt(row.room_type_id),
+              qty: Number(row.qty ?? 1),
+              is_required: row.is_required ?? true,
+            },
+          });
+        }
+      }
+      if (Array.isArray(rooms_detail)) {
+        await prisma.housekeeping_setup_rooms.deleteMany({ where: { housekeeping_setup_id: id } });
+        for (const row of rooms_detail) {
+          if (!row?.room_id) continue;
+          await prisma.housekeeping_setup_rooms.create({
+            data: {
+              property_id: BigInt(req.user?.lastProperty ?? 0),
+              housekeeping_setup_id: id,
+              room_id: BigInt(row.room_id),
+              qty: Number(row.qty ?? 1),
+              is_required: row.is_required ?? true,
+            },
+          });
+        }
+      }
+
       success(res, null, 'Setup updated');
-    } catch (err: any) { error(res, 'Failed to update setup', 500); }
+    } catch (err: any) { console.error('Setup update error:', err); error(res, 'Failed to update setup', 500); }
   }
 
   static async setupDestroy(req: Request, res: Response): Promise<void> {
@@ -314,7 +395,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
           business_date: businessDate,
           currentHousekeepers: [],
         },
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, 158),
         search_data: [
           { label: 'Room Status', key: 'room_status', type: 'select', valueOptions: Object.values(ROOM_STATUSES).map((s) => ({ value: s.id, label: s.name })) },
           { label: 'Maid Status', key: 'maid_status', type: 'select', valueOptions: Object.values(MAID_STATUSES).map((s) => ({ value: s.id, label: s.name })) },
@@ -468,7 +549,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
           { label: 'Work type', key: 'work_type', type: 'select', valueOptions: workTypes },
           { label: 'Assign To', key: 'assign_to', type: 'select', valueOptions: [] },
         ],
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, 158),
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Work order list error:', err); error(res, 'Failed to list work orders', 500); }
@@ -478,11 +559,58 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to } = req.body;
+
+      // Laravel validator parity (WorkOrderController:143-152)
+      if (!reported_by) { badRequest(res, 'The reported by field is required.'); return; }
+      if (!date) { badRequest(res, 'The date field is required.'); return; }
       if (!work_description) { badRequest(res, 'work_description is required'); return; }
 
       const areaId = typeof area === 'object' && area !== null ? area?.value : area;
       const workTypeId = typeof work_type === 'object' && work_type !== null ? work_type?.value : work_type;
       const unique = unique_code ?? Buffer.from(new Date().toISOString().replace(/\D/g, '').slice(0, 14)).toString('base64');
+
+      const bussinesDate = await AuthController.getBusinessDate(pid);
+
+      // ── Laravel store guards (:155-206) ──
+      let roomRow: any = null;
+      if (room_id) {
+        roomRow = await prisma.rooms.findUnique({ where: { id: BigInt(room_id) } });
+        if (!roomRow) { notFound(res, 'Room not found'); return; }
+
+        // Reserved check: reservation on this room+date whose folio is reservation/check-in
+        const reserved = await prisma.reservations.findFirst({
+          where: {
+            room_id: BigInt(room_id),
+            date: new Date(date),
+            deleted_at: null,
+            folios: { is: { status_reservation: { in: [3, 0] }, deleted_at: null } },
+          },
+          select: { id: true },
+        });
+        if (reserved) { notFound(res, 'Room is already reserved'); return; }
+
+        // Vacant check
+        if (roomRow.room_status !== ROOM_STATUSES.vacant.id) {
+          badRequest(res, 'Room status is not vacant');
+          return;
+        }
+
+        // Duplicate open work order
+        const dupWo = await prisma.work_orders.findFirst({
+          where: {
+            date: { lte: new Date(date) },
+            room_id: BigInt(room_id),
+            OR: [{ end_date: { gt: new Date(date) } }, { end_date: null }],
+            status: 1,
+            deleted_at: null,
+          },
+          select: { id: true },
+        });
+        if (dupWo) {
+          badRequest(res, 'Work order is already exists for this room');
+          return;
+        }
+      }
 
       const data = await prisma.work_orders.create({
         data: {
@@ -503,12 +631,38 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
       });
       await syncWorkOrderTypes(data.id, areaId, workTypeId);
 
-      // Sync room_status=4 (OOO) if room assigned
-      if (data.room_id) {
+      // Sync room_status=OOO — hanya jika tanggal WO == business date (Laravel :208-212)
+      if (data.room_id && date && bussinesDate === String(date).slice(0, 10)) {
         await prisma.rooms.update({
           where: { id: data.room_id },
           data: { room_status: ROOM_STATUSES.out_of_order.id, updated_at: new Date() },
         });
+      }
+
+      // FCM assignment notification (Laravel sendWorkOrderAssignmentNotification)
+      if (assign_to) {
+        try {
+          const assignedUser = await prisma.users.findUnique({ where: { id: BigInt(assign_to) }, select: { fcm_token: true } });
+          if (assignedUser?.fcm_token) {
+            const roomName = roomRow?.name ?? 'Room TBD';
+            const workType = workTypeId != null ? String(workTypeId) : 'Maintenance';
+            await firebaseService.sendToToken({
+              token: assignedUser.fcm_token,
+              payload: {
+                title: '🛠️ New Work Order Assigned',
+                body: `Anda ditugaskan untuk mengerjakan Work Order di ${roomName} - ${workType}`,
+                data: {
+                  type: 'work_order_assignment',
+                  work_order_id: String(Number(data.id)),
+                  room_id: data.room_id ? String(Number(data.room_id)) : '',
+                  date: date ?? '',
+                },
+              },
+            });
+          }
+        } catch (fcmErr: any) {
+          console.error('Notif Work Order Assignment Error:', fcmErr?.message);
+        }
       }
 
       success(res, bigintToNumber(data), 'Work order created', 201);
@@ -556,66 +710,50 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
 static async workOrderUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to, status_work_order, status, estimated_time, start_date, end_date, start_time, end_time } = req.body;
+      const { area, work_type, assign_to, status_work_order, start_date, end_date, start_time, end_time, work_description, notes } = req.body;
 
-      // Get old work order for room_id comparison
-      const oldWo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, end_date: true } });
-      if (!oldWo) { notFound(res, 'Work order not found'); return; }
-      const oldRoomId = oldWo.room_id;
+      const oldWo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, start_date: true, assign_to: true, deleted_at: true } });
+      if (!oldWo || oldWo.deleted_at) { notFound(res, 'Work order not found'); return; }
 
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const bussinesDate = await AuthController.getBusinessDate(pid);
+
+      // Normalize assign_to: object {value,label} atau scalar (Laravel update :331-338)
+      let assignToVal = typeof assign_to === 'object' && assign_to !== null ? assign_to?.value : assign_to;
+      if (assignToVal === '' || assignToVal === undefined) assignToVal = null;
+
+      // Laravel whitelist (:394-397): only these fields are updatable.
       const data: any = { updated_at: new Date(), updated_by: req.user?.id };
-      if (reported_by !== undefined) data.reported_by = reported_by ? BigInt(reported_by) : null;
-      if (unique_code !== undefined) data.unique_code = unique_code;
-      if (area !== undefined) data.area = area != null ? String(area) : null;
-      if (work_type !== undefined) data.work_type = work_type != null ? String(work_type) : null;
-      if (date !== undefined) data.date = date ? new Date(date) : null;
-      if (room_id !== undefined) data.room_id = room_id ? BigInt(room_id) : null;
       if (work_description !== undefined) data.work_description = work_description;
       if (notes !== undefined) data.notes = notes;
-      if (assign_to !== undefined) data.assign_to = assign_to ? BigInt(assign_to) : null;
       if (status_work_order !== undefined) data.status_work_order = num(status_work_order, 0);
-      if (status !== undefined) data.status = num(status, 1);
-      if (estimated_time !== undefined) data.estimated_time = estimated_time ? new Date(estimated_time) : null;
-      if (start_date !== undefined) data.start_date = start_date ? new Date(start_date) : null;
-      if (end_date !== undefined) data.end_date = end_date ? new Date(end_date) : null;
-      if (start_time !== undefined) data.start_time = start_time;
-      if (end_time !== undefined) data.end_time = end_time;
+      if (assignToVal !== null && assignToVal !== undefined) data.assign_to = BigInt(assignToVal);
+
+      // start/end dipaksa ke business date + waktu sekarang (Laravel :370-389)
+      if (start_date !== undefined && start_date !== null) {
+        data.start_date = new Date(`${bussinesDate}T00:00:00`);
+        data.start_time = new Date().toTimeString().slice(0, 8);
+      }
+      if (end_date !== undefined && end_date !== null) {
+        data.end_date = new Date(`${bussinesDate}T00:00:00`);
+        data.end_time = new Date().toTimeString().slice(0, 8);
+        if (!oldWo.start_date) {
+          data.start_date = new Date(`${bussinesDate}T00:00:00`);
+          data.start_time = new Date().toTimeString().slice(0, 8);
+        }
+      }
 
       await prisma.work_orders.update({ where: { id }, data });
 
-      const newRoomId = data.room_id ?? oldRoomId;
-      const endDateSet = data.end_date !== undefined && data.end_date !== null;
-
-      // Room status sync
-      if (oldRoomId && oldRoomId !== newRoomId) {
-        // Room changed: clear old room
-        await prisma.rooms.update({
-          where: { id: oldRoomId },
-          data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
-        });
-      }
-      if (newRoomId && newRoomId !== oldRoomId) {
-        // New room assigned: set OOO
-        await prisma.rooms.update({
-          where: { id: newRoomId },
-          data: { room_status: ROOM_STATUSES.out_of_order.id, updated_at: new Date() },
-        });
-      }
-      if (endDateSet) {
-        // Work order completed: clear OOO on current room
-        const targetRoomId = newRoomId;
-        if (targetRoomId) {
-          // Check if room has other active work orders
-          const otherWo = await prisma.work_orders.findFirst({
-            where: { room_id: targetRoomId, end_date: null, status: 1, id: { not: id } },
-            select: { id: true },
+      // Room status sync — Laravel HANYA menyentuh room saat end_date diset:
+      // OOO -> vacant+dirty (:390-401). Room change TIDAK pernah mengubah room lama/baru.
+      if (data.end_date !== undefined && data.end_date !== null && oldWo.room_id) {
+        const roomRow = await prisma.rooms.findUnique({ where: { id: oldWo.room_id }, select: { room_status: true } });
+        if (roomRow && roomRow.room_status === ROOM_STATUSES.out_of_order.id) {
+          await prisma.rooms.update({
+            where: { id: oldWo.room_id },
+            data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
           });
-          if (!otherWo) {
-            await prisma.rooms.update({
-              where: { id: targetRoomId },
-              data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
-            });
-          }
         }
       }
 
@@ -625,23 +763,49 @@ static async workOrderUpdate(req: Request, res: Response): Promise<void> {
         await prisma.model_has_types.deleteMany({ where: { model_id: id, model_type: { contains: 'WorkOrder' } } });
         await syncWorkOrderTypes(id, areaId, workTypeId);
       }
+
+      // FCM saat assignment BARU (Laravel :411-415)
+      if (assignToVal !== null && assignToVal !== undefined && String(assignToVal) !== String(oldWo.assign_to ?? '')) {
+        try {
+          const assignedUser = await prisma.users.findUnique({ where: { id: BigInt(assignToVal) }, select: { fcm_token: true } });
+          if (assignedUser?.fcm_token) {
+            const woRoom = await prisma.rooms.findUnique({ where: { id: BigInt(oldWo.room_id!) }, select: { name: true } }).catch(() => null);
+            await firebaseService.sendToToken({
+              token: assignedUser.fcm_token,
+              payload: {
+                title: '🛠️ New Work Order Assigned',
+                body: `Anda ditugaskan untuk mengerjakan Work Order di ${woRoom?.name ?? 'Room TBD'} - Maintenance`,
+                data: {
+                  type: 'work_order_assignment',
+                  work_order_id: String(Number(id)),
+                  room_id: oldWo.room_id ? String(Number(oldWo.room_id)) : '',
+                  date: '',
+                },
+              },
+            });
+          }
+        } catch (fcmErr: any) {
+          console.error('Notif Work Order Assignment Error:', fcmErr?.message);
+        }
+      }
+
       success(res, null, 'Work order updated');
-    } catch (err: any) { error(res, 'Failed to update work order', 500); }
+    } catch (err: any) { console.error('Failed to update work order:', err); error(res, 'Failed to update work order', 500); }
   }
 
 static async workOrderDestroy(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const wo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true } });
-      await prisma.work_orders.update({ where: { id }, data: { status: 0 } });
+      const wo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, deleted_at: true } });
+      if (!wo || wo.deleted_at) { notFound(res, 'Work order not found'); return; }
 
-      // Clear OOO on room if no other active work orders
-      if (wo?.room_id) {
-        const otherWo = await prisma.work_orders.findFirst({
-          where: { room_id: wo.room_id, end_date: null, status: 1, id: { not: id } },
-          select: { id: true },
-        });
-        if (!otherWo) {
+      // Soft delete (Laravel SoftDeletes)
+      await prisma.work_orders.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+
+      // Restore room HANYA jika masih OOO (Laravel :486-496)
+      if (wo.room_id) {
+        const roomRow = await prisma.rooms.findUnique({ where: { id: wo.room_id }, select: { room_status: true } });
+        if (roomRow && roomRow.room_status === ROOM_STATUSES.out_of_order.id) {
           await prisma.rooms.update({
             where: { id: wo.room_id },
             data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: new Date() },
@@ -651,6 +815,19 @@ static async workOrderDestroy(req: Request, res: Response): Promise<void> {
 
       success(res, null, 'Work order deleted');
     } catch (err: any) { error(res, 'Failed to delete work order', 500); }
+  }
+
+  // Laravel WorkOrderController@restore (:506-512): withTrashed -> restore
+  static async workOrderRestore(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParam(req.params.id);
+      const wo = await prisma.work_orders.findUnique({ where: { id }, select: { deleted_at: true } });
+      if (!wo) { notFound(res, 'Work order not found'); return; }
+      if (!wo.deleted_at) { badRequest(res, 'Work order is not deleted'); return; }
+
+      await prisma.work_orders.update({ where: { id }, data: { deleted_at: null, updated_at: new Date(), updated_by: req.user?.id } });
+      success(res, null, 'Work order restored successfully');
+    } catch (err: any) { error(res, 'Failed to restore work order', 500); }
   }
 
   // ==================== STOCK ====================
@@ -667,7 +844,7 @@ static async workOrderDestroy(req: Request, res: Response): Promise<void> {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, 158),
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Stock list error:', err); error(res, 'Failed to list stocks', 500); }
@@ -1028,11 +1205,40 @@ success(res, bigintToNumber(data), 'Success', 200, {
           });
         }
 
-        // Update room maid_status to 'dirty' (1) when housekeeper assigned
-        await prisma.rooms.update({
-          where: { id: roomId },
-          data: { maid_status: MAID_STATUSES.dirty.id },
-        });
+        // NOTE: Laravel does NOT touch maid_status here — removed the EXTRA dirty write.
+      }
+
+      // FCM ke setiap HK yang di-assign (Laravel :813-845)
+      try {
+        const assignedRoomIds = Object.entries(selectedRoomId)
+          .filter(([, v]) => v === true)
+          .map(([k]) => k);
+        const roomNames = assignedRoomIds.length
+          ? (await prisma.rooms.findMany({ where: { id: { in: assignedRoomIds.map((id) => BigInt(id)) } }, select: { name: true } }))
+              .map((r: any) => r.name)
+              .join(', ')
+          : '';
+
+        for (const hk of housekeeper) {
+          const hkId = BigInt(hk?.value ?? hk?.id ?? hk);
+          const hkUser = await prisma.users.findUnique({ where: { id: hkId }, select: { fcm_token: true } });
+          if (hkUser?.fcm_token) {
+            await firebaseService.sendToToken({
+              token: hkUser.fcm_token,
+              payload: {
+                title: '🧹 Room Assignment',
+                body: `Kamu telah di-assign untuk membersihkan: ${roomNames}`,
+                data: {
+                  type: 'hk_assignment',
+                  room_ids: assignedRoomIds.join(','),
+                  date: String(date),
+                },
+              },
+            });
+          }
+        }
+      } catch (fcmErr: any) {
+        console.error('Notif assign error:', fcmErr?.message);
       }
 
       success(res, null, 'Batch update successful');
@@ -1081,6 +1287,35 @@ success(res, bigintToNumber(data), 'Success', 200, {
       const { type, checklist, reclean_notes, date } = req.body;
       if (!type) { badRequest(res, 'type is required'); return; }
       const dateObj = date ? new Date(date) : new Date();
+
+      // ── Laravel authorization parity (HouseKeepingRoomStatusController:859-890) ──
+      // Auth check runs against the OPEN history (done_inspection still null).
+      const openHistory = await prisma.housekeeper_history.findFirst({
+        where: { room_id: roomId, date: dateObj, done_inspection: null },
+        orderBy: { created_at: 'desc' },
+      });
+      if (!openHistory) { notFound(res, 'Housekeeper history not found'); return; }
+
+      const currentUserId = req.user?.id;
+      const isAssigned = currentUserId
+        ? await prisma.housekeeper_history_user.findFirst({
+            where: { housekeeper_history_id: openHistory.id, user_id: BigInt(currentUserId) },
+          })
+        : null;
+
+      // Laravel: canInspect & canClean both = hasCrudPermission(172, 'edit')
+      const canEdit = getPermissionFlags(req.user, 172).edit;
+      if (!canEdit) {
+        res.status(403).json({ code: 403, message: 'Unauthorized' });
+        return;
+      }
+      // HK (tanpa permission edit) harus di-assign ke room tersebut.
+      // Catatan: di Laravel kedua flag identik (172 edit), sehingga cek ini
+      // hanya tercapai bila flag berbeda di masa depan — dipertahankan apa adanya.
+      if (!canEdit && !isAssigned) {
+        res.status(403).json({ code: 403, message: 'You are not assigned to this room' });
+        return;
+      }
 
       if (room.room_status === ROOM_STATUSES.due_out.id) {
         error(res, 'Room need to be checked out first', 400);
@@ -1181,7 +1416,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
         success(res, [], 'No room ID provided.', 200, {
           table: housekeeperHistoryTable(),
           pagination: { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 },
-          permission: { view: true, add: true, edit: true, delete: true },
+          permission: getPermissionFlags(req.user, 158),
           search_data: [],
         });
         return;
@@ -1293,7 +1528,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
       success(res, result, 'Success', 200, {
         table: housekeeperHistoryTable(),
         pagination: { current_page: page, last_page: Math.ceil(totalData / limit), per_page: limit, total: totalData, from: totalData ? (page - 1) * limit + 1 : 0, to: Math.min(totalData, page * limit) },
-        permission: { view: true, add: true, edit: true, delete: true },
+        permission: getPermissionFlags(req.user, 158),
         search_data: [],
       });
     } catch (err: any) { console.error('Housekeeper history list error:', err); error(res, 'Failed to fetch housekeeper history', 500); }

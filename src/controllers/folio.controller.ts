@@ -5,6 +5,11 @@ import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { folioBalanceWithoutPosting, transferTransactionsForCheckout } from './front-desk.controller';
 import { AuthController } from './auth.controller';
+import { enqueueJob } from '../config/queue';
+
+function formatDate(d: Date): string {
+  return d.toISOString().split('T')[0];
+}
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -707,6 +712,12 @@ export class FolioController {
       await prisma.folios.update({ where: { id }, data: updateData });
 
       const updated: any = await prisma.folios.findUnique({ where: { id } });
+      // Laravel Folio::setUpdateStatus dispatches SyncStaahRoomAvailability (:2100)
+      enqueueJob('sync-staah-room-availability', {
+        propertyId: Number(updated?.property_id ?? 0),
+        dateFrom: updated?.check_in_date ? formatDate(updated.check_in_date) : undefined,
+        dateTo: updated?.check_out_date ? formatDate(updated.check_out_date) : undefined,
+      });
       success(res, bigintToNumber(updated), 'Status updated successfully');
     } catch (err: any) {
       console.error('Folio updateStatus error:', err);

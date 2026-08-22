@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -7,7 +7,13 @@ import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { findPromosForNight, priceNight, PromoLike } from '../utils/reservationPricing';
 import { AuthController } from './auth.controller';
+import { enqueueJob } from '../config/queue';
+
+function formatDate(d: Date): string {
+  return d.toISOString().split('T')[0];
+}
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -298,6 +304,54 @@ async function getRevenueCharge(rows: any[]): Promise<any> {
       { label: 'Total Room Charge', value: moneyFormat(sum(chargeTotal)) },
     ],
   };
+}
+
+// Laravel Folio ledger rebuild parity (Folio.php:2690-2734).
+// Rebuild folio ledgers from CodeBilling x CompanyProfileBillingSetup.
+export async function rebuildFolioLedgers(folioId: bigint, propertyId: bigint, companyProfileId: bigint | null, guestProfileId: bigint | null): Promise<void> {
+  const codeBillings = await prisma.code_billings.findMany({
+    where: { deleted_at: null, status: STATUS_ACTIVE },
+  });
+  const setups = companyProfileId
+    ? await prisma.company_profile_billing_setups.findMany({
+        where: { deleted_at: null, company_profile_id: companyProfileId },
+      })
+    : [];
+  const setupByBilling = new Map<number, any>(setups.map((s) => [Number(s.code_billing_id), s]));
+
+  await prisma.ledgers.deleteMany({ where: { folio_id: Number(folioId) } });
+
+  let sort = 0;
+  for (const cb of codeBillings) {
+    const setup = setupByBilling.get(Number(cb.id));
+    let profileableType: string;
+    let profileableId: number | null = null;
+    if (setup) {
+      if (String(setup.billing) === '1') {
+        profileableType = 'App\\Models\\CompanyProfile';
+        profileableId = companyProfileId ? Number(companyProfileId) : null;
+      } else {
+        profileableType = 'App\\Models\\GuestProfile';
+        profileableId = guestProfileId ? Number(guestProfileId) : null;
+      }
+    } else if (companyProfileId) {
+      profileableType = 'App\\Models\\CompanyProfile';
+      profileableId = Number(companyProfileId);
+    } else {
+      profileableType = 'App\\Models\\GuestProfile';
+      profileableId = guestProfileId ? Number(guestProfileId) : null;
+    }
+    await prisma.ledgers.create({
+      data: {
+        property_id: Number(propertyId),
+        folio_id: Number(folioId),
+        code_billing_id: cb.id,
+        status: 1,
+        sort: sort++,
+        ...(profileableId ? { profileable_type: profileableType, profileable_id: profileableId } : {}),
+      },
+    });
+  }
 }
 
 async function fetchCodePostOptions(): Promise<{ options: any[]; byId: Map<any, any> }> {
@@ -941,6 +995,32 @@ success(res, formatted, 'Success', 200, {
         ? await prisma.company_profiles.findUnique({ where: { id: resolvedCompanyId } })
         : null;
 
+      // Pricing inputs (Laravel Folio::saveReservation engine)
+      const property = await prisma.properties.findUnique({ where: { id: propertyId! }, select: { is_tax: true } });
+      const isTax = (property as any)?.is_tax === 1;
+      const uniqueRateIds = [...new Set(reservation_list.map((i: any) => String(i.rate_id)).filter((r: string) => r && r !== '0'))] as string[];
+      const rateRows = uniqueRateIds.length
+        ? await prisma.rates.findMany({
+            where: { id: { in: uniqueRateIds.map((r) => BigInt(r)) } },
+            select: { id: true, code_post_id: true, name: true },
+          })
+        : [];
+      const rateByIdPricing = new Map<number, any>(rateRows.map((r) => [Number(r.id), r]));
+      const codePostIds = [...new Set(rateRows.map((r) => r.code_post_id).filter(Boolean))];
+      const codePostRows = codePostIds.length
+        ? await prisma.code_posts.findMany({ where: { id: { in: codePostIds } } })
+        : [];
+      const codePostById = new Map<number, any>(codePostRows.map((c) => [Number(c.id), c]));
+      // Laravel trusts FE applied_promo objects verbatim (Folio.php:2469-2471).
+      const bodyAppliedPromos: PromoLike[] = Array.isArray(req.body.applied_promo) ? req.body.applied_promo : [];
+
+      async function promosForNight(rateIdStr: string | null | undefined, night: Date, getNight: number): Promise<PromoLike[]> {
+        if (bodyAppliedPromos.length > 0) return bodyAppliedPromos;
+        if (!promo_code || !rateIdStr || rateIdStr === '0') return [];
+        const rateIdBig = BigInt(rateIdStr);
+        return findPromosForNight(prisma, rateIdBig, night, getNight, promo_code);
+      }
+
       // Determine reservation status
       let statusReservation = is_pending
         ? STATUS_RESERVATION.pending.id
@@ -997,6 +1077,7 @@ success(res, formatted, 'Success', 200, {
           is_compliment_tour_leader: is_compliment_tour_leader || false,
           is_day_use: type_reservation === 'day-use',
           is_virtual: type_reservation === 'vr',
+          promo_code: promo_code || null,
           check_in_date: new Date(actualCheckIn),
           check_out_date: new Date(actualCheckOut),
           res_date: new Date(),
@@ -1019,45 +1100,82 @@ success(res, formatted, 'Success', 200, {
         },
       });
 
-      // Create reservation items (per-night entries)
+      // Create reservation items (per-night entries, priced via Folio::saveReservation parity)
       if (type_reservation !== 'git' && reservation_list.length > 0) {
         for (const item of reservation_list) {
           const itemCheckIn = new Date(item.check_in_date);
-          const itemCheckOut = new Date(item.check_out_date);
-          const nights = Math.ceil((itemCheckOut.getTime() - itemCheckIn.getTime()) / (1000 * 60 * 60 * 24));
+          let itemCheckOut = new Date(item.check_out_date);
+          let nights = Math.ceil((itemCheckOut.getTime() - itemCheckIn.getTime()) / (1000 * 60 * 60 * 24));
 
-          for (let i = 0; i < nights; i++) {
+          // Day-use: Laravel Folio.php:494-501 forces +1 day on items so the night exists.
+          if (type_reservation === 'day-use' && nights < 1) {
+            itemCheckOut = new Date(itemCheckIn);
+            itemCheckOut.setDate(itemCheckOut.getDate() + 1);
+            nights = 1;
+          }
+
+          // Day-use: single priced night multiplied by quantity (Folio.php:2446-2448).
+          const getNight = type_reservation === 'day-use' ? 0 : nights;
+          const loopCount = type_reservation === 'day-use' ? 1 : nights;
+          const rateIdBig = item.rate_id && String(item.rate_id) !== '0' ? BigInt(item.rate_id) : null;
+          const roomTypeIdEff = item.room_type_id ? BigInt(item.room_type_id) : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null);
+
+          for (let i = 0; i < loopCount; i++) {
             const nightDate = new Date(itemCheckIn);
             nightDate.setDate(nightDate.getDate() + i);
+
+            const pricing = await priceNight({
+              prisma,
+              rateId: rateIdBig,
+              roomTypeId: roomTypeIdEff,
+              night: nightDate,
+              getNight,
+              adult: Number(item.adult || 1),
+              child: Number(item.child || 0),
+              quantity: type_reservation === 'day-use' ? Number(item.quantity || 1) : 1,
+              isTax,
+              rateCodePost: rateIdBig ? codePostById.get(Number(rateRows.find((r) => Number(r.id) === Number(rateIdBig))?.code_post_id ?? -1)) ?? null : null,
+              promos: await promosForNight(item.rate_id ? String(item.rate_id) : null, nightDate, getNight),
+            });
 
             await prisma.reservations.create({
               data: {
                 property_id: propertyId!,
                 folio_id: folio.id,
-                rate_id: item.rate_id ? BigInt(item.rate_id) : null,
+                rate_id: rateIdBig,
                 room_type_id: item.room_type_id ? BigInt(item.room_type_id) : null,
                 room_id: item.room_id ? BigInt(item.room_id) : null,
                 adult: item.adult || 1,
                 child: item.child || 0,
                 add_bed: item.add_bed || 0,
                 check_in_date: new Date(item.check_in_date),
-                check_out_date: new Date(item.check_out_date),
+                check_out_date: itemCheckOut,
                 date: nightDate,
                 status_reservation: statusReservation,
                 status: STATUS_ACTIVE,
                 night: nights,
-                amount: 0,
-                amountt: 0,
-                total: 0,
-                service_charge: 0,
-                pb1: 0,
-                tax3: 0,
+                amount: pricing.amount,
+                amountt: pricing.amount,
+                total: pricing.total,
+                service_charge: pricing.service_charge,
+                pb1: pricing.pb1,
+                tax3: pricing.tax3,
+                data: JSON.stringify({
+                  rate_price: pricing.rate_price,
+                  service: pricing.service_charge,
+                  pb1: pricing.pb1,
+                  tax3: pricing.tax3,
+                  total: pricing.total,
+                }),
                 created_by: userId,
               },
             });
           }
         }
       }
+
+      // Ledger rebuild (Laravel Folio.php:2690-2734)
+      await rebuildFolioLedgers(folio.id, propertyId!, resolvedCompanyId, guest_profile_id ? BigInt(guest_profile_id) : null);
 
       // GIT: create sub-folios per room type
       if (type_reservation === 'git' && room_reservation_list.length > 0) {
@@ -1091,28 +1209,62 @@ success(res, formatted, 'Success', 200, {
               },
             });
 
-            await prisma.reservations.create({
-              data: {
-                property_id: propertyId!,
-                folio_id: subFolio.id,
-                room_type_id: BigInt(roomItem.id),
-                adult: roomItem.adult || 1,
-                child: roomItem.child || 0,
-                check_in_date: new Date(actualCheckIn),
-                check_out_date: new Date(actualCheckOut),
-                date: new Date(actualCheckIn),
-                status_reservation: statusReservation,
-                status: STATUS_ACTIVE,
-                night: Math.ceil((new Date(actualCheckOut).getTime() - new Date(actualCheckIn).getTime()) / (1000 * 60 * 60 * 24)),
-                amount: 0,
-                amountt: 0,
-                total: 0,
-                service_charge: 0,
-                pb1: 0,
-                tax3: 0,
-                created_by: userId,
-              },
-            });
+            const gitRateId = roomItem.rate_id && String(roomItem.rate_id) !== '0' ? BigInt(roomItem.rate_id) : null;
+            const gitRoomTypeId = BigInt(roomItem.id);
+            const gitCheckIn = new Date(actualCheckIn);
+            const gitCheckOut = new Date(actualCheckOut);
+            let gitNights = Math.ceil((gitCheckOut.getTime() - gitCheckIn.getTime()) / (1000 * 60 * 60 * 24));
+            if (gitNights < 1) gitNights = 1;
+
+            for (let n = 0; n < gitNights; n++) {
+              const nightDate = new Date(gitCheckIn);
+              nightDate.setDate(nightDate.getDate() + n);
+
+              const pricing = await priceNight({
+                prisma,
+                rateId: gitRateId,
+                roomTypeId: gitRoomTypeId,
+                night: nightDate,
+                getNight: gitNights,
+                adult: Number(roomItem.adult || 1),
+                child: Number(roomItem.child || 0),
+                quantity: 1,
+                isTax,
+                rateCodePost: gitRateId ? codePostById.get(Number(rateRows.find((r) => Number(r.id) === Number(gitRateId))?.code_post_id ?? -1)) ?? null : null,
+                promos: await promosForNight(roomItem.rate_id ? String(roomItem.rate_id) : null, nightDate, gitNights),
+              });
+
+              await prisma.reservations.create({
+                data: {
+                  property_id: propertyId!,
+                  folio_id: subFolio.id,
+                  rate_id: gitRateId,
+                  room_type_id: gitRoomTypeId,
+                  adult: roomItem.adult || 1,
+                  child: roomItem.child || 0,
+                  check_in_date: new Date(actualCheckIn),
+                  check_out_date: new Date(actualCheckOut),
+                  date: nightDate,
+                  status_reservation: statusReservation,
+                  status: STATUS_ACTIVE,
+                  night: gitNights,
+                  amount: pricing.amount,
+                  amountt: pricing.amount,
+                  total: pricing.total,
+                  service_charge: pricing.service_charge,
+                  pb1: pricing.pb1,
+                  tax3: pricing.tax3,
+                  data: JSON.stringify({
+                    rate_price: pricing.rate_price,
+                    service: pricing.service_charge,
+                    pb1: pricing.pb1,
+                    tax3: pricing.tax3,
+                    total: pricing.total,
+                  }),
+                  created_by: userId,
+                },
+              });
+            }
 
             subIndex++;
           }
@@ -1124,6 +1276,12 @@ success(res, formatted, 'Success', 200, {
         : 'Success';
 
       const result = bigintToNumber(folio);
+      // Laravel Folio::saveReservation dispatches SyncStaahRoomAvailability (:2743)
+      enqueueJob('sync-staah-room-availability', {
+        propertyId: Number((folio as any).property_id ?? 0),
+        dateFrom: (folio as any).check_in_date ? formatDate(new Date((folio as any).check_in_date)) : undefined,
+        dateTo: (folio as any).check_out_date ? formatDate(new Date((folio as any).check_out_date)) : undefined,
+      });
       success(res, result, message, 200);
     } catch (err: any) {
       console.error('Reservation store error:', err);
@@ -2186,6 +2344,8 @@ success(res, formatted, 'Success', 200, {
         data: { status_reservation: STATUS_RESERVATION.cancel_reservation.id },
       });
 
+      // Laravel dispatches availability push on cancel too (StaahWebhookService:224 parity)
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(req.user?.lastProperty ?? 0) });
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.cancel_reservation.id }, 'Success');
     } catch (err: any) {
       console.error('Reservation cancel error:', err);
@@ -2443,6 +2603,13 @@ success(res, formatted, 'Success', 200, {
         include: { reservations: { where: { deleted_at: null } } },
       });
 
+      // Room assignment changes availability — Laravel ReservationItemController
+      // dispatches SyncStaahRoomAvailability after assign/move (:681, :857).
+      enqueueJob('sync-staah-room-availability', {
+        propertyId: Number((updatedFolio as any)?.property_id ?? 0),
+        dateFrom: (updatedFolio as any)?.check_in_date ? formatDate(new Date((updatedFolio as any).check_in_date)) : undefined,
+        dateTo: (updatedFolio as any)?.check_out_date ? formatDate(new Date((updatedFolio as any).check_out_date)) : undefined,
+      });
       success(res, bigintToNumber(updatedFolio), 'Success');
     } catch (err: any) {
       console.error('Reservation assign room error:', err);
@@ -2994,8 +3161,8 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
       const appliedPromo: any[] = [];
       const discountByRate = new Map<number, number>();
       let linkByPromo = new Map<number, number>();
+      let linkedPromotions: any[] = [];
       if (promoCode) {
-        let linkedPromotions: any[] = [];
         if (rateIds.length > 0) {
           const links = await prisma.model_has_promotions.findMany({ where: { model_type: 'App\\Models\\Rate', model_id: { in: rateIds } }, select: { promotion_id: true, model_id: true } });
           links.forEach((l: any) => linkByPromo.set(Number(l.promotion_id), Number(l.model_id)));
@@ -3034,23 +3201,83 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
         }
       }
 
+      // Rate -> its own code_post (NOT first active code_posts row) — Laravel getCharge parity.
+      const rateRowList = rateIds.length
+        ? await prisma.rates.findMany({
+            where: { id: { in: rateIds } },
+            select: { id: true, code_post_id: true },
+          })
+        : [];
+      const rateCodePostMap = new Map<number, number | null>(rateRowList.map((r) => [Number(r.id), r.code_post_id ? Number(r.code_post_id) : null]));
+      const gcCodePostIds = [...new Set(rateRowList.map((r) => r.code_post_id).filter(Boolean))] as bigint[];
+      const gcCodePostRows = gcCodePostIds.length ? await prisma.code_posts.findMany({ where: { id: { in: gcCodePostIds } } }) : [];
+      const gcCodePostById = new Map<number, any>(gcCodePostRows.map((c) => [Number(c.id), c]));
+
+      // Validated promos keyed by rate (controller-level stay/validity checks above match Laravel).
+      const promosByRate = new Map<number, PromoLike[]>();
+      if (linkedPromotions.length > 0) {
+        for (const promo of linkedPromotions) {
+          const rid = Number(linkByPromo.get(Number(promo.id)));
+          const list = promosByRate.get(rid) ?? [];
+          list.push(promo as PromoLike);
+          promosByRate.set(rid, list);
+        }
+      } else if (Array.isArray(body.applied_promo)) {
+        for (const ap of body.applied_promo) {
+          if (ap?.rate_id === undefined) continue;
+          const rid = Number(ap.rate_id);
+          const list = promosByRate.get(rid) ?? [];
+          list.push(ap as PromoLike);
+          promosByRate.set(rid, list);
+        }
+      }
+
       const rows: any[] = [];
       for (const item of itemByRate) {
         const rate = rateById.get(Number(item.rate_id));
         if (!rate) continue;
-        const discount = discountByRate.get(Number(item.rate_id)) ?? 0;
-        const calc = calculateCodePost(codePost as any, Number(rate.amount) - discount, isTax);
         const itemCi = new Date(String(item.check_in_date));
-        const itemCo = new Date(String(item.check_out_date));
-        const nightsThis = Math.max(1, Math.ceil((itemCo.getTime() - itemCi.getTime()) / (1000 * 60 * 60 * 24)));
-        for (let i = 0; i < nightsThis; i++) {
+        let itemCo = new Date(String(item.check_out_date));
+        let nightsThis = Math.ceil((itemCo.getTime() - itemCi.getTime()) / (1000 * 60 * 60 * 24));
+        const isDayUse = body.type_reservation === 'day-use';
+        if (isDayUse && nightsThis < 1) {
+          itemCo = new Date(itemCi);
+          itemCo.setDate(itemCo.getDate() + 1);
+          nightsThis = 1;
+        }
+        const getNight = isDayUse ? 0 : Math.max(1, nightsThis);
+        const roomTypeIdEff = item.room_type_id ? BigInt(item.room_type_id) : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null);
+
+        for (let i = 0; i < (isDayUse ? 1 : nightsThis); i++) {
           const nightDate = new Date(itemCi);
           nightDate.setDate(nightDate.getDate() + i);
+
+          // Per-night promo re-check (stay window can exclude individual nights — Folio.php:2472-2482)
+          const nightPromos =
+            promosByRate.get(Number(item.rate_id)) ??
+            (promoCode
+              ? await findPromosForNight(prisma, BigInt(String(item.rate_id)), nightDate, getNight, promoCode)
+              : []);
+
+          const pricing = await priceNight({
+            prisma,
+            rateId: BigInt(String(item.rate_id)),
+            roomTypeId: roomTypeIdEff,
+            night: nightDate,
+            getNight,
+            adult: Number(item.adult || 1),
+            child: Number(item.child || 0),
+            quantity: isDayUse ? Number(item.quantity || 1) : 1,
+            isTax,
+            rateCodePost: gcCodePostById.get(rateCodePostMap.get(Number(item.rate_id)) ?? -1) ?? null,
+            promos: nightPromos,
+          });
+
           rows.push({
             date: nightDate,
-            amountt: Number(rate.amount) - discount,
-            pb1: calc.pb1,
-            service_charge: calc.service,
+            amountt: pricing.amount,
+            pb1: pricing.pb1,
+            service_charge: pricing.service_charge,
             quantity: 1,
           });
         }
@@ -3413,6 +3640,295 @@ const filtered = data.filter((d: any) => d.available > 0);
 
       res.json({ code: 200, message: 'Success', data: arrTemp });
     } catch (err: any) { console.error('Reservation update room parent git error:', err); error(res, 'Failed to update room parent git', 500); }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Reservation sub-resource parity ports (Laravel cms.php:951-966)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // GET /reservation/folio — Laravel getFolio (:4114): autocomplete folio list.
+  // FE autocomplete appends ?search=word / &search=word; rows are {id,name}.
+  static async folioList(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+      const typeReservationParam = req.query['type-reservation'] as string;
+
+      const where: any = { deleted_at: null };
+      // Laravel explode('-', 'vr-fit') -> ['vr','fit'] whereIn type_reservation
+      if (typeReservationParam) {
+        const types = String(typeReservationParam).split('-').filter(Boolean);
+        if (types.length > 0) where.type_reservation = { in: types };
+      }
+      if (search) {
+        const companies = await prisma.company_profiles.findMany({
+          where: { name: { contains: search, mode: 'insensitive' } },
+          select: { id: true },
+          take: 50,
+        });
+        where.OR = [
+          { folio_number: { contains: search, mode: 'insensitive' } },
+          { guest_profiles: { OR: [{ first_name: { contains: search, mode: 'insensitive' } }, { last_name: { contains: search, mode: 'insensitive' } }] } },
+          ...(companies.length > 0 ? [{ company_profile_id: { in: companies.map((c) => c.id) } }] : []),
+        ];
+      }
+
+      const [rows, total] = await Promise.all([
+        prisma.folios.findMany({
+          where,
+          select: {
+            id: true,
+            folio_number: true,
+            first_name: true,
+            last_name: true,
+            guest_profiles: { select: { first_name: true, last_name: true } },
+            reservations: {
+              where: { deleted_at: null },
+              orderBy: { date: 'asc' },
+              take: 1,
+              select: { room_name: true, room_types: { select: { name: true } } },
+            },
+          },
+          orderBy: { id: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.folios.count({ where }),
+      ]);
+
+      const data = rows.map((f: any) => {
+        const guestName = `${f.guest_profiles?.first_name ?? f.first_name ?? ''} ${f.guest_profiles?.last_name ?? f.last_name ?? ''}`.trim();
+        const reservation = f.reservations?.[0];
+        const roomType = reservation?.room_types?.name ?? '-';
+        const roomName = reservation?.room_name ?? '-';
+        return { id: Number(f.id), name: `${f.folio_number} - ${guestName} - ${roomType} - ${roomName}` };
+      });
+
+      const table = [{ label: 'Name', key: 'name', type: 'none', is_search: false }];
+      success(res, data, 'Success', 200, {
+        table,
+        permission: { view: true },
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / limit)), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Reservation folio list error:', err); error(res, 'Failed to list folios', 500); }
+  }
+
+  // GET /reservation/ledger/:folio — Laravel getLedger (:4179) + Folio::getListLedger
+  // (Folio.php:1108-1136): company profile + guest profile + other guests.
+  static async ledgerList(req: Request, res: Response): Promise<void> {
+    try {
+      const folioIdRaw = Array.isArray(req.params.folio) ? req.params.folio[0] : req.params.folio;
+      if (!folioIdRaw || !/^\d+$/.test(folioIdRaw)) { notFound(res, 'Folio not found'); return; }
+      const folio: any = await prisma.folios.findFirst({
+        where: { id: BigInt(folioIdRaw), deleted_at: null },
+        include: { guest_profiles: { select: { first_name: true, last_name: true } } },
+      });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      const list: { value: string; label: string }[] = [];
+      if (folio.company_profile_id) {
+        const cp = await prisma.company_profiles.findUnique({ where: { id: BigInt(folio.company_profile_id) }, select: { name: true } });
+        if (cp) list.push({ value: `${folio.company_profile_id}-company`, label: cp.name ?? '' });
+      }
+      if (folio.guest_profile_id && folio.guest_profiles) {
+        list.push({
+          value: `${Number(folio.guest_profile_id)}-guest`,
+          label: `${folio.guest_profiles.first_name ?? ''} ${folio.guest_profiles.last_name ?? ''}`.trim(),
+        });
+      }
+      const others = await prisma.other_guests.findMany({ where: { folio_id: Number(folio.id) }, orderBy: { id: 'desc' } });
+      const otherIds = [...new Set(others.map((o) => BigInt(o.guest_profile_id)))];
+      if (otherIds.length > 0) {
+        const gps = await prisma.guest_profiles.findMany({ where: { id: { in: otherIds } }, select: { id: true, first_name: true, last_name: true } });
+        const gpMap = new Map(gps.map((g) => [Number(g.id), g]));
+        for (const o of others) {
+          const g = gpMap.get(Number(o.guest_profile_id));
+          if (g) list.push({ value: `${Number(g.id)}-guest`, label: `${g.first_name ?? ''} ${g.last_name ?? ''}`.trim() });
+        }
+      }
+
+      success(res, list, 'Success', 200);
+    } catch (err: any) { console.error('Reservation ledger list error:', err); error(res, 'Failed to list ledger', 500); }
+  }
+
+  // Resolve folio id with Laravel subfolio_id fallback quirk (:3548):
+  // subfolio_id != 'null' && != '' -> subfolio_id else folio_id.
+  private static resolveTargetFolioId(body: any): bigint | null {
+    const sub = body?.subfolio_id;
+    const main = body?.folio_id;
+    const chosen = sub !== undefined && sub !== null && String(sub) !== 'null' && String(sub) !== '' ? sub : main;
+    if (chosen === undefined || chosen === null || !/^\d+$/.test(String(chosen))) return null;
+    return BigInt(chosen);
+  }
+
+  // POST /reservation/code-item — Laravel storeAdditionalItem (:3539).
+  // Attaches selected code_items to the folio via model_has_code_items (@@ignore -> raw SQL).
+  static async additionalItemStore(req: Request, res: Response): Promise<void> {
+    try {
+      const body: any = { ...(req.query as any), ...(req.body ?? {}) };
+      const folioId = ReservationController.resolveTargetFolioId(body);
+      if (!folioId) { notFound(res, 'The folio id field is required.'); return; }
+      const idx: any[] = Array.isArray(body.idx) ? body.idx : (body.idx !== undefined ? [body.idx] : []);
+      const idxNums = idx.map((v: any) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
+      if (idxNums.length === 0) { notFound(res, 'The idx field is required.'); return; }
+
+      const folio: any = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      // Laravel Folio::lastReservation scope: is_posting=0, orderBy date asc
+      const reservation = await prisma.reservations.findFirst({ where: { folio_id: folio.id, is_posting: 0, deleted_at: null }, orderBy: { date: 'asc' } });
+
+      for (const value of idxNums) {
+        const dup = await prisma.$queryRaw<any[]>(
+          Prisma.sql`SELECT code_item_id FROM model_has_code_items WHERE code_item_id = ${BigInt(value)} AND model_type = ${'App\\Models\\Folio'} AND model_id = ${folio.id} LIMIT 1`
+        );
+        if (dup.length > 0) continue;
+
+        // Laravel prefers the rate-linked pivot row's attributes, falling back to the master CodeItem.
+        let source: any = null;
+        if (reservation?.rate_id) {
+          const rateLinked = await prisma.$queryRaw<any[]>(
+            Prisma.sql`SELECT * FROM model_has_code_items WHERE model_type = ${'App\\Models\\Rate'} AND model_id = ${reservation.rate_id} AND code_item_id = ${BigInt(value)} LIMIT 1`
+          );
+          if (rateLinked.length > 0) source = rateLinked[0];
+        }
+        if (!source) {
+          source = await prisma.code_items.findUnique({ where: { id: BigInt(value) } });
+        }
+
+        // Laravel: start_date = max(businessDate, folio.check_in_date) (LogAudit::getBusinessDate)
+        const businessDateStr = await AuthController.getBusinessDate(folio.property_id ?? null);
+        const businessDate = businessDateStr ? new Date(`${businessDateStr}T00:00:00`) : new Date();
+        const checkIn = folio.check_in_date ? new Date(folio.check_in_date) : businessDate;
+        const startDate = checkIn < businessDate ? businessDate : checkIn;
+
+        const processOn = source?.process_on ?? null;
+        const endDate = processOn === 'ACTUAL' ? startDate : (folio.check_out_date ? new Date(folio.check_out_date) : startDate);
+
+        // NOTE Laravel quirk preserved: code_post_id stores CodeItem::find($value)->id
+        // (the code item's own id), NOT its code_post relation (Laravel storeAdditionalItem).
+        await prisma.$executeRaw`
+          INSERT INTO model_has_code_items
+            (model_id, model_type, code_item_id, reason, start_date, end_date, sales, process_on, code_post_id, upsales, name, description)
+          VALUES
+            (${folio.id}, ${'App\\Models\\Folio'}, ${BigInt(value)}, '',
+             ${startDate}, ${endDate}, ${source?.sales ?? null}, ${processOn},
+             ${Number(source?.id ?? value)}, '', ${source?.name ?? null}, ${source?.description ?? null})
+        `;
+      }
+      await prisma.folios.update({ where: { id: folio.id }, data: { updated_at: new Date() } });
+
+      success(res, null, 'Success', 200);
+    } catch (err: any) { console.error('Additional item store error:', err); error(res, err?.message ?? 'Failed to store additional items', 500); }
+  }
+
+  // PUT /reservation/code-item/:codeItem — Laravel updateAdditionalItem (:3616).
+  // Updates folio-attached pivot rows for that code_item (dates must stay inside folio range).
+  static async additionalItemUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const codeItemIdRaw = Array.isArray(req.params.codeItem) ? req.params.codeItem[0] : req.params.codeItem;
+      if (!codeItemIdRaw || !/^\d+$/.test(codeItemIdRaw)) { notFound(res, 'Not Found codeItem'); return; }
+      const codeItemId = BigInt(codeItemIdRaw);
+
+      const body: any = { ...(req.query as any), ...(req.body ?? {}) };
+      const folioId = ReservationController.resolveTargetFolioId(body);
+      if (!folioId) { notFound(res, 'Folio not found'); return; }
+      const folio: any = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      const { start_date, end_date, sales, upsales, name, description, reason } = body;
+      const start = start_date ? new Date(start_date) : null;
+      const end = end_date ? new Date(end_date) : null;
+      if (!start || !end) { badRequest(res, 'Start date and end date are required'); return; }
+      if (start < new Date(folio.check_in_date) || end > new Date(folio.check_out_date)) {
+        badRequest(res, 'Start date and end date must be in range folio date'); return;
+      }
+      if (end < start) { badRequest(res, 'End date must be greater than start date'); return; }
+
+      await prisma.$executeRaw`
+        UPDATE model_has_code_items SET
+          reason = ${reason ?? ''},
+          start_date = ${start},
+          end_date = ${end},
+          sales = ${sales ?? null},
+          upsales = ${upsales !== undefined && upsales !== null ? String(upsales) : ''},
+          name = ${name ?? null},
+          description = ${description ?? null}
+        WHERE code_item_id = ${codeItemId} AND model_type = ${'App\\Models\\Folio'} AND model_id = ${folio.id}
+      `;
+      success(res, null, 'Success', 200);
+    } catch (err: any) { console.error('Additional item update error:', err); error(res, 'Failed to update additional item', 500); }
+  }
+
+  // DELETE /reservation/code-item/:codeItem — Laravel deleteAdditionalItem (:3663).
+  static async additionalItemDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const codeItemIdRaw = Array.isArray(req.params.codeItem) ? req.params.codeItem[0] : req.params.codeItem;
+      if (!codeItemIdRaw || !/^\d+$/.test(codeItemIdRaw)) { notFound(res, 'Not Found codeItem'); return; }
+
+      const body: any = { ...(req.query as any), ...(req.body ?? {}) };
+      const folioId = ReservationController.resolveTargetFolioId(body);
+      if (!folioId) { notFound(res, 'Folio not found'); return; }
+      const folio: any = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      await prisma.$executeRaw`
+        DELETE FROM model_has_code_items
+        WHERE code_item_id = ${BigInt(codeItemIdRaw)} AND model_type = ${'App\\Models\\Folio'} AND model_id = ${folio.id}
+      `;
+      success(res, null, 'Success', 200);
+    } catch (err: any) { console.error('Additional item destroy error:', err); error(res, 'Failed to delete additional item', 500); }
+  }
+
+  // POST /reservation/inclusive — Laravel storeInclusives (:3797).
+  // Attaches rate_inclusives to the folio via model_has_rate_inclusives pivot.
+  static async inclusiveStore(req: Request, res: Response): Promise<void> {
+    try {
+      const body: any = { ...(req.query as any), ...(req.body ?? {}) };
+      const folioId = ReservationController.resolveTargetFolioId(body);
+      if (!folioId) { notFound(res, 'The folio id field is required.'); return; }
+      const idx: any[] = Array.isArray(req.body.idx) ? req.body.idx : (req.body.idx !== undefined ? [req.body.idx] : []);
+      const idxNums = idx.map((v: any) => Number(v)).filter((v) => Number.isInteger(v) && v > 0);
+      if (idxNums.length === 0) { notFound(res, 'The idx field is required.'); return; }
+
+      const folio: any = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      for (const value of idxNums) {
+        const dup = await prisma.model_has_rate_inclusives.findFirst({
+          where: { rate_inclusive_id: BigInt(value), model_type: 'App\\Models\\Folio', model_id: folio.id },
+        });
+        if (dup) continue;
+        // NOTE: Laravel also writes code_item_id=$value into this pivot (quirk);
+        // Prisma model has no such column, so only the morph keys are set.
+        await prisma.model_has_rate_inclusives.create({
+          data: { rate_inclusive_id: BigInt(value), model_type: 'App\\Models\\Folio', model_id: folio.id },
+        });
+      }
+      await prisma.folios.update({ where: { id: folio.id }, data: { updated_at: new Date() } });
+
+      success(res, null, 'Success', 200);
+    } catch (err: any) { console.error('Inclusive store error:', err); error(res, err?.message ?? 'Failed to store inclusives', 500); }
+  }
+
+  // DELETE /reservation/inclusive/:rateInclusive — Laravel deleteInclusives (:3845) detach.
+  static async inclusiveDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const rateInclusiveRaw = Array.isArray(req.params.rateInclusive) ? req.params.rateInclusive[0] : req.params.rateInclusive;
+      if (!rateInclusiveRaw || !/^\d+$/.test(rateInclusiveRaw)) { notFound(res, 'Not Found rateInclusive'); return; }
+
+      const body: any = { ...(req.query as any), ...(req.body ?? {}) };
+      const folioId = ReservationController.resolveTargetFolioId(body);
+      if (!folioId) { notFound(res, 'Folio not found'); return; }
+      const folio: any = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      await prisma.model_has_rate_inclusives.deleteMany({
+        where: { rate_inclusive_id: BigInt(rateInclusiveRaw), model_type: 'App\\Models\\Folio', model_id: folio.id },
+      });
+      success(res, null, 'Success', 200);
+    } catch (err: any) { console.error('Inclusive destroy error:', err); error(res, 'Failed to delete inclusive', 500); }
   }
 }
 

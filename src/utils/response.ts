@@ -4,6 +4,7 @@ import { encrypt } from './encryption';
 export interface ApiMeta {
   permission?: Record<string, boolean>;
   pagination?: Record<string, number>;
+  pagging?: Record<string, number>;
   table?: any[];
   master?: any;
   search_data?: any[];

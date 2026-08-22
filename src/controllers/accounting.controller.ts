@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -249,30 +249,54 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /cms/accounting/get/{type}
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // GET /cms/accounting/get/{type} & /cms/allocation-accounting/get-doc —
+  // Laravel AccountingController@getDoc (:516-554): COMPANY PROFILE autocomplete
+  // (NOT accounting rows). Both Laravel routes share this one handler.
   static async autocomplete(req: Request, res: Response): Promise<void> {
     try {
-      const pid = req.user?.lastProperty ?? 0n;
-      const mappedType = resolveType(req);
-      if (!mappedType) {
-        badRequest(res, 'Invalid accounting type');
-        return;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const search = req.query.search as string;
+      const searchField = req.query.search_field as string;
+      const searchValue = req.query.search_value as string;
+
+      // Laravel: SoftDeletes + HasStatus::onlyActive() macro -> status=1
+      const where: any = { deleted_at: null, status: 1 };
+      if (search) {
+        where.OR = [
+          { account: { contains: search, mode: 'insensitive' } },
+          { type_company: { contains: search, mode: 'insensitive' } },
+          { short_code: { contains: search, mode: 'insensitive' } },
+          { name: { contains: search, mode: 'insensitive' } },
+          { status_company: { contains: search, mode: 'insensitive' } },
+          { billing_country: { contains: search, mode: 'insensitive' } },
+          { telp: { contains: search, mode: 'insensitive' } },
+          { mobile_phone: { contains: search, mode: 'insensitive' } },
+        ];
+      }
+      if (searchField && searchValue !== undefined && String(searchValue) !== '') {
+        const allowed = ['account', 'type_company', 'short_code', 'name', 'status_company', 'billing_country', 'telp', 'mobile_phone'];
+        if (allowed.includes(String(searchField))) {
+          where[String(searchField)] = { contains: String(searchValue), mode: 'insensitive' };
+        }
       }
 
-      const records = await prisma.accountings.findMany({
-        where: {
-          property_id: pid,
-          type_accounting: mappedType,
-          deleted_at: null,
-        },
-        orderBy: { id: 'desc' },
-        select: {
-          id: true,
-          number_note: true,
-        },
-      });
+      const [rows, total] = await Promise.all([
+        prisma.company_profiles.findMany({
+          where,
+          orderBy: { account: 'asc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.company_profiles.count({ where }),
+      ]);
 
-      const formatted = records.map((r: any) => bigintToNumber(r));
-      success(res, formatted, 'Success');
+      const table = [{ label: 'Name', key: 'name', type: 'none', is_search: false }];
+      success(res, bigintToNumber(rows), 'Success', 200, {
+        table,
+        permission: { view: true },
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / limit)), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
+      });
     } catch (err: any) {
       console.error('Accounting autocomplete error:', err);
       error(res, 'Failed to fetch accounting autocomplete', 500);
@@ -301,7 +325,14 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
 
       const data: any = { updated_at: new Date() };
       if (status !== undefined) data.status = Number(status);
-      if (status_accounting !== undefined) data.status_accounting = Number(status_accounting);
+      // Laravel AccountingController@updateStatus (:299-307) accepts STRINGS from FE
+      // ('processed' -> 1, 'canceled' -> 3); numbers pass through for robustness.
+      const rawStatusAccounting = status_accounting ?? status;
+      if (rawStatusAccounting !== undefined) {
+        if (rawStatusAccounting === 'processed') data.status_accounting = 1;
+        else if (rawStatusAccounting === 'canceled' || rawStatusAccounting === 'cancelled') data.status_accounting = 3;
+        else if (/^\d+$/.test(String(rawStatusAccounting))) data.status_accounting = Number(rawStatusAccounting);
+      }
 
       await prisma.accountings.update({ where: { id }, data });
 
@@ -536,7 +567,21 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
       if (status_accounting !== undefined) data.status_accounting = Number(status_accounting);
 
       if (!data.date) data.date = new Date();
-      if (!data.doc_date) data.doc_date = new Date();
+      if (!data.doc_date) data.doc_date = data.date;
+
+      // Laravel AccountingController@store sign normalization (:126-149):
+      // credit-note & payment store NEGATIVE amounts; debit-note & refund POSITIVE.
+      if (data.amount !== undefined) {
+        const amt = Number(data.amount);
+        if (Number.isFinite(amt)) {
+          let normalized = amt;
+          if ((mappedType === 'credit-note' || mappedType === 'payment') && amt > 0) normalized = -amt;
+          else if ((mappedType === 'debit-note' || mappedType === 'refund') && amt < 0) normalized = -amt;
+          data.amount = normalized;
+        }
+      }
+      // Laravel :155 — new documents always start PENDING (2) unless caller overrides.
+      if (data.status_accounting === undefined) data.status_accounting = 2;
 
       const record = await prisma.accountings.create({ data });
 
@@ -637,45 +682,16 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
   }
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // GET /cms/allocation-accounting/get-doc
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // GET /cms/allocation-accounting/get-doc — Laravel routes this to the SAME
+  // AccountingController@getDoc as /accounting/get/{type} (cms.php:1505), i.e.
+  // CompanyProfile autocomplete. Delegate for exact parity.
   static async allocationGetDoc(req: Request, res: Response): Promise<void> {
-    try {
-      const pid = req.user?.lastProperty ?? 0n;
-      const typeFilter = req.query.type_accounting as string | undefined;
-
-      const where: any = {
-        property_id: pid,
-        deleted_at: null,
-      };
-
-      if (typeFilter) where.type_accounting = typeFilter;
-
-      const records = await prisma.accountings.findMany({
-        where,
-        orderBy: { id: 'desc' },
-        select: {
-          id: true,
-          number_note: true,
-          total: true,
-        },
-      });
-
-      const formatted = records.map((r: any) => ({
-        id: Number(r.id),
-        number_note: r.number_note,
-        total: Number(r.total),
-      }));
-
-      success(res, formatted, 'Success');
-    } catch (err: any) {
-      console.error('Allocation get-doc error:', err);
-      error(res, 'Failed to fetch documents', 500);
-    }
+    return AccountingController.autocomplete(req, res);
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
   // GET /cms/allocation-history
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   static async allocationHistory(req: Request, res: Response): Promise<void> {
     try {

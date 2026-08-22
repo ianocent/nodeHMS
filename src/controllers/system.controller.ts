@@ -101,7 +101,7 @@ async function formatNightAuditFolios(data: any[]): Promise<any[]> {
 }
 
 // Laravel SystemBalance::storeBalance parity — rebuilds system_balances rows for the night audit date
-async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
+export async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
   const prisma = getPrisma();
   const nextObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000);
   const dayRange: any = { gte: dateObj, lt: nextObj };
@@ -233,6 +233,346 @@ async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: numb
     { date: dateObj, property_id: propertyBig, type: 'ledger', name: 'Guest Ledger Previous Day', debit: yesterdayMovementTotal > 0 ? 0 : yesterdayMovementTotal, credit: yesterdayMovementTotal > 0 ? yesterdayMovementTotal : 0 },
   ];
   if (ledgerRows.length > 0) await prisma.system_balances.createMany({ data: ledgerRows });
+
+  // Back-office push (journal_lines + daily_summary + ThirdPartyLog + room_statistics)
+  // — Laravel SystemBalance::storeBalance tail (:440-491). Never throws.
+  try {
+    await pushBackOfficeSummary(dateObj, propertyId);
+  } catch (e: any) {
+    console.error('[SystemBalance] back-office push failed:', e?.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Back-office push — Laravel SystemBalance::storeBalance tail + getRoomStatistics.
+// SAFETY (localhost-first):
+//   • HTTP POST /daily_summary hanya jalan bila BACK_OFFICE_PUSH_ENABLED=true.
+//   • Host DIPAKSA 127.0.0.1 kecuali BACK_OFFICE_ALLOW_REMOTE=true — payload
+//     produksi tidak akan pernah terkirim ke IP live secara tidak sengaja.
+//   • ThirdPartyLog selalu ditulis (payload + response/err/skipped).
+// ─────────────────────────────────────────────────────────────────────────────
+async function pushBackOfficeSummary(dateObj: Date, propertyId: number): Promise<void> {
+  const prisma = getPrisma();
+  const propertyBig = BigInt(propertyId);
+  const nextObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000);
+  const dayRange: any = { gte: dateObj, lt: nextObj };
+  const refdate = dateObj.toISOString().slice(0, 10);
+
+  const property: any = await prisma.properties.findUnique({ where: { id: propertyBig } });
+  if (!property) return;
+
+  // GL account lookup for tax/deposit/ledger single-line entries
+  // (= Laravel getUUIDPropertyBO :774-806).
+  const glIds = [
+    property.pb1_account_uid,
+    property.service_charge_account_uid,
+    property.tax_account_uid,
+    property.surcharge_account_uid,
+    property.advance_deposit_current_day_account_uid,
+    property.advance_deposit_previous_day_account_uid,
+    property.guest_ledger_current_day_account_uid,
+    property.guest_ledger_previous_day_account_uid,
+  ].filter((v: any) => v !== null && v !== undefined);
+  const glRows = glIds.length ? await prisma.code_gls.findMany({ where: { id: { in: glIds.map((v: any) => BigInt(v)) } }, select: { id: true, account_uid: true } }) : [];
+  const glById = new Map<number, string | null>(glRows.map((g: any) => [Number(g.id), g.account_uid ?? null]));
+  const boAccountFor = (name: string): string | null => {
+    const map: Record<string, any> = {
+      PB1: property.pb1_account_uid,
+      'Service Charge': property.service_charge_account_uid,
+      'Tax 3': property.tax_account_uid,
+      Surcharge: property.surcharge_account_uid,
+      'Advance Deposit Current Day': property.advance_deposit_current_day_account_uid,
+      'Advance Deposit Previous Day': property.advance_deposit_previous_day_account_uid,
+      'Guest Ledger Current Day': property.guest_ledger_current_day_account_uid,
+      'Guest Ledger Previous Day': property.guest_ledger_previous_day_account_uid,
+    };
+    const glId = map[name];
+    return (glId != null ? glById.get(Number(glId)) : null) ?? property.client_uid ?? null;
+  };
+
+  // Breakdowns for the day (posting rows) with folio + payment relations.
+  const tbs: any[] = await prisma.transaction_breakdowns.findMany({
+    where: { property_id: propertyBig, date: dayRange, is_posting: 1, deleted_at: null },
+    include: {
+      folios: {
+        select: {
+          id: true, folio_number: true, check_in_date: true, check_out_date: true,
+          company_profile_id: true, guest_profile_id: true, status_reservation: true,
+        },
+      },
+      type_payments: { select: { id: true, name: true, company_id: true, is_company_ar: true, code_post_id: true } },
+    },
+  });
+
+  // Folio enrichment: guest name, last reservation adult/child/room name.
+  const folioIds = [...new Set(tbs.map((t) => Number(t.folio_id)))];
+  const lastResByFolio = new Map<number, any>();
+  const guestByProfile = new Map<number, string>();
+  const roomNameByFolio = new Map<number, string | null>();
+  if (folioIds.length) {
+    const resvs = await prisma.reservations.findMany({
+      where: { folio_id: { in: folioIds.map((id) => BigInt(id)) }, deleted_at: null },
+      orderBy: { date: 'desc' },
+      select: { folio_id: true, adult: true, child: true, rooms: { select: { name: true } } },
+    });
+    for (const r of resvs) {
+      const key = Number(r.folio_id);
+      if (!lastResByFolio.has(key)) lastResByFolio.set(key, r);
+      if (!roomNameByFolio.has(key) && r.rooms?.name) roomNameByFolio.set(key, r.rooms.name);
+    }
+    const guestIds = [...new Set(tbs.map((t) => Number(t.folios?.guest_profile_id)).filter((x) => x > 0))];
+    if (guestIds.length) {
+      const guests = await prisma.guest_profiles.findMany({
+        where: { id: { in: guestIds.map((id) => BigInt(id)) } },
+        select: { id: true, first_name: true, last_name: true },
+      });
+      guests.forEach((g: any) => guestByProfile.set(Number(g.id), `${g.first_name ?? ''} ${g.last_name ?? ''}`.trim()));
+    }
+  }
+
+  const signedAmount = (t: any) => (t.type_amount === 'PLUS' ? Number(t.amount) : -Number(t.amount));
+  const detailRow = (t: any, debtor: any, debtorGl: string | null) => ({
+    trans_uid: t.uuid ?? String(t.id),
+    docno: Number(t.id),
+    docdate: t.date instanceof Date ? t.date.toISOString().slice(0, 19).replace('T', ' ') : String(t.date),
+    folio: t.folios?.folio_number ?? null,
+    room: roomNameByFolio.get(Number(t.folio_id)) ?? null,
+    company_reservaion: debtor?.companyReservationName ?? null,
+    check_in_date: t.folios?.check_in_date ?? null,
+    check_out_date: t.folios?.check_out_date ?? null,
+    adult: lastResByFolio.get(Number(t.folio_id))?.adult ?? null,
+    child: lastResByFolio.get(Number(t.folio_id))?.child ?? null,
+    guest: guestByProfile.get(Number(t.folios?.guest_profile_id)) ?? '',
+    amount: Math.round(Math.abs(signedAmount(t)) * 100) / 100,
+    entrytype: t.type_amount === 'PLUS' ? 'C' : 'D',
+    debtorid: debtor?.uuid ?? null,
+    debtor_acccode: debtor?.account ?? null,
+    debtor_name: debtor?.name ?? null,
+    debtor_address: debtor?.billing_address ?? null,
+    debtor_gl: debtorGl,
+  });
+
+  // Debtor resolution per breakdown (Laravel :352-371): is_company_ar -> folio company;
+  // else typePayment.company; ensure uuid exists.
+  async function resolveDebtor(t: any): Promise<any> {
+    const tp = t.type_payments;
+    let companyId: number | null = null;
+    if (tp?.is_company_ar === true || tp?.is_company_ar === 1) companyId = Number(t.folios?.company_profile_id ?? 0);
+    else if (tp?.company_id) companyId = Number(tp.company_id);
+    if (!companyId) return null;
+    const cp: any = await prisma.company_profiles.findUnique({ where: { id: BigInt(companyId) } });
+    if (!cp) return null;
+    let uuid = cp.uuid;
+    if (!uuid) {
+      const { randomUUID } = await import('crypto');
+      uuid = randomUUID();
+      await prisma.company_profiles.update({ where: { id: cp.id }, data: { uuid } });
+    }
+    return { uuid, account: cp.account, name: cp.name, billing_address: cp.billing_address, companyReservationName: cp.name };
+  }
+
+  const journalLines: any[] = [];
+
+  // Payment journal lines (grouped by type_payment_id)
+  const balanceRows: any[] = await prisma.system_balances.findMany({
+    where: { property_id: propertyBig, date: dayRange },
+  });
+  for (const row of balanceRows.filter((r) => r.type === 'payment')) {
+    const items = tbs.filter((t) => Number(t.type_payment_id ?? -1) === Number(row.code_id));
+    if (!items.length) continue;
+    let debtor: any = null;
+    const details: any[] = [];
+    for (const t of items) {
+      const d = await resolveDebtor(t);
+      if (d && !debtor) debtor = d; // first debtor wins like the Laravel loop
+      details.push(detailRow(t, d, (row as any).account_uid ?? row.name));
+    }
+    const amount = Math.abs(items.reduce((s, t) => s + signedAmount(t), 0));
+    journalLines.push({
+      account_uid: (row as any).account_uid ?? row.name,
+      entrytype: Number(row.debit) !== 0 ? 'D' : 'C',
+      amount: Math.round(amount * 100) / 100,
+      linedesc: row.name,
+      transactions: details,
+    });
+  }
+
+  // Posting journal lines (grouped by code_post)
+  for (const row of balanceRows.filter((r) => r.type === 'posting')) {
+    const items = tbs.filter((t) => String(t.code ?? '') === String(row.code_id));
+    if (!items.length) continue;
+    const details = items.map((t) => detailRow(t, null, null));
+    const amount = Math.abs(items.reduce((s, t) => s + signedAmount(t), 0));
+    journalLines.push({
+      account_uid: (row as any).account_uid ?? row.name,
+      entrytype: Number(row.debit) !== 0 ? 'D' : 'C',
+      amount: Math.round(amount * 100) / 100,
+      linedesc: row.name,
+      transactions: details,
+    });
+  }
+
+  // Tax / deposit / ledger single-line entries
+  for (const row of balanceRows.filter((r) => ['tax', 'deposit', 'ledger'].includes(String(r.type)))) {
+    const amountRaw = Number(row.debit) !== 0 ? Number(row.debit) : Number(row.credit);
+    const amount = Math.round(Math.abs(amountRaw) * 100) / 100;
+    journalLines.push({
+      account_uid: boAccountFor(String(row.name)),
+      entrytype: Number(row.debit) !== 0 ? 'D' : 'C',
+      amount,
+      linedesc: row.name,
+      transactions: [
+        {
+          trans_uid: 0,
+          docno: 0,
+          docdate: `${refdate} 00:00:00`,
+          folio: '-',
+          room: '-',
+          guest: '-',
+          entrytype: Number(row.debit) !== 0 ? 'D' : 'C',
+          amount,
+          debtorid: null,
+          debtor_acccode: null,
+          debtor_name: null,
+          debtor_address: null,
+          debtor_gl: null,
+        },
+      ],
+    });
+  }
+
+  // Room statistics (= Laravel getRoomStatistics :1359-1516)
+  const totalRooms = await prisma.rooms.count({ where: { property_id: propertyBig, status: 1, deleted_at: null } });
+  const roomSold = await prisma.reservations.count({
+    where: { date: dayRange, deleted_at: null, folios: { is: { status_reservation: 0, is_virtual: false } } },
+  });
+  const houseUseRooms = await prisma.folios.count({
+    where: { is_house_use: true, status_reservation: 0, deleted_at: null, reservations: { some: { date: dayRange } } },
+  });
+  const complimentaryRooms = await prisma.folios.count({
+    where: { complimentary: true, status_reservation: 0, deleted_at: null, reservations: { some: { date: dayRange } } },
+  });
+  const blockedOooOos = await prisma.rooms.count({
+    where: { room_status: { in: [ROOM_STATUSES.block.id, ROOM_STATUSES.out_of_order.id].filter((v) => v !== undefined) } },
+  });
+  const dayUse = await prisma.reservations.count({
+    where: { check_in_date: dayRange, check_out_date: dayRange, deleted_at: null, folios: { is: { is_virtual: false } } },
+  });
+  const saleableRooms = totalRooms - blockedOooOos;
+  const availableRooms = saleableRooms - roomSold;
+  const round2 = (v: number) => Math.round(v * 100) / 100;
+  const saleableOcc = saleableRooms > 0 ? round2((roomSold / saleableRooms) * 100) : 0;
+  const availableOcc = roomSold + availableRooms > 0 ? round2((roomSold / (roomSold + availableRooms)) * 100) : 0;
+  const occWithOoo = totalRooms > 0 ? round2((roomSold / totalRooms) * 100) : 0;
+
+  const adultsAgg = await prisma.reservations.aggregate({
+    _sum: { adult: true, child: true },
+    where: { date: dayRange, deleted_at: null, folios: { is: { status_reservation: 0, is_virtual: false } } },
+  });
+  const adults = Number(adultsAgg._sum.adult ?? 0);
+  const children = Number(adultsAgg._sum.child ?? 0);
+  const totalGuestsInHouse = adults + children;
+  const doubleRatio = roomSold > 0 ? round2(totalGuestsInHouse / roomSold) : 0;
+
+  const revenueAgg = async (withTax: boolean) => {
+    const rowsRev = await prisma.transaction_breakdowns.findMany({
+      where: { date: dayRange, type: 'room_revenue', is_posting: 1, deleted_at: null },
+      select: { amount: true, pb1: true, svr_chrg: true, surcharge: true, tax3: true, type_amount: true },
+    });
+    return rowsRev.reduce((s, r) => {
+      const sign = r.type_amount === 'MINUS' ? -1 : 1;
+      const base = withTax ? Number(r.amount) + Number(r.pb1) + Number(r.svr_chrg) + Number(r.surcharge) + Number(r.tax3) : Number(r.amount);
+      return s + base * sign;
+    }, 0);
+  };
+  const roomRevenueExclTax = await revenueAgg(false);
+  const roomRevenueInclTax = await revenueAgg(true);
+  const avg = (rev: number, div: number) => (div > 0 ? round2(rev / div) : 0);
+
+  const room_statistics = {
+    rooms: {
+      total_rooms: totalRooms,
+      room_sold: roomSold,
+      house_use_rooms: houseUseRooms,
+      complimentary_rooms: complimentaryRooms,
+      blocked_out_of_service_out_of_order: blockedOooOos,
+      day_use: dayUse,
+      saleable_rooms_net_blocked_out_of_service_out_of_order: saleableRooms,
+      available_rooms: availableRooms,
+      room_saleable_occupancy_incl_day_use_percent: saleableOcc,
+      room_saleable_occupancy_incl_com_hse_percent: saleableOcc,
+      occupancy_with_room_ooo_percent: occWithOoo,
+      room_available_occupancy_incl_day_use_percent: availableOcc,
+      room_available_occupancy_incl_com_hse_percent: availableOcc,
+      double_occupancy_incl_com_hse_percent: doubleRatio * 100,
+      double_occupancy_incl_com_hse_ratio: doubleRatio,
+      length_of_stay_bangka_kalkulasi: null,
+      occupancy_exclude_gpt_group_tentative_percent: null,
+    },
+    inhouse_guest_pax: { adults, child: children, total_guests_in_house: totalGuestsInHouse },
+    revenue_exclusive_of_tax: {
+      room_revenue: roomRevenueExclTax,
+      average_room_rate: avg(roomRevenueExclTax, roomSold),
+      average_guest_rate_exc_children: avg(roomRevenueExclTax, adults),
+      average_guest_rate_inc_children: avg(roomRevenueExclTax, totalGuestsInHouse),
+      revenue_per_room_available: avg(roomRevenueExclTax, totalRooms),
+    },
+    revenue_inclusive_of_tax: {
+      room_revenue_21_percent: roomRevenueInclTax,
+      average_room_rate: avg(roomRevenueInclTax, roomSold),
+      average_guest_rate_exc_children: avg(roomRevenueInclTax, adults),
+      average_guest_rate_inc_children: avg(roomRevenueInclTax, totalGuestsInHouse),
+      revenue_per_room_available: avg(roomRevenueInclTax, totalRooms),
+    },
+  };
+
+  const sendToBackOffice = {
+    auth_token: property.auth_token ?? null,
+    client_uid: property.client_uid ?? null,
+    refdate,
+    txtcomment: 'System Balancing',
+    room_statistics,
+    journal_lines: journalLines,
+  };
+
+  // ── HTTP push: OFF by default; host dipaksa localhost ──
+  const pushEnabled = process.env.BACK_OFFICE_PUSH_ENABLED === 'true';
+  const allowRemote = process.env.BACK_OFFICE_ALLOW_REMOTE === 'true';
+  const port = (allowRemote ? property.port_pos_night_audit : null) || process.env.BACK_OFFICE_PORT || '8080';
+  const host = allowRemote ? (property.ip_pos || '127.0.0.1') : '127.0.0.1';
+
+  if (!pushEnabled) {
+    await prisma.third_party_logs.create({
+      data: {
+        name: `System Balancing-${refdate}`,
+        text: JSON.stringify({ payload: sendToBackOffice, skipped: 'BACK_OFFICE_PUSH_ENABLED not set (localhost-safe mode)' }),
+      },
+    });
+    return;
+  }
+
+  try {
+    const res = await fetch(`http://${host}:${port}/daily_summary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sendToBackOffice),
+    });
+    let responseJson: any = null;
+    try { responseJson = await res.json(); } catch { responseJson = { status: res.status }; }
+    await prisma.third_party_logs.create({
+      data: {
+        name: `System Balancing-${refdate}`,
+        text: JSON.stringify({ payload: sendToBackOffice, response: responseJson }),
+      },
+    });
+  } catch (err: any) {
+    await prisma.third_party_logs.create({
+      data: {
+        name: `System Balancing-${refdate}`,
+        text: JSON.stringify({ payload: sendToBackOffice, err: err?.message }),
+      },
+    });
+  }
 }
 
 // Helper: coerce sort/status to number (matches Laravel int casting)
@@ -636,164 +976,168 @@ export class SystemController {
         await getPrisma().folios.updateMany({ where: { id: { in: overStay.map((f) => f.id) } }, data: { is_posting: true } });
       }
 
-      // 4. Room revenue + extra bed per check-in reservation (Laravel getAllReservation)
-      const postTrx = async (folio: any, codePostId: number | null, amount: number, type: string) => {
-        if (!codePostId) return;
-        const codePost = await getPrisma().code_posts.findUnique({ where: { id: BigInt(codePostId) } });
-        if (!codePost) return;
-        const calc = calculateCodePost(codePost as any, amount, false);
-        const ledger = codePost.code_billing_id
-          ? await getPrisma().ledgers.findFirst({
-              where: { folio_id: Number(folio.id), code_billing_id: codePost.code_billing_id, deleted_at: null },
-            })
-          : null;
-        let profile: any = null;
-        let modelType = 'App\Models\CompanyProfile';
-        if (ledger?.profileable_type === 'App\Models\GuestProfile') {
-          profile = await getPrisma().guest_profiles.findUnique({ where: { id: BigInt(Number(ledger.profileable_id)) } });
-          modelType = 'App\Models\GuestProfile';
-        } else if (ledger?.profileable_type === 'App\Models\CompanyProfile') {
-          profile = await getPrisma().company_profiles.findUnique({ where: { id: BigInt(Number(ledger.profileable_id)) } });
-        } else {
-          profile = await getPrisma().company_profiles.findUnique({ where: { id: BigInt(Number(folio.company_profile_id)) } });
-        }
-        const data: any = {
-          type,
-          folio_id: folio.id,
-          date: dateObj,
-          code: String(codePost.id),
-          amount: calc.amount,
-          total: calc.total,
-          pb1: calc.pb1,
-          svr_chrg: calc.service,
-          tax3: calc.tax3,
-          type_amount: 'PLUS',
-          is_posting: 1,
-          is_end_of_day: 1,
-          is_endshift: 1,
-          status: 1,
-          property_id: BigInt(propertyId),
-        };
-        if (profile) {
-          data.model_type = modelType;
-          data.model_id = profile.id;
-        }
-        await getPrisma().transactions.create({ data });
-      };
-
-      const reservations = await getPrisma().reservations.findMany({
-        where: {
-          property_id: BigInt(propertyId),
-          date: dayRange,
-          is_posting: 0,
-          deleted_at: null,
-          folios: { is: { status_reservation: 0, is_virtual: false } },
-        },
-        include: { folios: true, rates: true },
-      });
-
-      for (const value of reservations) {
-        const folio = value.folios;
-        if (value.room_id) {
-          const room = await getPrisma().rooms.findUnique({ where: { id: value.room_id } });
-          if (room) {
-            const upd: any = { maid_status: 1 };
-            if (folio.check_out_date && new Date(folio.check_out_date.getTime()).getTime() === nextObj.getTime()) {
-              upd.room_status = 2;
-            }
-            await getPrisma().rooms.update({ where: { id: room.id }, data: upd });
+      // Steps 4-8 run atomically (Laravel wraps everything in DB::beginTransaction).
+      await getPrisma().$transaction(async (tx) => {
+        // 4. Room revenue + extra bed per check-in reservation (Laravel getAllReservation)
+        const postTrx = async (db: any, folio: any, codePostId: number | null, amount: number, type: string) => {
+          if (!codePostId) return;
+          const codePost = await db.code_posts.findUnique({ where: { id: BigInt(codePostId) } });
+          if (!codePost) return;
+          const calc = calculateCodePost(codePost as any, amount, false);
+          const ledger = codePost.code_billing_id
+            ? await db.ledgers.findFirst({
+                where: { folio_id: Number(folio.id), code_billing_id: codePost.code_billing_id, deleted_at: null },
+              })
+            : null;
+          let profile: any = null;
+          let modelType = 'App\\Models\\CompanyProfile';
+          if (ledger?.profileable_type === 'App\\Models\\GuestProfile') {
+            profile = await db.guest_profiles.findUnique({ where: { id: BigInt(Number(ledger.profileable_id)) } });
+            modelType = 'App\\Models\\GuestProfile';
+          } else if (ledger?.profileable_type === 'App\\Models\\CompanyProfile') {
+            profile = await db.company_profiles.findUnique({ where: { id: BigInt(Number(ledger.profileable_id)) } });
+          } else {
+            profile = await db.company_profiles.findUnique({ where: { id: BigInt(Number(folio.company_profile_id)) } });
           }
-        }
-        const nextRes = await getPrisma().reservations.findFirst({
-          where: { folio_id: folio.id, date: nextRange },
+          const data: any = {
+            type,
+            folio_id: folio.id,
+            date: dateObj,
+            code: String(codePost.id),
+            amount: calc.amount,
+            total: calc.total,
+            pb1: calc.pb1,
+            svr_chrg: calc.service,
+            tax3: calc.tax3,
+            type_amount: 'PLUS',
+            is_posting: 1,
+            is_end_of_day: 1,
+            is_endshift: 1,
+            status: 1,
+            property_id: BigInt(propertyId),
+          };
+          if (profile) {
+            data.model_type = modelType;
+            data.model_id = profile.id;
+          }
+          await db.transactions.create({ data });
+        };
+
+        const reservations = await tx.reservations.findMany({
+          where: {
+            property_id: BigInt(propertyId),
+            date: dayRange,
+            is_posting: 0,
+            deleted_at: null,
+            folios: { is: { status_reservation: 0, is_virtual: false } },
+          },
+          include: { folios: true, rates: true },
         });
-        if (nextRes && nextRes.room_id !== value.room_id) {
-          await getPrisma().reservations.update({
-            where: { id: nextRes.id },
-            data: {
-              room_id_next: nextRes.room_id,
-              room_id: nextRes.room_id,
-              room_type_id_next: nextRes.room_type_id,
-              room_type_id: nextRes.room_type_id,
-            },
+
+        for (const value of reservations) {
+          const folio = value.folios;
+          if (value.room_id) {
+            const room = await tx.rooms.findUnique({ where: { id: value.room_id } });
+            if (room) {
+              const upd: any = { maid_status: 1 };
+              if (folio.check_out_date && new Date(folio.check_out_date.getTime()).getTime() === nextObj.getTime()) {
+                upd.room_status = 2;
+              }
+              await tx.rooms.update({ where: { id: room.id }, data: upd });
+            }
+          }
+          const nextRes = await tx.reservations.findFirst({
+            where: { folio_id: folio.id, date: nextRange },
           });
+          if (nextRes && nextRes.room_id !== value.room_id) {
+            await tx.reservations.update({
+              where: { id: nextRes.id },
+              data: {
+                room_id_next: nextRes.room_id,
+                room_id: nextRes.room_id,
+                room_type_id_next: nextRes.room_type_id,
+                room_type_id: nextRes.room_type_id,
+              },
+            });
+          }
+          if (value.rates?.code_post_id) {
+            await postTrx(tx, folio, Number(value.rates.code_post_id), Number(value.total ?? 0), 'room_revenue');
+          }
+          if (Number(value.total_extra_bed ?? 0) > 0 && value.rates?.code_post_extra_bed_id) {
+            await postTrx(tx, folio, Number(value.rates.code_post_extra_bed_id), Number(value.total_extra_bed), 'extra_bed');
+          }
+          await tx.reservations.updateMany({ where: { id: value.id }, data: { is_posting: 1 } });
         }
-        if (value.rates?.code_post_id) {
-          await postTrx(folio, Number(value.rates.code_post_id), Number(value.total ?? 0), 'room_revenue');
-        }
-        if (Number(value.total_extra_bed ?? 0) > 0 && value.rates?.code_post_extra_bed_id) {
-          await postTrx(folio, Number(value.rates.code_post_extra_bed_id), Number(value.total_extra_bed), 'extra_bed');
-        }
-        await getPrisma().reservations.updateMany({ where: { id: value.id }, data: { is_posting: 1 } });
-      }
 
-      // 5. Additional item per folio inclusive (Laravel model_has_code_items loop — Prisma @@ignore, raw SQL)
-      const mhciRows: any[] = await getPrisma().$queryRaw`
-        SELECT model_id FROM model_has_code_items WHERE model_type = 'App\Models\Folio'
-      `;
-      const mhciFolioIds = mhciRows.map((m: any) => BigInt(String(m.model_id)));
-      const inclusiveFolios = await getPrisma().folios.findMany({
-        where: { property_id: BigInt(propertyId), status_reservation: 0, deleted_at: null, id: { in: mhciFolioIds } },
-        orderBy: { created_at: 'asc' },
-      });
-      for (const folio of inclusiveFolios) {
-        const items: any[] = await getPrisma().$queryRaw`
-          SELECT * FROM model_has_code_items
-          WHERE model_id = ${folio.id} AND model_type = 'App\Models\Folio'
-            AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+        // 5. Additional item per folio inclusive (Laravel model_has_code_items loop — Prisma @@ignore, raw SQL)
+        const mhciRows: any[] = await tx.$queryRaw`
+          SELECT model_id FROM model_has_code_items WHERE model_type = 'App\\Models\\Folio'
         `;
-        if (items.length === 0) continue;
-        for (const item of items) {
-          const codeItemId = Number(item.code_item_id);
-          if (!codeItemId) continue;
-          const codeItem = await getPrisma().code_items.findUnique({ where: { id: BigInt(codeItemId) } });
-          if (!codeItem?.code_post_id) continue;
-          const upsales = Number(item.upsales ?? 0);
-          const sales = Number(item.sales ?? 0);
-          await postTrx(folio, Number(codeItem.code_post_id), upsales > 0 ? upsales : sales, 'additional_item');
+        const mhciFolioIds = mhciRows.map((m: any) => BigInt(String(m.model_id)));
+        const inclusiveFolios = await tx.folios.findMany({
+          where: { property_id: BigInt(propertyId), status_reservation: 0, deleted_at: null, id: { in: mhciFolioIds } },
+          orderBy: { created_at: 'asc' },
+        });
+        for (const folio of inclusiveFolios) {
+          const items: any[] = await tx.$queryRaw`
+            SELECT * FROM model_has_code_items
+            WHERE model_id = ${folio.id} AND model_type = 'App\\Models\\Folio'
+              AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+          `;
+          if (items.length === 0) continue;
+          for (const item of items) {
+            const codeItemId = Number(item.code_item_id);
+            if (!codeItemId) continue;
+            const codeItem = await tx.code_items.findUnique({ where: { id: BigInt(codeItemId) } });
+            if (!codeItem?.code_post_id) continue;
+            const upsales = Number(item.upsales ?? 0);
+            const sales = Number(item.sales ?? 0);
+            await postTrx(tx, folio, Number(codeItem.code_post_id), upsales > 0 ? upsales : sales, 'additional_item');
+          }
+          await tx.$executeRaw`
+            UPDATE model_has_code_items SET is_posting = 1
+            WHERE model_id = ${folio.id} AND model_type = 'App\\Models\\Folio'
+              AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+          `;
         }
-        await getPrisma().$executeRaw`
-          UPDATE model_has_code_items SET is_posting = 1
-          WHERE model_id = ${folio.id} AND model_type = 'App\Models\Folio'
-            AND start_date <= ${dateObj} AND end_date >= ${dateObj}
-        `;
-      }
 
-      // 6. Room status transitions (vacant→block, block→vacant+dirty, vacant→out of order)
-      const availTomorrow = (await getPrisma().room_availabilities.findMany({
-        where: { property_id: propertyId, date: nextRange },
-      })).map((a) => a.room_id);
-      const workOrderRooms = (await getPrisma().work_orders.findMany({
-        where: { property_id: BigInt(propertyId), date: nextRange, end_date: null },
-      })).map((w) => Number(w.room_id)).filter((x) => x > 0);
+        // 6. Room status transitions (vacant→block, block→vacant+dirty, vacant→out of order)
+        const availTomorrow = (await tx.room_availabilities.findMany({
+          where: { property_id: propertyId, date: nextRange },
+        })).map((a: any) => a.room_id);
+        const workOrderRooms = (await tx.work_orders.findMany({
+          where: { property_id: BigInt(propertyId), date: nextRange, end_date: null },
+        })).map((w: any) => Number(w.room_id)).filter((x: number) => x > 0);
 
-      const roomsVacant = await getPrisma().rooms.findMany({ where: { property_id: BigInt(propertyId), room_status: 0, id: { in: availTomorrow } } });
-      if (roomsVacant.length > 0) {
-        await getPrisma().rooms.updateMany({ where: { id: { in: roomsVacant.map((r) => r.id) } }, data: { room_status: 3 } });
-      }
+        const roomsVacant = await tx.rooms.findMany({ where: { property_id: BigInt(propertyId), room_status: 0, id: { in: availTomorrow } } });
+        if (roomsVacant.length > 0) {
+          await tx.rooms.updateMany({ where: { id: { in: roomsVacant.map((r: any) => r.id) } }, data: { room_status: 3 } });
+        }
 
-      const roomsBlock = await getPrisma().rooms.findMany({
-        where: { property_id: BigInt(propertyId), room_status: 3, NOT: { id: { in: availTomorrow } } },
+        const roomsBlock = await tx.rooms.findMany({
+          where: { property_id: BigInt(propertyId), room_status: 3, NOT: { id: { in: availTomorrow } } },
+        });
+        if (roomsBlock.length > 0) {
+          await tx.rooms.updateMany({ where: { id: { in: roomsBlock.map((r: any) => r.id) } }, data: { room_status: 0, maid_status: 1 } });
+        }
+
+        const roomsOOO = await tx.rooms.findMany({ where: { property_id: BigInt(propertyId), room_status: 0, id: { in: workOrderRooms } } });
+        if (roomsOOO.length > 0) {
+          await tx.rooms.updateMany({ where: { id: { in: roomsOOO.map((r: any) => r.id) } }, data: { room_status: 4 } });
+        }
+
+        // 8. LogAudit upsert per property (HasProperties scope parity)
+        const existing = await tx.log_audits.findFirst({ where: { date: dateObj, property_id: propertyId } });
+        if (existing) {
+          await tx.log_audits.update({ where: { id: existing.id }, data: { status: BigInt(1) } });
+        } else {
+          await tx.log_audits.create({ data: { date: dateObj, property_id: propertyId, status: BigInt(1) } });
+        }
       });
-      if (roomsBlock.length > 0) {
-        await getPrisma().rooms.updateMany({ where: { id: { in: roomsBlock.map((r) => r.id) } }, data: { room_status: 0, maid_status: 1 } });
-      }
 
-      const roomsOOO = await getPrisma().rooms.findMany({ where: { property_id: BigInt(propertyId), room_status: 0, id: { in: workOrderRooms } } });
-      if (roomsOOO.length > 0) {
-        await getPrisma().rooms.updateMany({ where: { id: { in: roomsOOO.map((r) => r.id) } }, data: { room_status: 4 } });
-      }
-
-      // 7. SystemBalance store (Laravel SystemBalance::storeBalance)
+      // 7. SystemBalance store (Laravel SystemBalance::storeBalance) — delete-and-rebuild day rows,
+      // safe to re-run; kept outside the atomic block because it manages its own client.
       await storeSystemBalance(dateObj, prevObj, propertyId);
-
-      // 8. LogAudit upsert per property (HasProperties scope parity)
-      const existing = await getPrisma().log_audits.findFirst({ where: { date: dateObj, property_id: propertyId } });
-      if (existing) {
-        await getPrisma().log_audits.update({ where: { id: existing.id }, data: { status: BigInt(1) } });
-      } else {
-        await getPrisma().log_audits.create({ data: { date: dateObj, property_id: propertyId, status: BigInt(1) } });
-      }
 
       success(res, { bussinesDate: dateStr, name: req.user?.name ?? '', image: '' }, 'Success');
     } catch (err: any) {

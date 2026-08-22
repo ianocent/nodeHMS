@@ -70,6 +70,10 @@ router.post('/batch-postings', authMiddleware, FrontDeskController.batchPostingS
 router.get('/batch-posting', authMiddleware, FrontDeskController.batchPostingList);
 router.post('/batch-posting', authMiddleware, FrontDeskController.batchPostingStore);
 
+// GLOBALSAVE commit — Laravel cms.php:1006 (BatchPostingController@batchPosting); temps → transactions
+router.post('/batch-posting/batch-posting', authMiddleware, FrontDeskController.batchPostingCommit);
+router.post('/batch-postings/batch-postings', authMiddleware, FrontDeskController.batchPostingCommit);
+
 // Deposit
 router.get('/deposits', authMiddleware, FrontDeskController.depositList);
 

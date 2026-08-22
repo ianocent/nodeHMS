@@ -3,6 +3,8 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { calculateCodePost } from '../utils/cmsConfig';
+import { occupancyPrice } from '../utils/reservationPricing';
 import { StaahService } from '../services/staah.service';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -45,7 +47,79 @@ async function buildAriPayload(interface_: any, dateFrom: string, dateTo: string
   });
   if (!roomMappings.length || !rateMappings.length) return [];
 
+  // Rate -> its own code_post drives the pushed price (Laravel SyncPriceStaah uses
+  // Folio::getReservation totals = net after code_post tax/service/pb1 calc), NOT raw rate_rates.
+  const rateIds = [...new Set(rateMappings.map((rtm: any) => rtm.rate_id))];
+  const rateRows = await prisma.rates.findMany({
+    where: { id: { in: rateIds } },
+    select: { id: true, code_post_id: true },
+  });
+  const codePostByRate = new Map<number, any>();
+  const cpIds = [...new Set(rateRows.map((r: any) => r.code_post_id).filter(Boolean))] as bigint[];
+  if (cpIds.length) {
+    const cps = await prisma.code_posts.findMany({ where: { id: { in: cpIds } } });
+    const cpById = new Map(cps.map((c: any) => [Number(c.id), c]));
+    for (const r of rateRows) codePostByRate.set(Number(r.id), cpById.get(Number(r.code_post_id)) ?? null);
+  }
+  const property = await prisma.properties.findUnique({ where: { id: interface_.property_id }, select: { is_tax: true } });
+  const isTax = (property as any)?.is_tax === 1;
+
+  const todayStr = formatDate(new Date());
+
   const roomByType = new Map(roomMappings.map((rm: any) => [rm.room_type_id, rm]));
+
+  // Room stock = active physical rooms per room type (Laravel `roomstosell`)
+  const roomCountByType = new Map<number, number>();
+  for (const rm of roomMappings) {
+    const cnt = await prisma.rooms.count({ where: { room_type_id: rm.room_type_id, status: 1, deleted_at: null } });
+    roomCountByType.set(Number(rm.room_type_id), cnt);
+  }
+
+  // Occupancy combos from StaahRoomContentBreakdown (Laravel SyncPriceStaah:117-131);
+  // fallback to the two standard points when none configured.
+  const breakdowns = await prisma.staah_room_content_breakdowns.findMany({
+    where: {
+      property_id: interface_.property_id,
+      staah_interface_id: interface_.id,
+      status: 1,
+      deleted_at: null,
+    },
+  });
+  const combosByType = new Map<number, { adult: number; child: number }[]>();
+  for (const b of breakdowns) {
+    const list = combosByType.get(Number(b.room_type_id)) ?? [];
+    list.push({ adult: Number(b.adult), child: Number(b.child) });
+    combosByType.set(Number(b.room_type_id), list);
+  }
+  const DEFAULT_COMBOS = [{ adult: 1, child: 0 }, { adult: 2, child: 0 }];
+
+  // Room type fallback rate (Laravel Folio::getReservation :2258-2263 — when no
+  // rate_rates row / stop_sell=1 for the night, price = room_types.rate flat).
+  const roomTypeRows = await prisma.room_types.findMany({
+    where: { id: { in: [...roomByType.keys()] } },
+    select: { id: true, rate: true },
+  });
+  const roomTypeRateById = new Map<number, number>(roomTypeRows.map((rt: any) => [Number(rt.id), Number(rt.rate ?? 0)]));
+
+  function staahPrice(net: number, codePost: any): number {
+    if (!codePost) return net;
+    const calc = calculateCodePost(
+      {
+        tax: codePost.tax ?? false,
+        tax_percentage: codePost.tax_percentage ? Number(codePost.tax_percentage) : 0,
+        local_tax: codePost.local_tax ?? false,
+        local_tax_percentage: codePost.local_tax_percentage ? Number(codePost.local_tax_percentage) : 0,
+        service_charge: codePost.service_charge ?? false,
+        service_charge_percentage: codePost.service_charge_percentage ? Number(codePost.service_charge_percentage) : 0,
+        service_charge_include_local_tax: codePost.service_charge_include_local_tax ?? false,
+        tax_include_local_tax: codePost.tax_include_local_tax ?? false,
+      },
+      net,
+      isTax
+    );
+    return Number(calc.total ?? net);
+  }
+
   const rateByRateId = new Map(rateMappings.map((rtm: any) => [rtm.rate_id, rtm]));
   const rateRates = await prisma.rate_rates.findMany({
     where: {
@@ -56,60 +130,91 @@ async function buildAriPayload(interface_: any, dateFrom: string, dateTo: string
     },
     orderBy: { date: 'asc' },
   });
+  // Restrictions/price lookup per (room_type|rate|date) — Laravel keys RateRate rows the same way.
+  const rrByKey = new Map<string, any>();
+  for (const rr of rateRates) {
+    rrByKey.set(`${rr.room_type_id}|${rr.rate_id}|${formatDate(rr.date)}`, rr);
+  }
 
   const rooms: any[] = [];
   for (const [roomTypeId, roomMapping] of roomByType) {
-    const ratesForRoom = rateRates
-      .filter((rr: any) => rr.room_type_id === roomTypeId)
-      .sort((a: any, b: any) => a.date.getTime() - b.date.getTime());
-    if (!ratesForRoom.length) continue;
+    // Rate ids paired with this room type — derived from the rate grid itself
+    // (staah_rate_mappings carry no room-type link, same as Laravel's per-rate run).
+    const rateIdsForRoom = new Set<number>(
+      rateRates.filter((rr: any) => rr.room_type_id === roomTypeId).map((rr: any) => Number(rr.rate_id))
+    );
+    if (!rateIdsForRoom.size) continue;
 
+    const roomStock = roomCountByType.get(Number(roomTypeId)) ?? 0;
+    const combos = combosByType.get(Number(roomTypeId)) ?? DEFAULT_COMBOS;
     const dates: any[] = [];
     let currentRange: any = null;
-    for (const rr of ratesForRoom) {
-      const dateStr = formatDate(rr.date);
-      const rateMapping: any = rateByRateId.get(rr.rate_id);
-      if (!rateMapping) continue;
-      const prices: any[] = [];
-      if (Number(rr.one_adult) > 0) prices.push({ NumberOfGuests: '1', value: String(Number(rr.one_adult)) });
-      if (Number(rr.two_adult) > 0) prices.push({ NumberOfGuests: '2', value: String(Number(rr.two_adult)) });
-      const ratePlanId = rateMapping.staah_rate_plan_id;
-      const closed = rr.stop_sell ? '1' : '0';
-      const minStay = String(rr.min_night);
-      const maxStay = String(rr.max_night);
-      const closedArrival = rr.stop_arrival ? '1' : '0';
-      const closedDeparture = rr.stop_departure ? '1' : '0';
-      const extraAdult = Number(rr.extra_adult).toFixed(2);
-      const extraChild = Number(rr.extra_child).toFixed(2);
-      const matchKey = JSON.stringify([prices, ratePlanId, closed, minStay, maxStay, closedArrival, closedDeparture, extraAdult, extraChild]);
 
-      if (currentRange === null) {
-        currentRange = {
-          from: dateStr, to: dateStr,
-          rate: [{ rateplanid: ratePlanId }],
-          price: prices, closed, minimumstay: minStay, maximumstay: maxStay,
-          closedonarrival: closedArrival, closedondeparture: closedDeparture,
-          extraadultrate: extraAdult, extrachildrate: extraChild,
-          matchKey,
-        };
-      } else if (currentRange.matchKey === matchKey && formatDate(new Date(new Date(currentRange.to + 'T00:00:00Z').getTime() + 86400000)) === dateStr) {
-        currentRange.to = dateStr;
-      } else {
-        delete currentRange.matchKey;
-        if (currentRange.from === currentRange.to) {
-          currentRange = { value: currentRange.from, ...currentRange };
-          delete currentRange.from;
-          delete currentRange.to;
+    // Every night in range is pushed (Laravel getReservation emits one row per night
+    // even when the rate_rates grid has a gap -> room_types.rate fallback price).
+    const startD = new Date(`${dateFrom}T00:00:00Z`);
+    const endD = new Date(`${dateTo}T00:00:00Z`);
+    for (let d = new Date(startD); d <= endD; d = new Date(d.getTime() + 86400000)) {
+      const dateStr = formatDate(d);
+      if (dateStr < todayStr) continue; // past dates never pushed
+
+      for (const rateIdNum of rateIdsForRoom) {
+        const rateMapping: any = rateByRateId.get(BigInt(rateIdNum));
+        if (!rateMapping) continue;
+        const rr = rrByKey.get(`${BigInt(roomTypeId)}|${BigInt(rateIdNum)}|${dateStr}`);
+        const codePost = codePostByRate.get(rateIdNum) ?? null;
+        const fallbackRate = roomTypeRateById.get(Number(roomTypeId)) ?? 0;
+
+        const prices: any[] = [];
+        for (const combo of combos) {
+          // Laravel Folio::getReservation (:2246-2266): stop_sell=1 rows are treated as
+          // missing -> room type flat rate; otherwise occupancy formula on rate_rates.
+          const base = rr && !rr.stop_sell ? occupancyPrice(rr, combo.adult, combo.child) : fallbackRate;
+          const total = staahPrice(base, codePost);
+          if (total > 0) prices.push({ NumberOfGuests: String(combo.adult + combo.child), value: String(total) });
         }
-        dates.push(currentRange);
-        currentRange = {
-          from: dateStr, to: dateStr,
-          rate: [{ rateplanid: ratePlanId }],
-          price: prices, closed, minimumstay: minStay, maximumstay: maxStay,
-          closedonarrival: closedArrival, closedondeparture: closedDeparture,
-          extraadultrate: extraAdult, extrachildrate: extraChild,
-          matchKey,
-        };
+        if (!prices.length) continue;
+
+        const ratePlanId = rateMapping.staah_rate_plan_id;
+        const closed = rr?.stop_sell ? '1' : '0';
+        const minStay = String(rr?.min_night ?? 1);
+        const maxStay = String(rr?.max_night ?? 99);
+        const closedArrival = rr?.stop_arrival ? '1' : '0';
+        const closedDeparture = rr?.stop_departure ? '1' : '0';
+        const extraAdult = Number(rr?.extra_adult ?? 0).toFixed(2);
+        const extraChild = Number(rr?.extra_child ?? 0).toFixed(2);
+        const matchKey = JSON.stringify([prices, ratePlanId, closed, minStay, maxStay, closedArrival, closedDeparture, extraAdult, extraChild, roomStock]);
+
+        if (currentRange === null) {
+          currentRange = {
+            from: dateStr, to: dateStr,
+            rate: [{ rateplanid: ratePlanId }],
+            price: prices, closed, minimumstay: minStay, maximumstay: maxStay,
+            closedonarrival: closedArrival, closedondeparture: closedDeparture,
+            extraadultrate: extraAdult, extrachildrate: extraChild,
+            roomstosell: String(roomStock),
+            matchKey,
+          };
+        } else if (currentRange.matchKey === matchKey && formatDate(new Date(new Date(currentRange.to + 'T00:00:00Z').getTime() + 86400000)) === dateStr) {
+          currentRange.to = dateStr;
+        } else {
+          delete currentRange.matchKey;
+          if (currentRange.from === currentRange.to) {
+            currentRange = { value: currentRange.from, ...currentRange };
+            delete currentRange.from;
+            delete currentRange.to;
+          }
+          dates.push(currentRange);
+          currentRange = {
+            from: dateStr, to: dateStr,
+            rate: [{ rateplanid: ratePlanId }],
+            price: prices, closed, minimumstay: minStay, maximumstay: maxStay,
+            closedonarrival: closedArrival, closedondeparture: closedDeparture,
+            extraadultrate: extraAdult, extrachildrate: extraChild,
+            roomstosell: String(roomStock),
+            matchKey,
+          };
+        }
       }
     }
     if (currentRange !== null) {

@@ -15,10 +15,30 @@ import {
   dashLabel,
 } from '../utils/cmsStatus';
 import { laravelPaging } from '../utils/tableMeta';
+import { priceNight } from '../utils/reservationPricing';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
+
+// saveReservation-lite for drag rebuild — priced per-night row creation against an arbitrary tx client.
+async function priceNightPublic(tx: any, opts: {
+  rateId: bigint | null;
+  roomTypeId: bigint;
+  night: Date;
+  getNight: number;
+  adult: number;
+  child: number;
+  isTax: boolean;
+  rateCodePost: any;
+}) {
+  return priceNight({
+    prisma: tx as any,
+    ...opts,
+    quantity: 1,
+    promos: [],
+  } as any);
+}
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -720,6 +740,465 @@ success(res, null, 'Success', 200, meta);
     } catch (err: any) {
       console.error('getFolioDetail error:', err);
       error(res, 'getFolioDetail error: ' + (err?.message ?? 'unknown'), 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Room availability mutations (Laravel StatisticController.php:538-703)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  static async updateRoomAvailability(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const roomId = Number(Array.isArray(req.params.room) ? req.params.room[0] : req.params.room);
+      const body = req.body || {};
+
+      // Body keys that parse as dates -> values 'vacant'|'blocked'
+      const dateEntries = Object.entries(body).filter(
+        ([k, v]) => /^\d{4}-\d{2}-\d{2}/.test(k) && typeof v === 'string' && ['vacant', 'blocked'].includes(v as string)
+      ) as [string, string][];
+
+      if (dateEntries.length > 0) {
+        const dates = dateEntries.map(([k]) => new Date(`${(k as string).substring(0, 10)}T00:00:00.000Z`));
+        const conflict = await prisma.reservations.findFirst({
+          where: {
+            room_id: roomId,
+            deleted_at: null,
+            date: { gte: dates[0], lte: dates[dates.length - 1] },
+            folios: { is: { status_reservation: { not: 2 }, deleted_at: null } }, // not cancel
+          },
+        });
+        if (conflict) {
+          res.status(400).json({ code: 400, message: 'Cannot update room availability, because there is a reservation on the date' });
+          return;
+        }
+      }
+
+      for (const [key, value] of dateEntries) {
+        const dayStart = new Date(`${key.substring(0, 10)}T00:00:00.000Z`);
+        const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
+        const existing = await prisma.room_availabilities.findFirst({
+          where: { room_id: roomId, date: { gte: dayStart, lt: dayEnd }, deleted_at: null },
+        });
+        if (existing && value === 'vacant') {
+          await prisma.room_availabilities.update({ where: { id: existing.id }, data: { deleted_at: new Date() } });
+        } else if (!existing && value === 'blocked') {
+          await prisma.room_availabilities.create({
+            data: { property_id: pid, room_id: roomId, date: dayStart, status: BigInt(1), reason: (body as any).reason ?? null },
+          });
+        }
+      }
+
+      success(res, body, 'Data has been updated', 200);
+    } catch (err: any) {
+      console.error('updateRoomAvailability error:', err);
+      error(res, 'Failed to update room availability', 500);
+    }
+  }
+
+  static async updateRoomAvailabilityBulk(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const roomId = Number(Array.isArray(req.params.room) ? req.params.room[0] : req.params.room);
+      const { start_date, end_date, room_status, reason } = req.body || {};
+      const value = room_status?.value;
+      if (!start_date || !end_date || !value || !['vacant', 'blocked'].includes(value) || !reason) {
+        res.status(400).json({ code: 400, message: 'start_date, end_date, room_status.value (vacant|blocked) and reason are required' });
+        return;
+      }
+      const start = new Date(`${String(start_date).substring(0, 10)}T00:00:00.000Z`);
+      const end = new Date(`${String(end_date).substring(0, 10)}T00:00:00.000Z`);
+      const nights = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+
+      // Reservation conflict guard
+      const conflict = await prisma.reservations.findFirst({
+        where: {
+          room_id: roomId,
+          deleted_at: null,
+          date: { gte: start, lte: end },
+          folios: { is: { status_reservation: { not: 2 }, deleted_at: null } },
+        },
+      });
+      if (conflict) {
+        res.status(400).json({ code: 400, message: 'Cannot update room availability, because there is a reservation on the date' });
+        return;
+      }
+
+      const businessDate = await AuthController.getBusinessDate(BigInt(pid));
+      const bDate = new Date(`${businessDate}T00:00:00.000Z`);
+      const room = await prisma.rooms.findUnique({ where: { id: roomId } });
+
+      const uniqueCode = Buffer.from(new Date().toISOString().replace(/[-:TZ.]/g, '').substring(0, 14)).toString('base64');
+      const dataBlock: any[] = [];
+      const dataVacant: number[] = [];
+
+      for (let i = 0; i <= nights; i++) {
+        const day = new Date(start); day.setDate(day.getDate() + i);
+        const existing = await prisma.room_availabilities.findFirst({
+          where: { room_id: roomId, date: { gte: day, lt: new Date(day.getTime() + 86400000) }, deleted_at: null },
+        });
+
+        if (bDate.getTime() === day.getTime() && room) {
+          if (room.room_status !== ROOM_STATUSES.vacant.id && value === 'blocked') {
+            res.status(400).json({ code: 400, message: 'Room status is not vacant' });
+            return;
+          }
+          if (value === 'blocked') {
+            await prisma.rooms.update({ where: { id: room.id }, data: { room_status: ROOM_STATUSES.block.id } });
+          } else {
+            await prisma.rooms.update({ where: { id: room.id }, data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id } });
+          }
+        }
+
+        if (value === 'vacant' && existing) {
+          dataVacant.push(existing.id);
+        } else if (value === 'blocked') {
+          dataBlock.push({ property_id: pid, room_id: roomId, date: day, status: BigInt(1), reason, uniqueCode });
+        }
+      }
+
+      if (dataVacant.length > 0) {
+        await prisma.room_availabilities.updateMany({ where: { id: { in: dataVacant } }, data: { deleted_at: new Date() } });
+      }
+      if (dataBlock.length > 0) {
+        await prisma.room_availabilities.deleteMany({ where: { room_id: roomId, date: { gte: start, lte: end } } });
+        await prisma.room_availabilities.createMany({ data: dataBlock });
+      }
+
+      success(res, null, 'Data has been updated', 200, undefined);
+      void value;
+    } catch (err: any) {
+      console.error('updateRoomAvailabilityBulk error:', err);
+      error(res, 'Failed to bulk-update room availability', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Drag & drop room move (Laravel StatisticController.php:736-1017)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  private static safeParseDate(value: any): Date | null {
+    if (value === undefined || value === null || value === '' || value === '-') return null;
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  static async previewDragRoomAvailability(req: Request, res: Response): Promise<void> {
+    try {
+      const folioIdInput = String(req.body?.folioId ?? '').trim();
+      const folioNumber = /^\d+$/.test(folioIdInput) ? `F${folioIdInput}` : folioIdInput;
+
+      const folio: any = await prisma.folios.findFirst({ where: { folio_number: folioNumber, deleted_at: null } });
+      if (!folio) { res.status(404).json({ code: 404, message: `Folio not found: ${folioNumber}` }); return; }
+
+      const toRoomName = String(req.body?.toRoom ?? '').trim();
+      const targetRoom = await prisma.rooms.findFirst({ where: { name: toRoomName, deleted_at: null } });
+      if (!targetRoom) { res.status(400).json({ code: 400, message: `Target room not found: ${req.body?.toRoom}` }); return; }
+
+      const reservation: any = await prisma.reservations.findFirst({
+        where: { folio_id: folio.id, deleted_at: null },
+        orderBy: { check_in_date: 'asc' },
+      });
+      if (!reservation) { res.status(404).json({ code: 404, message: 'Reservation not found' }); return; }
+
+      const oldCheckIn = StatisticController.safeParseDate(reservation.check_in_date);
+      const oldCheckOut = StatisticController.safeParseDate(reservation.check_out_date);
+      if (!oldCheckIn || !oldCheckOut) {
+        res.status(400).json({ code: 400, message: 'Reservation has invalid check-in or check-out date in database' });
+        return;
+      }
+
+      const newCheckIn = StatisticController.safeParseDate(req.body?.checkInDate);
+      const newCheckOut = StatisticController.safeParseDate(req.body?.checkOutDate);
+      if (!newCheckIn) { res.status(400).json({ code: 400, message: `Invalid checkInDate: ${req.body?.checkInDate}` }); return; }
+      if (!newCheckOut) { res.status(400).json({ code: 400, message: `Invalid checkOutDate: ${req.body?.checkOutDate}` }); return; }
+      if (newCheckIn >= newCheckOut) { res.status(400).json({ code: 400, message: 'checkInDate must be before checkOutDate' }); return; }
+
+      const night = Math.round((newCheckOut.getTime() - newCheckIn.getTime()) / (1000 * 60 * 60 * 24));
+      const warnings: string[] = [];
+
+      let isSubfolio = false;
+      let parentData: any = null;
+      if (String(folio.type_reservation ?? '').toLowerCase() === 'git' && Number(folio.parent) !== 0) {
+        isSubfolio = true;
+        const parent: any = await prisma.folios.findFirst({ where: { id: folio.parent } });
+        if (parent) {
+          parentData = {
+            parent_check_in: parent.check_in_date,
+            parent_check_out: parent.check_out_date,
+            parent_folio: parent.folio_number,
+          };
+          const pIn = StatisticController.safeParseDate(parent.check_in_date);
+          const pOut = StatisticController.safeParseDate(parent.check_out_date);
+          if (pIn && pOut && (newCheckIn < pIn || newCheckOut > pOut)) {
+            warnings.push('Subfolio stay cannot exceed parent folio stay period');
+          }
+        }
+      }
+
+      const conflict = await prisma.reservations.findFirst({
+        where: {
+          room_id: targetRoom.id,
+          deleted_at: null,
+          folio_id: { not: folio.id },
+          check_in_date: { lt: newCheckOut },
+          check_out_date: { gt: newCheckIn },
+          folios: { is: { status_reservation: { notIn: [1, 2] }, deleted_at: null } }, // not checked-out / cancelled
+        },
+      });
+      if (conflict) warnings.push('Target room already occupied on those dates');
+
+      const guestName = `${folio.first_name ?? ''} ${folio.last_name ?? ''}`.trim();
+
+      res.json({
+        code: 200,
+        data: {
+          folio_id: Number(folio.id),
+          folio_number: folio.folio_number,
+          guest_name: guestName || '-',
+          type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
+          from_room: req.body?.fromRoom,
+          to_room: req.body?.toRoom,
+          old_check_in: oldCheckIn.toISOString().substring(0, 10),
+          old_check_out: oldCheckOut.toISOString().substring(0, 10),
+          new_check_in: newCheckIn.toISOString().substring(0, 10),
+          new_check_out: newCheckOut.toISOString().substring(0, 10),
+          night,
+          is_subfolio: isSubfolio,
+          parent: parentData,
+          can_move: warnings.length === 0,
+          warnings,
+        },
+      });
+    } catch (err: any) {
+      console.error('previewDragRoomAvailability error:', err);
+      error(res, err?.message ?? 'preview drag failed', 500);
+    }
+  }
+
+  static async dragRoomAvailability(req: Request, res: Response): Promise<void> {
+    try {
+      const { toRoom, folioId, checkInDate, checkOutDate } = req.body || {};
+      if (!toRoom || !folioId || !checkInDate || !checkOutDate) {
+        res.status(400).json({ code: 400, message: 'toRoom, toDate, folioId, checkInDate and checkOutDate are required' });
+        return;
+      }
+      const folioIdInput = String(folioId).trim();
+      const folioNumber = /^\d+$/.test(folioIdInput) ? `F${folioIdInput}` : folioIdInput;
+
+      const folio: any = await prisma.folios.findFirst({ where: { folio_number: folioNumber, deleted_at: null } });
+      if (!folio) { res.status(404).json({ code: 404, message: `Folio tidak ditemukan: ${folioNumber}` }); return; }
+
+      // Status guard — only pure Reservation/Pending may move (Laravel :903-917)
+      const activeReservation: any = await prisma.reservations.findFirst({
+        where: { folio_id: folio.id, deleted_at: null },
+        orderBy: { id: 'desc' },
+      });
+      const st = activeReservation?.status_reservation;
+      if ([0, 1].includes(st)) {
+        res.status(400).json({
+          code: 400,
+          message: `Move Reservation only allowed in Reservation status (current: ${STATUS_RESERVATION_MAP[st] ?? st})`,
+        });
+        return;
+      }
+
+      const targetRoom = await prisma.rooms.findFirst({ where: { name: String(toRoom).trim(), deleted_at: null } });
+      if (!targetRoom) { res.status(404).json({ code: 404, message: `Room tujuan tidak ditemukan: ${toRoom}` }); return; }
+
+      const newCheckIn = StatisticController.safeParseDate(checkInDate);
+      const newCheckOut = StatisticController.safeParseDate(checkOutDate);
+      if (!newCheckIn) { res.status(400).json({ code: 400, message: `Invalid checkInDate: ${checkInDate}` }); return; }
+      if (!newCheckOut) { res.status(400).json({ code: 400, message: `Invalid checkOutDate: ${checkOutDate}` }); return; }
+      if (newCheckIn >= newCheckOut) { res.status(400).json({ code: 400, message: 'Check In Date harus kurang dari Check Out Date' }); return; }
+
+      const conflict = await prisma.reservations.findFirst({
+        where: {
+          room_id: targetRoom.id,
+          deleted_at: null,
+          folio_id: { not: folio.id },
+          check_in_date: { lt: newCheckOut },
+          check_out_date: { gt: newCheckIn },
+          folios: { is: { status_reservation: { notIn: [1, 2] }, deleted_at: null } },
+        },
+      });
+      if (conflict) { res.status(409).json({ code: 409, message: 'Room sudah terisi pada rentang tanggal tersebut' }); return; }
+
+      const latestReservation: any = await prisma.reservations.findFirst({
+        where: { folio_id: folio.id, deleted_at: null },
+        orderBy: { id: 'desc' },
+      });
+      if (!latestReservation) { res.status(404).json({ code: 404, message: 'Tidak ada reservation di folio' }); return; }
+
+      await prisma.$transaction(async (tx: any) => {
+        // Delete existing reservations for this folio (soft delete, Laravel :973-975)
+        await tx.reservations.updateMany({
+          where: { folio_id: folio.id, deleted_at: null },
+          data: { deleted_at: new Date(), deleted_by: req.user?.id ?? null },
+        });
+
+        // Rebuild per-night rows in the target room with pricing (saveReservation parity)
+        const nights = Math.max(1, Math.round((newCheckOut.getTime() - newCheckIn.getTime()) / (1000 * 60 * 60 * 24)));
+        const rateIdBig = latestReservation.rate_id ? BigInt(latestReservation.rate_id) : null;
+        const rateRow = rateIdBig ? await tx.rates.findUnique({ where: { id: rateIdBig }, select: { code_post_id: true } }) : null;
+        const rateCodePost = rateRow?.code_post_id ? await tx.code_posts.findUnique({ where: { id: rateRow.code_post_id } }) : null;
+        const property = await tx.properties.findUnique({ where: { id: folio.property_id }, select: { is_tax: true } });
+        const isTax = (property as any)?.is_tax === 1;
+
+        for (let i = 0; i < nights; i++) {
+          const nightDate = new Date(newCheckIn); nightDate.setDate(nightDate.getDate() + i);
+          const pricing = await priceNightPublic(tx, {
+            rateId: rateIdBig,
+            roomTypeId: targetRoom.room_type_id,
+            night: nightDate,
+            getNight: nights,
+            adult: Number(latestReservation.adult || 1),
+            child: Number(latestReservation.child || 0),
+            isTax,
+            rateCodePost,
+          });
+          await tx.reservations.create({
+            data: {
+              property_id: folio.property_id,
+              folio_id: folio.id,
+              rate_id: rateIdBig,
+              room_type_id: targetRoom.room_type_id,
+              room_id: targetRoom.id,
+              eta: latestReservation.eta,
+              etd: latestReservation.etd,
+              adult: latestReservation.adult || 1,
+              child: latestReservation.child || 0,
+              add_bed: latestReservation.add_bed || 0,
+              check_in_date: newCheckIn,
+              check_out_date: newCheckOut,
+              date: nightDate,
+              status_reservation: latestReservation.status_reservation,
+              status: latestReservation.status,
+              night: nights,
+              amount: pricing.amount,
+              amountt: pricing.amount,
+              total: pricing.total,
+              service_charge: pricing.service_charge,
+              pb1: pricing.pb1,
+              tax3: pricing.tax3,
+              created_by: req.user?.id ?? null,
+            },
+          });
+        }
+      });
+
+      res.json({ code: 200, message: `Reservation berhasil dipindahkan ke ${String(toRoom).trim()}` });
+    } catch (err: any) {
+      console.error('dragRoomAvailability error:', err);
+      error(res, err?.message ?? 'drag failed', 500);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // statistic-room-type detail / add-message / add-rate-code (Laravel :2412-2550)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  static async statisticsRoomTypeMouseOver(req: Request, res: Response): Promise<void> {
+    try {
+      const { room_type_id, date } = req.body || {};
+      if (!room_type_id || !date) { res.status(400).json({ code: 400, message: 'room_type_id and date are required' }); return; }
+
+      const roomType: any = await prisma.room_types.findUnique({ where: { id: BigInt(room_type_id) }, include: { rooms: true } });
+      if (!roomType) { res.status(400).json({ code: 400, message: 'Room Type not found' }); return; }
+
+      const dayStart = new Date(`${String(date).substring(0, 10)}T00:00:00.000Z`);
+      const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
+      const roomIds = roomType.rooms.map((r: any) => r.id);
+
+      const reservations: any[] = await prisma.reservations.findMany({
+        where: {
+          date: { gte: dayStart, lt: dayEnd },
+          room_type_id: roomType.id,
+          deleted_at: null,
+          folios: { is: { status_reservation: { not: 2 }, deleted_at: null } },
+        },
+        include: { folios: { select: { folio_number: true, status_reservation: true } }, rooms: { select: { name: true } } },
+      });
+
+      const totalRoom = roomType.rooms.length;
+      const totalRoomSold = reservations.length;
+      const soldForOccupancy = reservations.filter((r: any) => r.folios?.status_reservation !== 5).length;
+      const occupancyPct = ((soldForOccupancy / (totalRoom <= 0 ? 1 : totalRoom)) * 100).toFixed(4);
+
+      const oooRoom = await prisma.work_orders.count({
+        where: { start_date: { lte: dayStart }, OR: [{ end_date: null }, { end_date: { gte: dayStart } }], room_id: { in: roomIds }, deleted_at: null },
+      });
+      const blockRoom = await prisma.room_availabilities.count({
+        where: { date: { gte: dayStart, lt: dayEnd }, room_id: { in: roomIds }, deleted_at: null },
+      });
+
+      const listFolio = reservations.map((item: any) => ({
+        folio_number: item.folios?.folio_number ?? null,
+        room_id: item.rooms?.name ?? null,
+      }));
+
+      res.json({
+        data: {
+          name: `${roomType.name} on ${dayStart.toISOString().substring(0, 10)}`,
+          total_room: totalRoom,
+          total_room_sold: totalRoomSold,
+          block_room: blockRoom,
+          ooo_room: oooRoom,
+          total_allotment: 0,
+          total_allotment_used: 0,
+          occupancy: `${Number(occupancyPct)}%`,
+          list_folio: listFolio,
+        },
+        code: 200,
+        message: 'Data has been loaded',
+      });
+    } catch (err: any) {
+      console.error('statisticsRoomTypeMouseOver error:', err);
+      error(res, err?.message ?? 'mouseover failed', 500);
+    }
+  }
+
+  static async statisticsRoomTypeAddMessage(req: Request, res: Response): Promise<void> {
+    try {
+      const { date } = req.body || {};
+      if (!date) { res.status(400).json({ code: 400, message: 'The date field is required.' }); return; }
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const text = String(req.body?.form?.text ?? '');
+      const dayStart = new Date(`${String(date).substring(0, 10)}T00:00:00.000Z`);
+
+      const existing = await prisma.statistic_messages.findFirst({ where: { date: dayStart, property_id: pid } });
+      let row;
+      if (!existing) {
+        row = await prisma.statistic_messages.create({ data: { date: dayStart, text, property_id: pid } });
+      } else {
+        row = await prisma.statistic_messages.update({ where: { id: existing.id }, data: { text } });
+      }
+      res.json({ data: row, code: 200, message: 'Data has been saved' });
+    } catch (err: any) {
+      console.error('statisticsRoomTypeAddMessage error:', err);
+      error(res, err?.message ?? 'add message failed', 500);
+    }
+  }
+
+  static async statisticsRoomTypeAddRateCode(req: Request, res: Response): Promise<void> {
+    try {
+      const { date } = req.body || {};
+      if (!date) { res.status(400).json({ code: 400, message: 'The date field is required.' }); return; }
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const text = String(req.body?.form?.text ?? '');
+      const dayStart = new Date(`${String(date).substring(0, 10)}T00:00:00.000Z`);
+
+      const existing = await prisma.statistic_rate_codes.findFirst({ where: { date: dayStart, property_id: pid } });
+      let row;
+      if (!existing) {
+        row = await prisma.statistic_rate_codes.create({ data: { date: dayStart, text, property_id: pid } });
+      } else {
+        row = await prisma.statistic_rate_codes.update({ where: { id: existing.id }, data: { text } });
+      }
+      res.json({ data: row, code: 200, message: 'Data has been saved' });
+    } catch (err: any) {
+      console.error('statisticsRoomTypeAddRateCode error:', err);
+      error(res, err?.message ?? 'add rate-code failed', 500);
     }
   }
 }

@@ -9,6 +9,11 @@ import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { dataSearch, applySearchField } from '../utils/search';
 import { AuthController } from './auth.controller';
+import { enqueueJob } from '../config/queue';
+
+function formatDate(d: Date): string {
+  return d.toISOString().split('T')[0];
+}
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -86,6 +91,29 @@ export async function folioBalanceWithoutPosting(folio: { id: bigint; type_reser
 
   const own = await prisma.transactions.findMany({ where: { folio_id: folio.id }, select: { type_amount: true, total: true } });
   return sumNet(own);
+}
+
+// Laravel Folio@getBalance parity (Folio.php:993-1013) — display balance.
+// Same as folioBalanceWithoutPosting but GIT-parent children are NotCancel-filtered (status != 2).
+export async function folioBalanceDisplay(folio: { id: bigint; type_reservation: string | null; parent: number | bigint | null }): Promise<number> {
+  const isGit = String(folio.type_reservation ?? '').toLowerCase() === 'git';
+  const parentNum = Number(folio.parent ?? 0);
+  const sumNet = (rows: { type_amount: string | null; total: any }[]) =>
+    rows.reduce((s, t) => s + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)), 0);
+
+  if (isGit && parentNum === 0) {
+    const children = await prisma.folios.findMany({
+      where: { parent: folio.id, deleted_at: null, status_reservation: { not: 2 } },
+      select: { transactions: { where: { model_type: 'App\\Models\\CompanyProfile' }, select: { type_amount: true, total: true } } },
+    });
+    let balance = 0;
+    for (const c of children) balance += sumNet(c.transactions);
+    const own = await prisma.transactions.findMany({ where: { folio_id: folio.id }, select: { type_amount: true, total: true } });
+    balance += sumNet(own);
+    return balance;
+  }
+
+  return folioBalanceWithoutPosting(folio);
 }
 
 // Laravel Folio@transferTransaction parity (Folio.php:781-928) — runs during check-out.
@@ -502,13 +530,8 @@ const lastReservation = f.reservations?.[f.reservations.length - 1];
         const roomName = lastReservation?.rooms?.name || lastReservation?.room_name || '';
         const roomTypeName = lastReservation?.room_types?.name || lastReservation?.room_type_name || '';
 
-        // Get balance from transactions
-        const transactions = await prisma.transactions.findMany({
-          where: { folio_id: f.id, deleted_at: null },
-        });
-        const balance = transactions.reduce((sum: number, t: any) => {
-          return sum + Number(t.total || 0);
-        }, 0);
+        // Laravel Folio@getBalance parity: MINUS subtracts, GIT parent/sub variants
+        const balance = await folioBalanceDisplay(f);
 
         return {
           id: Number(f.id),
@@ -707,6 +730,13 @@ room: roomName,
         });
       }
 
+      // Laravel dispatches SyncStaahRoomAvailability after every folio mutation
+      // (Folio.php:1201/2100/2743) — push availability to channels event-driven.
+      enqueueJob('sync-staah-room-availability', {
+        propertyId: Number(folio.property_id),
+        dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
+        dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
+      });
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_in.id }, 'Check-in success');
     } catch (err: any) {
       console.error('FrontDesk checkIn error:', err);
@@ -797,6 +827,11 @@ room: roomName,
         });
       }
 
+      enqueueJob('sync-staah-room-availability', {
+        propertyId: Number(folio.property_id),
+        dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
+        dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
+      });
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_out.id, balance }, 'Check-out success');
     } catch (err: any) {
       console.error('FrontDesk checkOut error:', err);
@@ -895,6 +930,7 @@ room: roomName,
         }
       }
 
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(req.user?.lastProperty ?? 0) });
       success(res, { updated: passed.length, failed }, 'Batch check-out success');
     } catch (err: any) {
       console.error('FrontDesk batchCheckOut error:', err);
@@ -1782,6 +1818,60 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
     } catch (err: any) { console.error('Batch posting list error:', err); error(res, 'Failed to list batch postings', 500); }
   }
 
+  // Laravel BatchPostingController@batchPosting parity (:385-428):
+  // promote all current user's temps into transactions, then forceDelete temps — atomically.
+  static async batchPostingCommit(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = req.user?.id;
+      const temps = await prisma.transaction_temps.findMany({ where: { created_by: userId, deleted_at: null } });
+      if (temps.length === 0) { notFound(res, 'Data not found'); return; }
+
+      await prisma.$transaction(async (tx: any) => {
+        for (const t of temps) {
+          await tx.transactions.create({
+            data: {
+              property_id: t.property_id,
+              folio_id: t.folio_id,
+              type: t.type,
+              type_amount: t.type_amount ?? 'PLUS',
+              date: t.date,
+              code: String(t.code ?? ''),
+              code_item_id: t.code_item_id ?? undefined,
+              description: t.description,
+              overwrite_reason: t.overwrite_reason,
+              time: t.time ? new Date(`1970-01-01T${String(t.time).substring(0, 8)}Z`) : undefined,
+              bill_to: t.bill_to != null ? String(t.bill_to) : undefined,
+              amount: t.amount ?? 0,
+              pb1: t.pb1 ?? 0,
+              svr_chrg: t.svr_chrg ?? 0,
+              tax3: t.tax3 ?? 0,
+              total: t.total ?? 0,
+              surcharge: t.surcharge ?? 0,
+              reference: t.reference,
+              pos: t.pos,
+              receipt: t.receipt,
+              last_digit_card: t.last_digit_card ? Number(t.last_digit_card) : undefined,
+              card_name: t.card_name,
+              remark: t.remark,
+              voucher: t.voucher,
+              booking: t.booking,
+              status: t.status ?? 1,
+              created_at: new Date(),
+              created_by: userId ?? null,
+            },
+          });
+        }
+        await tx.transaction_temps.deleteMany({ where: { created_by: userId, deleted_at: null } });
+      });
+
+      success(res, [], 'Success', 200);
+    } catch (err: any) {
+      console.error('Batch posting commit error:', err);
+      error(res, err?.message ?? 'Failed to commit batch postings', 500);
+    }
+  }
+
+
 static async batchPostingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
@@ -1987,10 +2077,8 @@ const folio = await prisma.folios.findUnique({
 
       const lastReservation = folio.reservations?.[folio.reservations.length - 1];
 
-      const transactions = await prisma.transactions.findMany({
-        where: { folio_id: folio.id, deleted_at: null },
-      });
-      const balance = transactions.reduce((sum: number, t: any) => sum + Number(t.total || 0), 0);
+      // Laravel Folio@getBalance parity: MINUS subtracts, GIT variants
+      const balance = await folioBalanceDisplay(folio);
 
 const data = {
         id: Number(folio.id),

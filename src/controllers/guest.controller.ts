@@ -1153,11 +1153,24 @@ export class GuestController {
     }
   }
 
-  // Merge Guest (menu 84) â€” Laravel GuestProfileController@mergeUpdate parity
+  // Merge Guest (menu 84) — Laravel GuestProfileController@mergeUpdate parity
   static async mergeUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
-      const data = req.body;
+      // Whitelist (Laravel mergeUpdate uses $user->only([...]) — never mass-assign raw body).
+      const ALLOWED = [
+        'title', 'first_name', 'last_name', 'email', 'mobile_phone', 'telp', 'gender',
+        'birth_of_date', 'nationality_id', 'address', 'city_id', 'country_id', 'postal_code',
+        'id_type', 'id_number', 'id_expiry', 'vip_status', 'source', 'remark',
+        'status_profile', 'blacklist', 'is_subscribe',
+      ];
+      const data: any = {};
+      for (const key of ALLOWED) {
+        if (req.body[key] !== undefined) data[key] = req.body[key];
+      }
+      const existing = await prisma.guest_profiles.findUnique({ where: { id } });
+      if (!existing) { notFound(res, 'Guest profile not found'); return; }
+
       const guest = await prisma.guest_profiles.update({
         where: { id },
         data: { ...data, updated_at: new Date(), updated_by: req.user?.id ?? null },
@@ -1169,18 +1182,40 @@ export class GuestController {
     }
   }
 
-  // Batch update after merge (frontend custom endpoint)
+  // Batch finalize after merge — Laravel GuestProfileController@updateBatchStatus parity
+  // (:586-633): sources set INACTIVE (status=0, NOT soft-deleted) and their folios are
+  // reassigned to the surviving target so financial records stay attached.
   static async batchUpdate(req: Request, res: Response): Promise<void> {
     try {
-      const { guest_profiles } = req.body;
-      if (guest_profiles?.length > 0) {
-        const ids = guest_profiles.map((p: any) => BigInt(String(p.id)));
-        await prisma.guest_profiles.updateMany({
-          where: { id: { in: ids } },
-          data: { deleted_at: new Date(), deleted_by: req.user?.id ?? null },
-        });
+      const { guest_profiles, guest_updates } = req.body;
+      if (!Array.isArray(guest_profiles) || guest_profiles.length === 0 || !guest_updates) {
+        badRequest(res, 'guest_profiles array and guest_updates target id are required');
+        return;
       }
-      success(res, null, 'Batch update completed', 200);
+      const ids = guest_profiles.map((p: any) => BigInt(String(p.id)));
+      const targetId = BigInt(String(guest_updates));
+      const target = await prisma.guest_profiles.findUnique({ where: { id: targetId } });
+      if (!target) { badRequest(res, 'The selected guest updates is invalid.'); return; }
+
+      await prisma.$transaction(async (tx: any) => {
+        // Sources -> inactive
+        await tx.guest_profiles.updateMany({
+          where: { id: { in: ids } },
+          data: { status: 0, updated_at: new Date(), updated_by: req.user?.id ?? null },
+        });
+        // Reassign folios to the surviving profile
+        await tx.folios.updateMany({
+          where: { guest_profile_id: { in: ids } },
+          data: { guest_profile_id: targetId, updated_at: new Date(), updated_by: req.user?.id ?? null },
+        });
+      });
+
+      res.json({
+        code: 200,
+        message: 'Guest profiles and folios updated successfully.',
+        updated_profiles_count: ids.length,
+        main_profile_id: Number(targetId),
+      });
     } catch (err: any) {
       console.error('Batch update guest error:', err);
       error(res, 'Failed to batch update guests', 500);

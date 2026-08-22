@@ -6,6 +6,7 @@ import { success, error, badRequest, notFound, validationError } from '../utils/
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
 import { getStatusLabel } from '../utils/cmsConfig';
+import { enqueueJob } from '../config/queue';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -57,6 +58,140 @@ function buildGridTable(roomTypes: any[], fields: string[]): any[] {
 const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 const RESTRICTION_FIELDS = ['stop_arrival', 'stop_departure', 'stop_sell', 'min_los'];
+
+// ── Linked-rate cascade (Laravel RateRate::getRules/updateRate + getValueRate) ──
+
+// Laravel app/Helpers/Global.php:600
+function getValueRate(value: number, rateAmount: number, type: string | null | undefined): number {
+  if (type === 'percentage') return value + (rateAmount / 100) * value;
+  return rateAmount + value;
+}
+
+interface LinkedRule {
+  roomTypeId: bigint;
+  rateId: bigint;
+  amount: number;
+  type: string;
+  offsetExtraAdult: number;
+  offsetExtraChild: number;
+}
+
+// Laravel RateRate::getRules parity — walk model_has_rates (model_type Rate)
+// recursively; each linked rate contributes its rate_link_listings rows as rules.
+async function getLinkedRateRules(rateId: bigint): Promise<LinkedRule[]> {
+  const rules: LinkedRule[] = [];
+  let frontier: bigint[] = [rateId];
+  const visited = new Set<string>([String(rateId)]);
+  for (let depth = 0; depth < 5 && frontier.length; depth++) {
+    const links = await prisma.model_has_rates.findMany({
+      where: { rate_id: { in: frontier }, model_type: 'App\\Models\\Rate', status: BigInt(1) },
+    });
+    if (!links.length) break;
+    const linkedIds = links.map((l) => l.model_id);
+    const activeLinked = await prisma.rates.findMany({
+      where: { id: { in: linkedIds }, deleted_at: null, status: STATUS_ACTIVE },
+      select: { id: true },
+    });
+    const listings = await prisma.rate_link_listings.findMany({
+      where: { rate_id: { in: linkedIds }, deleted_at: null },
+    });
+    for (const ll of listings) {
+      if (!ll.rate_id || !ll.room_type_id) continue;
+      rules.push({
+        roomTypeId: ll.room_type_id,
+        rateId: ll.rate_id,
+        amount: Number(ll.amount ?? 0),
+        type: ll.type ?? 'flat',
+        offsetExtraAdult: Number(ll.offsetExtraAdult ?? 0),
+        offsetExtraChild: Number(ll.offsetExtraChild ?? 0),
+      });
+    }
+    frontier = activeLinked.map((r) => r.id).filter((id) => !visited.has(String(id)));
+    for (const id of frontier) visited.add(String(id));
+  }
+  return rules;
+}
+
+// Laravel RateRate::updateRate parity — recompute linked rates' grid values from
+// the source write, preserving existing values when the field was not written.
+async function applyLinkedRateCascade(
+  sourceRateId: bigint,
+  propertyId: bigint,
+  userId: bigint | undefined,
+  fieldsByRoomType: Map<number, Record<string, any>>,
+  dates: Date[],
+): Promise<void> {
+  const rules = await getLinkedRateRules(sourceRateId);
+  if (!rules.length) return;
+
+  for (const rule of rules) {
+    if (!rule.rateId || !rule.roomTypeId) continue;
+    const src = fieldsByRoomType.get(Number(rule.roomTypeId)) ?? {};
+    for (const date of dates) {
+      const existing: any = await prisma.rate_rates.findUnique({
+        where: {
+          rate_rates_rate_id_room_type_id_date_key: {
+            rate_id: rule.rateId,
+            room_type_id: rule.roomTypeId,
+            date,
+          },
+        } as any,
+      });
+
+      const pick = (field: string): number | undefined => {
+        if (src[field] !== undefined && src[field] !== null) return Number(src[field]);
+        if (existing && existing[field] !== undefined && existing[field] !== null) return Number(existing[field]);
+        return undefined;
+      };
+
+      const data: any = {
+        property_id: propertyId,
+        status: STATUS_ACTIVE,
+        updated_at: new Date(),
+      };
+      if (userId) data.updated_by = userId;
+
+      // Laravel nfields defaults unset price fields to the existing row's value ?? 0.
+      const oneAdult = pick('one_adult');
+      const twoAdult = pick('two_adult');
+      const extraAdult = pick('extra_adult');
+      const extraChild = pick('extra_child');
+      data.one_adult = oneAdult !== undefined ? getValueRate(oneAdult, rule.amount, rule.type) : (existing?.one_adult ?? 0);
+      data.two_adult = twoAdult !== undefined ? getValueRate(twoAdult, rule.amount, rule.type) : (existing?.two_adult ?? 0);
+      data.extra_adult = extraAdult !== undefined ? getValueRate(extraAdult, rule.offsetExtraAdult, rule.type) : (existing?.extra_adult ?? 0);
+      data.extra_child = extraChild !== undefined ? getValueRate(extraChild, rule.offsetExtraChild, rule.type) : (existing?.extra_child ?? 0);
+
+      await prisma.rate_rates.upsert({
+        where: {
+          rate_rates_rate_id_room_type_id_date_key: {
+            rate_id: rule.rateId,
+            room_type_id: rule.roomTypeId,
+            date,
+          },
+        } as any,
+        create: {
+          ...data,
+          rate_id: rule.rateId,
+          room_type_id: rule.roomTypeId,
+          date,
+          created_by: userId,
+          created_at: new Date(),
+        },
+        update: data,
+      });
+    }
+  }
+}
+
+// Laravel RateRateController store/update reset both sync flags on the parent
+// rate so the cron/dispatched jobs re-push prices to Booking Engine + STAAH.
+async function resetRateSyncFlags(rateId: bigint): Promise<void> {
+  try {
+    await prisma.rates.update({ where: { id: rateId }, data: { sync_online: 0, sync_staah: false } });
+  } catch {
+    // rate row may not exist for exotic ids — ignore like Laravel would no-op
+  }
+}
 
 function bigintToNumber(val: any): any {
   if (typeof val === 'bigint') return Number(val);
@@ -506,23 +641,31 @@ prisma.room_types.findMany({
 
       const { name, code, start_date, end_date, code_post_id, code_post_extra_bed_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, status } = req.body;
 
+      // Laravel RateController@update (:380-541) is a partial PUT: absent optional
+      // fields keep their stored values — never wiped to null/0.
       const data: any = {
-        description: description || null,
-        rate_type: rate_type || null,
-        term_condition: term_condition || null,
-        cancellation_policy: cancellation_policy || null,
-        notes: notes || null,
-        online: online ? 1 : 0,
-        staah: staah === true || staah === 'true' || staah === 1,
-        sync_staah: staah === true || staah === 'true' || staah === 1,
-        min_advance_booking: min_advance_booking || 0,
-        max_advance_booking: max_advance_booking || 0,
-        minimum_rate: minimum_rate !== undefined && minimum_rate !== null && minimum_rate !== '' ? Number(minimum_rate) : existing.minimum_rate,
-        grouping: grouping || null,
-status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? existing.status)),
         updated_by: userId,
         updated_at: new Date(),
       };
+      if (description !== undefined) data.description = description || null;
+      if (rate_type !== undefined) data.rate_type = rate_type || null;
+      if (term_condition !== undefined) data.term_condition = term_condition || null;
+      if (cancellation_policy !== undefined) data.cancellation_policy = cancellation_policy || null;
+      if (notes !== undefined) data.notes = notes || null;
+      if (online !== undefined) data.online = online ? 1 : 0;
+      if (staah !== undefined) {
+        const staahOn = staah === true || staah === 'true' || staah === 1;
+        data.staah = staahOn;
+        // Toggling STAAH re-enqueues content sync (Laravel resets the flag too).
+        data.sync_staah = staahOn;
+      }
+      if (min_advance_booking !== undefined && min_advance_booking !== null && min_advance_booking !== '') data.min_advance_booking = Number(min_advance_booking) || 0;
+      if (max_advance_booking !== undefined && max_advance_booking !== null && max_advance_booking !== '') data.max_advance_booking = Number(max_advance_booking) || 0;
+      if (minimum_rate !== undefined && minimum_rate !== null && minimum_rate !== '') data.minimum_rate = Number(minimum_rate);
+      if (grouping !== undefined) data.grouping = grouping || null;
+      if (status !== undefined) {
+        data.status = status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : existing.status);
+      }
       if (name !== undefined && name !== null && name !== '') data.name = name;
       if (code !== undefined && code !== null && code !== '') data.code = code;
       if (code_post_id !== undefined && code_post_id !== null && code_post_id !== '') data.code_post_id = BigInt(code_post_id);
@@ -811,14 +954,25 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
         targetRoomTypes = allRT.map((rt) => rt.id);
       }
 
-      // Get min_rate for validation
-      const roomTypeMinRates = await prisma.room_types.findMany({
-        where: { id: { in: targetRoomTypes }, deleted_at: null },
-        select: { id: true, min_rate: true },
+      // Laravel resets both sync flags BEFORE writing grid values
+      // (RateRateController.php store :283) so jobs re-push prices afterwards.
+      await resetRateSyncFlags(rateId);
+
+      // Existing rows — Laravel preserves stored values for fields not written (:341-377).
+      const existingRows = await prisma.rate_rates.findMany({
+        where: {
+          rate_id: rateId,
+          room_type_id: { in: targetRoomTypes },
+          date: { gte: targetDates[0], lte: targetDates[targetDates.length - 1] },
+        },
       });
-      const minRateMap = new Map(roomTypeMinRates.map((rt) => [rt.id, Number(rt.min_rate)]));
+      const existingKey = new Map<string, any>();
+      for (const row of existingRows) {
+        existingKey.set(`${Number(row.room_type_id)}|${formatDate(row.date)}`, row);
+      }
 
       // Process text_fields: array of { room_type_id, one_adult, two_adult, etc. }
+      const fieldsByRoomType = new Map<number, Record<string, any>>();
       for (const date of targetDates) {
         for (const rtId of targetRoomTypes) {
           // Find matching text_field entry for this room_type, or use defaults
@@ -840,12 +994,16 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
             }
           }
 
-          // Validate min_rate
-          const minRate = minRateMap.get(rtId) || 0;
-          const oneAdult = parseFloat(fieldData.one_adult ?? 0);
-          if (oneAdult < minRate) {
-            // Continue with the value, but we could warn
+          // Laravel parity: unset fields keep the EXISTING stored value (?? 0 only on insert).
+          const existing: any = existingKey.get(`${Number(rtId)}|${formatDate(date)}`);
+          const preserved: Record<string, any> = { ...fieldData };
+          for (const field of GRID_FIELDS) {
+            if (preserved[field] === undefined) {
+              const val = existing?.[field];
+              preserved[field] = val !== undefined && val !== null ? Number(val) : 0;
+            }
           }
+          fieldsByRoomType.set(Number(rtId), preserved);
 
           await prisma.rate_rates.upsert({
             where: {
@@ -860,22 +1018,22 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
               rate_id: rateId,
               room_type_id: rtId,
               date: date,
-              one_adult: fieldData.one_adult ?? 0,
-              two_adult: fieldData.two_adult ?? 0,
-              extra_adult: fieldData.extra_adult ?? 0,
-              extra_child: fieldData.extra_child ?? 0,
-              min_night: fieldData.min_night ?? 0,
-              max_night: fieldData.max_night ?? 0,
+              one_adult: preserved.one_adult ?? 0,
+              two_adult: preserved.two_adult ?? 0,
+              extra_adult: preserved.extra_adult ?? 0,
+              extra_child: preserved.extra_child ?? 0,
+              min_night: preserved.min_night ?? 0,
+              max_night: preserved.max_night ?? 0,
               status: STATUS_ACTIVE,
               created_by: userId,
             },
             update: {
-              one_adult: fieldData.one_adult ?? 0,
-              two_adult: fieldData.two_adult ?? 0,
-              extra_adult: fieldData.extra_adult ?? 0,
-              extra_child: fieldData.extra_child ?? 0,
-              min_night: fieldData.min_night ?? 0,
-              max_night: fieldData.max_night ?? 0,
+              one_adult: preserved.one_adult ?? 0,
+              two_adult: preserved.two_adult ?? 0,
+              extra_adult: preserved.extra_adult ?? 0,
+              extra_child: preserved.extra_child ?? 0,
+              min_night: preserved.min_night ?? 0,
+              max_night: preserved.max_night ?? 0,
               status: STATUS_ACTIVE,
               updated_by: userId,
               updated_at: new Date(),
@@ -883,6 +1041,10 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
           });
         }
       }
+
+      // Laravel RateRateController store: cascade to linked rates then dispatch BE push (:386-382)
+      await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, targetDates);
+      enqueueJob('sync-price-booking-engine', {});
 
       success(res, { updated: targetDates.length * targetRoomTypes.length }, 'Success');
     } catch (err: any) {
@@ -947,6 +1109,12 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
         },
         update: updateData,
       });
+
+      // Laravel RateRateController@update (:439-469): sync flags + cascade + BE dispatch
+      await resetRateSyncFlags(rateId);
+      const fieldsByRoomType = new Map<number, Record<string, any>>([[Number(targetRoomTypeId), fields]]);
+      await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, [targetDate]);
+      enqueueJob('sync-price-booking-engine', {});
 
       success(res, null, 'Success');
     } catch (err: any) {
@@ -1118,6 +1286,7 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
             }
           }
 
+          // Laravel restrictionStore writes restrictions only — no cascade/dispatch there.
           await prisma.rate_rates.upsert({
             where: {
               rate_rates_rate_id_room_type_id_date_key: {
@@ -1347,10 +1516,52 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
       // Get all active room types
       const allRoomTypes = await prisma.room_types.findMany({
         where: { property_id: propertyId!, deleted_at: null, status: STATUS_ACTIVE },
-        select: { id: true },
+        select: { id: true, min_rate: true },
       });
       const allRoomTypeIds = allRoomTypes.map((rt) => rt.id);
 
+      // Laravel BarRateController@gridStore min-rate guard (:299-323):
+      // first pass (no isMinimum) -> if any written value < room type min_rate,
+      // answer {isMinimum:true}; the confirmed retry sends isMinimum and is rejected.
+      const isMinimum = req.body.isMinimum;
+      if (!isMinimum) {
+        const priceValues: number[] = [];
+        for (const tf of text_fields) {
+          for (const field of ['one_adult', 'two_adult', 'extra_adult', 'extra_child']) {
+            if (tf[field] !== undefined && tf[field] !== null && !['min_night', 'max_night'].includes(field)) {
+              priceValues.push(Number(tf[field]));
+            }
+          }
+        }
+        const minValue = priceValues.length ? Math.min(...priceValues) : Infinity;
+        for (const rt of allRoomTypes) {
+          if (Number(rt.min_rate ?? 0) > minValue) {
+            success(res, { isMinimum: true }, 'Success', 200);
+            return;
+          }
+        }
+      }
+      if (isMinimum) {
+        badRequest(res, 'Please check minimum rate');
+        return;
+      }
+
+      // Existing rows — unset fields keep stored values (Laravel :330-377).
+      const existingRows = await prisma.rate_rates.findMany({
+        where: {
+          rate_id: rateId,
+          room_type_id: { in: allRoomTypeIds },
+          date: { gte: allDates[0], lte: allDates[allDates.length - 1] },
+        },
+      });
+      const existingKey = new Map<string, any>();
+      for (const row of existingRows) {
+        existingKey.set(`${Number(row.room_type_id)}|${formatDate(row.date)}`, row);
+      }
+
+      await resetRateSyncFlags(rateId);
+
+      const fieldsByRoomType = new Map<number, Record<string, any>>();
       for (const date of allDates) {
         for (const rtId of allRoomTypeIds) {
           const fieldData: any = {};
@@ -1368,6 +1579,16 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
             }
           }
 
+          const existing: any = existingKey.get(`${Number(rtId)}|${formatDate(date)}`);
+          const preserved: Record<string, any> = { ...fieldData };
+          for (const field of GRID_FIELDS) {
+            if (preserved[field] === undefined) {
+              const val = existing?.[field];
+              preserved[field] = val !== undefined && val !== null ? Number(val) : 0;
+            }
+          }
+          fieldsByRoomType.set(Number(rtId), preserved);
+
           await prisma.rate_rates.upsert({
             where: {
               rate_rates_rate_id_room_type_id_date_key: {
@@ -1381,22 +1602,22 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
               rate_id: rateId,
               room_type_id: rtId,
               date,
-              one_adult: fieldData.one_adult ?? 0,
-              two_adult: fieldData.two_adult ?? 0,
-              extra_adult: fieldData.extra_adult ?? 0,
-              extra_child: fieldData.extra_child ?? 0,
-              min_night: fieldData.min_night ?? 0,
-              max_night: fieldData.max_night ?? 0,
+              one_adult: preserved.one_adult ?? 0,
+              two_adult: preserved.two_adult ?? 0,
+              extra_adult: preserved.extra_adult ?? 0,
+              extra_child: preserved.extra_child ?? 0,
+              min_night: preserved.min_night ?? 0,
+              max_night: preserved.max_night ?? 0,
               status: STATUS_ACTIVE,
               created_by: userId,
             },
             update: {
-              one_adult: fieldData.one_adult ?? 0,
-              two_adult: fieldData.two_adult ?? 0,
-              extra_adult: fieldData.extra_adult ?? 0,
-              extra_child: fieldData.extra_child ?? 0,
-              min_night: fieldData.min_night ?? 0,
-              max_night: fieldData.max_night ?? 0,
+              one_adult: preserved.one_adult ?? 0,
+              two_adult: preserved.two_adult ?? 0,
+              extra_adult: preserved.extra_adult ?? 0,
+              extra_child: preserved.extra_child ?? 0,
+              min_night: preserved.min_night ?? 0,
+              max_night: preserved.max_night ?? 0,
               status: STATUS_ACTIVE,
               updated_by: userId,
               updated_at: new Date(),
@@ -1404,6 +1625,10 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
           });
         }
       }
+
+      // Laravel BarRateController@gridStore: cascade to linked rates then BE dispatch
+      await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, allDates);
+      enqueueJob('sync-price-booking-engine', {});
 
       success(res, { updated: allDates.length * allRoomTypeIds.length }, 'Success');
     } catch (err: any) {
@@ -1461,6 +1686,12 @@ status: status === true || status === 1 || status === '1' || status === 'true' |
         },
         update: updateData,
       });
+
+      // Laravel BarRateController@update parity: flags + cascade + BE dispatch
+      await resetRateSyncFlags(rateId);
+      const fieldsByRoomType = new Map<number, Record<string, any>>([[Number(targetRoomTypeId), fields]]);
+      await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, [targetDate]);
+      enqueueJob('sync-price-booking-engine', {});
 
       success(res, null, 'Success');
     } catch (err: any) {

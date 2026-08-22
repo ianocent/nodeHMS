@@ -13,6 +13,7 @@ import rateRoutes from './routes/rate.routes';
 import roomRoutes from './routes/room.routes';
 import frontDeskRoutes from './routes/front-desk.routes';
 import folioRoutes from './routes/folio.routes';
+import frontDeskExtrasRoutes from './routes/front-desk-extras.routes';
 import staahRoutes from './routes/staah.routes';
 import masterSystemRoutes from './routes/master-system.routes';
 import reportRoutes from './routes/report.routes';
@@ -111,6 +112,11 @@ mountLegacyCmsAlias(frontDeskRoutes);
 app.use('/api', folioRoutes);
 app.use('/cms', folioRoutes);
 mountLegacyCmsAlias(folioRoutes);
+
+// Front Desk extras — wake-up-call, auto-transfer, billing-to, door-lock keys, deposit-payment
+app.use('/api', frontDeskExtrasRoutes);
+app.use('/cms', frontDeskExtrasRoutes);
+mountLegacyCmsAlias(frontDeskExtrasRoutes);
 
 // STAAH OTA Integration routes — Phase 4.4
 app.use('/api', staahRoutes);

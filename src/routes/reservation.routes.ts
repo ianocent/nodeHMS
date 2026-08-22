@@ -55,12 +55,23 @@ router.put('/reservation/ledger/move/:id', authMiddleware, requirePermission(60,
 
 // ── Reservation sub-feature statics (must precede /reservation/:id) ──
 router.get('/reservation/code-item', authMiddleware, requirePermission(60, 'view'), ReservationController.codeItemList);
-router.post('/reservation/code-item', authMiddleware, requirePermission(60, 'add'), ReservationController.codeItemList);
+// Laravel storeAdditionalItem (cms.php:964, :3539)
+router.post('/reservation/code-item', authMiddleware, requirePermission(60, 'add'), ReservationController.additionalItemStore);
+// Laravel updateAdditionalItem / deleteAdditionalItem (cms.php:965-966)
+router.put('/reservation/code-item/:codeItem', authMiddleware, requirePermission(60, 'edit'), ReservationController.additionalItemUpdate);
+router.delete('/reservation/code-item/:codeItem', authMiddleware, requirePermission(60, 'delete'), ReservationController.additionalItemDestroy);
 router.get('/reservation/inclusive', authMiddleware, requirePermission(60, 'view'), ReservationController.inclusiveList);
+// Laravel storeInclusives / deleteInclusives (cms.php:959,961)
+router.post('/reservation/inclusive', authMiddleware, requirePermission(60, 'add'), ReservationController.inclusiveStore);
+router.delete('/reservation/inclusive/:rateInclusive', authMiddleware, requirePermission(60, 'delete'), ReservationController.inclusiveDestroy);
 router.get('/reservation/masterInclusive', authMiddleware, requirePermission(60, 'view'), ReservationController.masterInclusiveList);
 router.get('/reservation/masterinclusive', authMiddleware, requirePermission(60, 'view'), ReservationController.masterInclusiveList);
 router.get('/reservation/master', authMiddleware, requirePermission(60, 'view'), ReservationController.getMaster);
 router.get('/reservation/subfolio/:id', authMiddleware, requirePermission(60, 'view'), ReservationController.subfolioList);
+// Laravel getFolio (cms.php:951) — autocomplete folio list; static MUST precede /reservation/:id
+router.get('/reservation/folio', authMiddleware, requirePermission(60, 'view'), ReservationController.folioList);
+// Laravel getLedger (cms.php:952)
+router.get('/reservation/ledger/:folio', authMiddleware, requirePermission(60, 'view'), ReservationController.ledgerList);
 
 // ── Helper endpoints (Laravel getRate/getRateByCompany/getPackageByRateId/getCharge/getAvailableRoomType/getRoomGit/updateRoomParentGIT) ──
 router.get('/reservation/rate', authMiddleware, requirePermission(60, 'view'), ReservationController.rateListHelper);

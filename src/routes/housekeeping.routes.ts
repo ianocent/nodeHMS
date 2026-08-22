@@ -37,6 +37,7 @@ router.post('/housekeeping/work-orders', authMiddleware, requirePermission(158, 
 router.get('/housekeeping/work-orders/:id', authMiddleware, requirePermission(158, 'view'), HousekeepingController.workOrderShow);
 router.put('/housekeeping/work-orders/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.workOrderUpdate);
 router.delete('/housekeeping/work-orders/:id', authMiddleware, requirePermission(158, 'delete'), HousekeepingController.workOrderDestroy);
+router.patch('/housekeeping/work-orders/:id/restore', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.workOrderRestore);
 router.get('/housekeeping/stocks', authMiddleware, requirePermission(158, 'view'), HousekeepingController.stockList);
 router.get('/housekeeping/rosters', authMiddleware, requirePermission(158, 'view'), HousekeepingController.rosterList);
 router.get('/housekeeping/rosters/create', authMiddleware, requirePermission(158, 'add'), (req, res) => { req.params.model = 'rosters'; generic.createForm(req, res); });
@@ -57,6 +58,8 @@ router.get('/housekeeping/work-order/:id', authMiddleware, requirePermission(158
 router.get('/housekeeping/work-order/:id/update', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.workOrderForm);
 router.put('/housekeeping/work-order/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.workOrderUpdate);
 router.delete('/housekeeping/work-order/:id', authMiddleware, requirePermission(158, 'delete'), HousekeepingController.workOrderDestroy);
+// Laravel WorkOrderController@restore (cms.php work-order resource restore route)
+router.patch('/housekeeping/work-order/:id/restore', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.workOrderRestore);
 
 // ── Roster List (roster_list model) ──
 const rosterModel = (req: any) => { req.params.model = 'roster_list'; };

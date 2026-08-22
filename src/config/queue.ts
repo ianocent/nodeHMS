@@ -42,7 +42,12 @@ export async function initQueue() {
       'pull-staah-reservations',
       'sync-staah-room-availability',
       'dispatch-staah-availability',
-      'night-audit-post'
+      'night-audit-post',
+      'sync-price-booking-engine',
+      'sync-check-status-booking-engine',
+      'sync-staah-availability',
+      'sync-staah-room-type',
+      'create-staah-booking'
     ];
     for (const q of queues) {
       try { await bossInstance.createQueue(q); } catch {}
@@ -74,6 +79,32 @@ export async function initQueue() {
       await processNightAuditPost(job);
     });
 
+    // ── STAAH / Booking Engine jobs (Laravel Jobs/ parity) ──
+    await bossInstance.work('sync-price-booking-engine', async (job: any) => {
+      const { processSyncPriceBookingEngine } = await import('../queue/jobs/syncPriceBookingEngine');
+      await processSyncPriceBookingEngine(job);
+    });
+
+    await bossInstance.work('sync-check-status-booking-engine', async (job: any) => {
+      const { processSyncCheckStatusBookingEngine } = await import('../queue/jobs/syncCheckStatusBookingEngine');
+      await processSyncCheckStatusBookingEngine(job);
+    });
+
+    await bossInstance.work('sync-staah-availability', async (job: any) => {
+      const { processSyncStaahAvailability } = await import('../queue/jobs/syncStaahAvailability');
+      await processSyncStaahAvailability(job);
+    });
+
+    await bossInstance.work('sync-staah-room-type', async (job: any) => {
+      const { processSyncStaahRoomType } = await import('../queue/jobs/syncStaahRoomType');
+      await processSyncStaahRoomType(job);
+    });
+
+    await bossInstance.work('create-staah-booking', async (job: any) => {
+      const { processCreateStaahBooking } = await import('../queue/jobs/createStaahBooking');
+      await processCreateStaahBooking(job);
+    });
+
     // Dispatcher for per-property availability sync
     await bossInstance.work('dispatch-staah-availability', async (job: any) => {
       const { PrismaClient } = await import('@prisma/client');
@@ -91,11 +122,28 @@ export async function initQueue() {
     await bossInstance.schedule('dispatch-staah-availability', '*/5 * * * *'); // every 5 minutes
     await bossInstance.schedule('check-expired-request-bookings', '0 * * * *'); // hourly
     await bossInstance.schedule('night-audit-post', '0 2 * * *'); // daily at 2 AM - night audit
+    // Laravel Kernel :30/:40 — booking engine price + payment status checks, every minute.
+    await bossInstance.schedule('sync-price-booking-engine', '* * * * *');
+    await bossInstance.schedule('sync-check-status-booking-engine', '* * * * *');
+    // sync-staah-availability / sync-staah-room-type / create-staah-booking are
+    // event-driven only (no cron) — same as Laravel dispatch sites.
 
     return bossInstance;
   } catch (error) {
     console.error('Failed to start queue:', error);
     return null;
+  }
+}
+
+// Event-driven enqueue helper — mirrors Laravel `Job::dispatch(...)`.
+// Safe no-op when the queue is not running (e.g. DATABASE_URL unset).
+export async function enqueueJob(queueName: string, data: Record<string, any>): Promise<void> {
+  try {
+    if (!connectionString) return;
+    const bossInstance = await getBoss();
+    await bossInstance.send(queueName, data);
+  } catch (err: any) {
+    console.error(`[queue] enqueue ${queueName} failed:`, err?.message);
   }
 }
 

@@ -1137,10 +1137,15 @@ model dynamic_rate_results {
   room_type_id             BigInt               
   date                     DateTime             
   historical_adr           Decimal?             @default(0.00)
+  forecasted_adr           Decimal?             @default(0.00)
   forecasted_occupancy     Decimal?             @default(0.0000)
   base_rate                Decimal?             @default(0.00)
   suggested_rate_one_adult Decimal?             @default(0.00)
   suggested_rate_two_adult Decimal?             @default(0.00)
+  original_one_adult       Int?
+  original_two_adult       Int?
+  original_extra_adult     Int?
+  original_extra_child     Int?
   adjustment_percent       Decimal?             @default(0.0000)
   gdp_impact               Decimal?             @default(0.0000)
   inflation_impact         Decimal?             @default(0.0000)
