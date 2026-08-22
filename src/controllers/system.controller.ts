@@ -2210,6 +2210,235 @@ const payload = formatSystemBalanceData(
 
       const resolvedCode = normalizeDashboardCode(code);
 
+      // ==== MTD actuals (Laravel Reservation@getForecastPerDate mtd scope) ====
+      const computeMtdActualVsBudget = async () => {
+        const dLog = dateLog || sd || new Date().toISOString().substring(0, 10);
+        const y = Number(dLog.substring(0, 4));
+        const m = Number(dLog.substring(5, 7));
+        const dayNum = Number(dLog.substring(8, 10)) || 1;
+        const monthStart = new Date(Date.UTC(y, m - 1, 1));
+        const monthEnd = new Date(Date.UTC(y, m, 1));
+
+        const roomCount = await prisma.rooms.count({ where: { property_id: propertyId, deleted_at: null, status: 1 } });
+        const mtdRoomAvailable = roomCount * dayNum;
+
+        const resRows = await prisma.reservations.findMany({
+          where: {
+            property_id: propertyId, deleted_at: null,
+            date: { gte: monthStart, lt: monthEnd },
+            folios: { is: { status_reservation: { notIn: [STATUS.cancel, STATUS.pending] } } },
+          },
+          select: { amount: true },
+        });
+        const roomSold = resRows.length;
+        const roomRevenue = resRows.reduce((s2, r) => s2 + Number(r.amount ?? 0), 0);
+        const arr = roomRevenue / Math.max(roomSold, 1);
+        const occPct = (roomSold / Math.max(mtdRoomAvailable, 1)) * 100;
+
+        // F&B: breakdowns whose code post is DEFAULT, billing ~ restaurant revenue,
+        // name NOT breakfast/dine in/room service/minimart (Laravel FAndB query; LOWER() via JS filter)
+        const fbCandidates = await prisma.code_posts.findMany({
+          where: {
+            type: 'DEFAULT', deleted_at: null,
+            code_billings: { name: { contains: 'restaurant revenue', mode: 'insensitive' } },
+          },
+          select: { id: true, name: true },
+        });
+        const excludedFb = ['breakfast', 'dine in', 'room service', 'minimart'];
+        const fbPosts = fbCandidates.filter(p => {
+          const n = (p.name ?? '').toLowerCase();
+          return !excludedFb.some(e => n.includes(e));
+        });
+        const fbIds = fbPosts.map(p => String(p.id));
+        let fb = 0;
+        if (fbIds.length) {
+          const fbRows = await prisma.transaction_breakdowns.findMany({
+            where: {
+              property_id: propertyId, deleted_at: null,
+              date: { gte: monthStart, lt: monthEnd },
+              type: { notIn: ['payment', 'paidout', 'refund'] },
+              code: { in: fbIds },
+            },
+            select: { amount: true },
+          });
+          fb = fbRows.reduce((s2, r) => s2 + Number(r.amount ?? 0), 0);
+        }
+
+        // PostCodeBudget@getBudget parity ('ROOM' special-case; else first row NOT containing key)
+        const [budgets, budgetCodePosts] = await Promise.all([
+          prisma.post_code_budgets.findMany({ where: { property_id: propertyId, year: y, month: m } }),
+          prisma.code_posts.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+        ]);
+        const cpNameMap = new Map(budgetCodePosts.map(cp => [Number(cp.id), cp.name]));
+        const budgetRows = budgets.map(b => ({ name: cpNameMap.get(Number(b.code_post_id)) ?? '', budget: Number(b.budget ?? 0) }));
+        const budgetOf = (key: string): number => {
+          if (key.toUpperCase() === 'ROOM') {
+            return budgetRows.find(b => b.name.toLowerCase().includes('room') && !b.name.toLowerCase().includes('room available'))?.budget ?? 0;
+          }
+          return budgetRows.find(b => !b.name.toLowerCase().includes(key.toLowerCase()))?.budget ?? 0;
+        };
+
+        const rows = [
+          { mtd_actual_vs_budget: 'Room Available', mtd_actual: mtdRoomAvailable, mtd_budget: budgetOf('Room Available'), variance: mtdRoomAvailable - budgetOf('Room Available') },
+          { mtd_actual_vs_budget: 'Room Sold', mtd_actual: roomSold, mtd_budget: budgetOf('Room Sold'), variance: roomSold - budgetOf('Room Sold') },
+          { mtd_actual_vs_budget: 'Occ', mtd_actual: occPct.toFixed(2) + '%', mtd_budget: Number(budgetOf('Occ')).toFixed(2) + '%', variance: (occPct - Number(budgetOf('Occ'))).toFixed(2) + '%' },
+          { mtd_actual_vs_budget: 'Average Room Rate (ARR)', mtd_actual: moneyFormat(arr), mtd_budget: moneyFormat(budgetOf('ARR')), variance: moneyFormat(arr - budgetOf('ARR')) },
+          { mtd_actual_vs_budget: 'ROOM REVENUE', mtd_actual: moneyFormat(roomRevenue), mtd_budget: moneyFormat(budgetOf('ROOM')), variance: moneyFormat(roomRevenue - budgetOf('ROOM')) },
+          { mtd_actual_vs_budget: 'F&B REVENUE', mtd_actual: moneyFormat(fb), mtd_budget: moneyFormat(budgetOf('F&B')), variance: moneyFormat(fb - budgetOf('F&B')) },
+        ];
+        return { type: 'table-dashboard', span: '6', label: 'MTD Actual vs Budget', header: ['mtd_actual_vs_budget', 'mtd_actual', 'mtd_budget', 'variance'], list: rows, link: '', is_total: false };
+      };
+
+      // ==== Laravel DashboardController@roomSoldPerSegment ====
+      const computeRoomSoldPerSegment = async () => {
+        const rooms = await prisma.rooms.findMany({
+          where: { property_id: propertyId, deleted_at: null, status: 1, is_physical: true },
+          select: { id: true, room_status: true },
+        });
+        const totalRoomAvailable = rooms.length;
+        const soldRooms = rooms.filter(r => r.room_status === 1 || r.room_status === 2);
+        const soldRoomIds = soldRooms.map(r => r.id);
+
+        // latest reservation per room w/ folio check_in/reservation → folio company profile types
+        const resRows = soldRoomIds.length ? await prisma.reservations.findMany({
+          where: { property_id: propertyId, deleted_at: null, room_id: { in: soldRoomIds }, folios: { is: { status_reservation: { in: [STATUS.check_in, STATUS.reservation] } } } },
+          orderBy: { date: 'desc' },
+          select: { room_id: true, folios: { select: { company_profile_id: true } } },
+        }) : [];
+        const latestByRoom = new Map<number, bigint>();
+        for (const r of resRows) {
+          const rid = Number(r.room_id);
+          if (!latestByRoom.has(rid) && r.folios?.company_profile_id) latestByRoom.set(rid, r.folios.company_profile_id);
+        }
+
+        const typeCompany = await prisma.types.findMany({
+          where: { property_id: propertyId, group: 'company-type', status: 1, deleted_at: null },
+          select: { id: true, name: true },
+        });
+        const cpIds = [...new Set([...latestByRoom.values()].map(v => Number(v)))];
+        const cpTypes = cpIds.length ? await prisma.model_has_types.findMany({
+          where: { model_type: 'App\\Models\\CompanyProfile', model_id: { in: cpIds }, type_id: { in: typeCompany.map(t => t.id) } },
+          select: { model_id: true, type_id: true },
+        }) : [];
+        const typesOfCp = new Map<number, Set<number>>();
+        for (const row of cpTypes) {
+          if (!typesOfCp.has(Number(row.model_id))) typesOfCp.set(Number(row.model_id), new Set());
+          typesOfCp.get(Number(row.model_id))!.add(Number(row.type_id));
+        }
+
+        const pct = (n: number) => (totalRoomAvailable === 0 ? 0 : ((n / totalRoomAvailable) * 100).toFixed(2) + '%');
+        const rows: any[] = [{ name: 'Room Sold per Segment', total: soldRooms.length, percentage: pct(soldRooms.length) }];
+        for (const t of typeCompany) {
+          const count = [...latestByRoom.entries()].filter(([, cpId]) => typesOfCp.get(Number(cpId))?.has(Number(t.id))).length;
+          rows.push({ name: t.name, total: count, percentage: pct(count) });
+        }
+        return { type: 'table-dashboard', span: '6', label: 'Room Sold Per Segment', header: ['name', 'total', 'percentage'], list: rows, link: '', is_total: false };
+      };
+
+      // ==== Laravel DashboardController@forecastPerRoomSold ====
+      const computeForecastPerRoomSold = async () => {
+        const y = Number((dateLog || new Date().toISOString().substring(0, 10)).substring(0, 4));
+        const mIdx = Number((dateLog || '').substring(5, 7)) || 1;
+        const daysInMonth = new Date(Date.UTC(y, mIdx, 0)).getUTCDate();
+        const daysInYear = ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0) ? 366 : 365;
+        const todayStr = dateLog;
+        const monthStart = `${dateLog.substring(0, 7)}-01`;
+        const yearStart = `${y}-01-01`;
+
+        const resRows = await prisma.reservations.findMany({
+          where: {
+            property_id: propertyId, deleted_at: null,
+            room_id: { not: null }, room_type_id: { not: null },
+            date: { gte: yearStart, lte: todayStr },
+            folios: { is: { status_reservation: { notIn: [STATUS.cancel] } } },
+          },
+          select: { date: true, amount: true, room_type_id: true },
+        });
+
+        const totalRoom = await prisma.rooms.count({ where: { property_id: propertyId, deleted_at: null, status: 1, is_physical: true } });
+
+        const statBlock = (rows: any[], denomRooms: number) => {
+          const todayRows = rows.filter(r => r.date.toISOString().substring(0, 10) === todayStr);
+          const mtdRows = rows.filter(r => r.date >= new Date(monthStart + 'T00:00:00Z'));
+          const cnt = (arr: any[]) => arr.length;
+          const sumAmt = (arr: any[]) => arr.reduce((s2, r) => s2 + Number(r.amount ?? 0), 0);
+          return [
+            { name: 'Total Room Sold', today: `${cnt(todayRows)} Room(s)/${denomRooms} Room(s)`, mtd: `${cnt(mtdRows)} Room(s)/${denomRooms * daysInMonth} Room(s)`, ytd: `${cnt(rows)} Room(s)/${denomRooms * daysInYear} Room(s)` },
+            { name: 'Occupancy', today: (cnt(todayRows) / Math.max(denomRooms, 1) * 100).toFixed(2) + '%', mtd: (cnt(mtdRows) / Math.max(denomRooms * daysInMonth, 1) * 100).toFixed(2) + '%', ytd: (cnt(rows) / Math.max(denomRooms * daysInYear, 1) * 100).toFixed(2) + '%' },
+            { name: 'Room Revenue', today: moneyFormat(sumAmt(todayRows)), mtd: moneyFormat(sumAmt(mtdRows)), ytd: moneyFormat(sumAmt(rows)) },
+            { name: 'Average Room Rate (ARR)', today: moneyFormat(sumAmt(todayRows) / Math.max(cnt(todayRows), 1)), mtd: moneyFormat(sumAmt(mtdRows) / Math.max(cnt(mtdRows), 1)), ytd: moneyFormat(sumAmt(rows) / Math.max(cnt(rows), 1)) },
+          ];
+        };
+
+        const rowsOut: any[] = [...statBlock(resRows as any, totalRoom)];
+
+        // room-type-grouping sections (Type morphToMany RoomType)
+        const groupingTypes = await prisma.types.findMany({
+          where: { property_id: propertyId, group: 'room-type-grouping', deleted_at: null },
+          select: { id: true, name: true },
+        });
+        if (groupingTypes.length) {
+          const rtLinks = await prisma.model_has_types.findMany({
+            where: { model_type: 'App\\Models\\RoomType', type_id: { in: groupingTypes.map(t => t.id) } },
+            select: { model_id: true, type_id: true },
+          });
+          for (const t of groupingTypes) {
+            const rtIds = new Set(rtLinks.filter(l => Number(l.type_id) === Number(t.id)).map(l => Number(l.model_id)));
+            const grpRes = (resRows as any[]).filter(r => rtIds.has(Number(r.room_type_id)));
+            const grpTotalRoom = await prisma.rooms.count({
+              where: { property_id: propertyId, deleted_at: null, status: 1, is_physical: true, room_type_id: { in: [...rtIds] as any } },
+            });
+            rowsOut.push({ name: t.name, today: '', mtd: '', ytd: '' });
+            rowsOut.push(...statBlock(grpRes, grpTotalRoom));
+          }
+        }
+        return { type: 'table-dashboard', span: '12', label: 'Forecast Per Room Sold', header: ['name', 'today', 'mtd', 'ytd'], list: rowsOut, link: '', is_total: false };
+      };
+
+      // ==== Laravel DashboardController@roomSoldRbvVsRo ====
+      const computeRoomSoldRbvVsRo = async () => {
+        const dLog = dateLog || sd || new Date().toISOString().substring(0, 10);
+        const y = Number(dLog.substring(0, 4));
+        const m = Number(dLog.substring(5, 7));
+        const monthStart = new Date(Date.UTC(y, m - 1, 1));
+        const monthEnd = new Date(Date.UTC(y, m, 1));
+        const resRows = await prisma.reservations.findMany({
+          where: {
+            property_id: propertyId, deleted_at: null, rate_id: { not: null },
+            date: { gte: monthStart, lt: monthEnd },
+            folios: { is: { status_reservation: { notIn: [STATUS.cancel] } } },
+          },
+          select: { date: true, rate_id: true },
+        });
+        const rateIds = [...new Set(resRows.map(r => Number(r.rate_id)).filter(x => x > 0))];
+        const rbfRateIds = new Set<number>();
+        if (rateIds.length) {
+          // pivot model_has_rate_inclusives (model_id = rate id) — no Prisma relation, raw SQL
+          const rbfRows: any[] = await prisma.$queryRawUnsafe(
+            `SELECT DISTINCT mhr.model_id AS rate_id FROM model_has_rate_inclusives mhr
+             JOIN rate_inclusives ri ON ri.id = mhr.rate_inclusive_id
+             WHERE ri.deleted_at IS NULL AND LOWER(ri.description) LIKE '%breakfast%'
+               AND mhr.model_type = 'App\\Models\\Rate' AND mhr.model_id = ANY($1::bigint[])`,
+            rateIds
+          );
+          for (const r of rbfRows) rbfRateIds.add(Number(r.rate_id));
+        }
+        const isRbf = (r: any) => rbfRateIds.has(Number(r.rate_id));
+        const donut = (rows: any[]) => {
+          const rbf = rows.filter(isRbf).length;
+          const ro = rows.length - rbf;
+          return [
+            { name: 'Room Sold RBF', data: rbf, key: 0, color: rbf > ro ? '#10b981' : '#FF0000' },
+            { name: 'Room Sold RO', data: ro, key: 1, color: ro > rbf ? '#10b981' : '#FF0000' },
+          ];
+        };
+        const todayRows = resRows.filter(r => r.date.toISOString().substring(0, 10) === dateLog);
+        return [
+          { type: 'donut', span: '3', label: 'Today Room Sold RBF vs RO', list: donut(todayRows), total: todayRows.length, is_active: false },
+          { type: 'donut', span: '3', label: 'MTD Room Sold RBF vs RO', list: donut(resRows), total: resRows.length, is_active: false },
+        ];
+      };
+
       switch (resolvedCode) {
         case 'total_room': {
           const { roomRows, maidAll } = await computeRoomData();
@@ -2343,19 +2572,20 @@ const payload = formatSystemBalanceData(
           detail = await computeMarketSegment(`market-segment-${idx}`, !!((property as any)?.[`market_segment_${idx}`]));
           break;
         }
-        case 'mtd_actual_vs_budget':
-        case 'room_sold_per_segment':
-        case 'forecast_per_room_sold':
+        case 'mtd_actual_vs_budget': {
+          detail = await computeMtdActualVsBudget();
+          break;
+        }
+        case 'room_sold_per_segment': {
+          detail = await computeRoomSoldPerSegment();
+          break;
+        }
+        case 'forecast_per_room_sold': {
+          detail = await computeForecastPerRoomSold();
+          break;
+        }
         case 'room_sold_rbv_vs_ro': {
-          detail = {
-            type: 'number',
-            span: '3',
-            label: resolvedCode.replace(/_/g, ' ').replace(/\b\w/g, (x: string) => x.toUpperCase()),
-            header: ['Name', 'Amount'],
-            list: [{ name: 'No Data', data: 0 }],
-            link: '',
-            is_total: false,
-          };
+          detail = await computeRoomSoldRbvVsRo();
           break;
         }
         default: {
