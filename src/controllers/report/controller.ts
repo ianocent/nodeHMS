@@ -4,6 +4,7 @@ import { prisma, parseReportParams, REPORT_PERMISSION_TABLE, bigintToNumber, for
 import { STATUSES } from '../../utils/cmsConfig';
 import { reportHandlers, getGenericReport } from './handlers';
 import { generateFolioDocumentPdf } from './folioDocuments';
+import { generateBanquetEventOrder, generateBreakdownCalculation } from './eventReports';
 import { AuthController } from '../auth.controller';
 import {
   generateAllCompaniesRoomRevenueBreakdownExcel,
@@ -573,49 +574,27 @@ export class ReportController {
 
   static async eventReport(req: Request, res: Response): Promise<void> {
     try {
-      const id = req.params.id as string;
-      const reportType = req.params.reportType;
-      const typeOps = req.query.typeOps as string || '';
+      const id = req.params.id as string | string[];
+      const reportTypeRaw = req.params.reportType;
+      const eventId = Number(Array.isArray(id) ? id[0] : id);
+      const reportType = Array.isArray(reportTypeRaw) ? reportTypeRaw[0] : reportTypeRaw;
 
-      if (!id || !reportType) {
+      if (!eventId || !reportType) {
         badRequest(res, 'Event ID and report type are required');
         return;
       }
 
-      const event: any = await prisma.event_events.findUnique({
-        where: { id: parseInt(id) },
-        include: {
-          event_packages: true,
-          event_venues: true,
-          event_layouts: true,
-          event_instructions: true,
-          event_deposit_plans: true,
-        },
-      });
-
-      if (!event) {
-        notFound(res, 'Event not found');
+      // Laravel parity: event reports render real PDFs (Report/Event/*Controller).
+      if (reportType === 'banquet-event-order') {
+        await generateBanquetEventOrder(req, res, eventId);
+        return;
+      }
+      if (reportType === 'event-breakdown-calculation') {
+        await generateBreakdownCalculation(req, res, eventId);
         return;
       }
 
-      const rows = [{
-        report_type: reportType,
-        event_name: event.name || '',
-        event_date: event.date ? formatDate(event.date) : '',
-        venue: event.venue_name || '',
-        total_guest: event.total_guest || 0,
-        status: event.status || 0,
-      }];
-
-      if (typeOps === 'view') {
-        const fileName = `event-${id}-${reportType}`;
-        await generateExcel(res, rows, Object.keys(rows[0] || {}).map((k) => ({
-          header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-          key: k,
-        })), fileName);
-      } else {
-        success(res, bigintToNumber(event), 'Success');
-      }
+      notFound(res, `Unknown event report type: ${reportType}`);
     } catch (err: any) {
       console.error('Report eventReport error:', err);
       error(res, 'Failed to load event report', 500);

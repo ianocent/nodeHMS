@@ -28,10 +28,6 @@ router.get('/reservations/:id/edit', authMiddleware, requirePermission(60, 'edit
 router.put('/reservations/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.update);
 router.delete('/reservations/:id', authMiddleware, requirePermission(60, 'delete'), ReservationController.destroy);
 router.post('/reservations/:id/restore', authMiddleware, requirePermission(60, 'edit'), ReservationController.restore);
-router.post('/reservations/:id/check-in', authMiddleware, requirePermission(60, 'edit'), ReservationController.checkIn);
-router.post('/reservations/:id/check-out', authMiddleware, requirePermission(60, 'edit'), ReservationController.checkOut);
-router.post('/reservations/:id/cancel', authMiddleware, requirePermission(60, 'edit'), ReservationController.cancel);
-router.post('/reservations/:id/confirm', authMiddleware, requirePermission(60, 'edit'), ReservationController.confirm);
 router.post('/reservations/:id/unassign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.unassignRoom);
 router.post('/reservations/:id/replicate', authMiddleware, requirePermission(60, 'add'), ReservationController.replicate);
 router.post('/reservations/:id/assign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.assignRoom);
@@ -89,10 +85,6 @@ router.get('/reservation/:id/update', authMiddleware, requirePermission(60, 'edi
 router.put('/reservation/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.update);
 router.delete('/reservation/:id', authMiddleware, requirePermission(60, 'delete'), ReservationController.destroy);
 router.post('/reservation/:id/restore', authMiddleware, requirePermission(60, 'edit'), ReservationController.restore);
-router.post('/reservation/:id/check-in', authMiddleware, requirePermission(60, 'edit'), ReservationController.checkIn);
-router.post('/reservation/:id/check-out', authMiddleware, requirePermission(60, 'edit'), ReservationController.checkOut);
-router.post('/reservation/:id/cancel', authMiddleware, requirePermission(60, 'edit'), ReservationController.cancel);
-router.post('/reservation/:id/confirm', authMiddleware, requirePermission(60, 'edit'), ReservationController.confirm);
 router.post('/reservation/:id/unassign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.unassignRoom);
 router.post('/reservation/:id/replicate', authMiddleware, requirePermission(60, 'add'), ReservationController.replicate);
 router.post('/reservation/:id/assign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.assignRoom);
