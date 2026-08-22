@@ -3,6 +3,7 @@ import { success, error, badRequest, notFound } from '../../utils/response';
 import { prisma, parseReportParams, REPORT_PERMISSION_TABLE, bigintToNumber, formatDate } from './helpers';
 import { STATUSES } from '../../utils/cmsConfig';
 import { reportHandlers, getGenericReport } from './handlers';
+import { generateFolioDocumentPdf } from './folioDocuments';
 import { AuthController } from '../auth.controller';
 import {
   generateAllCompaniesRoomRevenueBreakdownExcel,
@@ -551,56 +552,19 @@ export class ReportController {
 
   static async folioDocument(req: Request, res: Response): Promise<void> {
     try {
-      const id = req.params.id as string;
-      const documentType = req.params.documentType;
-      const typeOps = req.query.typeOps as string || '';
+      const id = req.params.id as string | string[];
+      const documentTypeRaw = req.params.documentType;
+      const folioId = Array.isArray(id) ? id[0] : id;
+      const documentType = Array.isArray(documentTypeRaw) ? documentTypeRaw[0] : documentTypeRaw;
 
-      if (!id || !documentType) {
+      if (!folioId || !documentType) {
         badRequest(res, 'Folio ID and document type are required');
         return;
       }
 
-      const folio: any = await prisma.folios.findUnique({
-        where: { id: BigInt(id) },
-        include: {
-          reservations: {
-            where: { deleted_at: null },
-            include: { room_types: { select: { name: true } } },
-          },
-          transactions: {
-            where: { deleted_at: null },
-            orderBy: { date: 'desc' },
-            take: 100,
-          },
-        },
-      });
-
-      if (!folio) {
-        notFound(res, 'Folio not found');
-        return;
-      }
-
-      const rows = [{
-        document_type: documentType,
-        folio_number: folio.folio_number,
-        guest_name: `${folio.first_name || folio.guest_profiles?.first_name || ''} ${folio.last_name || folio.guest_profiles?.last_name || ''}`.trim(),
-        check_in: folio.check_in_date ? formatDate(folio.check_in_date) : '',
-        check_out: folio.check_out_date ? formatDate(folio.check_out_date) : '',
-        total_amount: Number(folio.total_amount),
-        transaction_count: folio.transactions?.length || 0,
-        room_type: folio.reservations?.[0]?.room_types?.name || folio.reservations?.[0]?.room_type_name || '',
-        room_name: folio.reservations?.[0]?.room_name || '',
-      }];
-
-      if (typeOps === 'view') {
-        const fileName = `folio-${folio.folio_number}-${documentType}`;
-        await generateExcel(res, rows, Object.keys(rows[0] || {}).map((k) => ({
-          header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-          key: k,
-        })), fileName);
-      } else {
-        success(res, bigintToNumber(folio), 'Success');
-      }
+      // Laravel parity: 9 folio documents render real PDFs
+      // (Report/Batch/Folio/*Controller via SnappyPDF). Node renders via puppeteer.
+      await generateFolioDocumentPdf(req, res, folioId, documentType);
     } catch (err: any) {
       console.error('Report folioDocument error:', err);
       error(res, 'Failed to load folio document', 500);
