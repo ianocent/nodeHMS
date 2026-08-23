@@ -6,6 +6,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { calculateCodePost } from '../../utils/cmsConfig';
+import { sendBookingConfirmationEmails } from '../../services/mail.service';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -53,6 +54,17 @@ export async function processSyncCheckStatusBookingEngine(_job: any) {
 
       if (status === 'success') {
         await handleSuccessfulPayment(folio, decoded);
+        // Laravel sendConfirmationEmails (:349-421) — guest + hotel confirmation.
+        // SMTP dibaca dari env (lihat services/mail.service.ts); skip aman bila kosong.
+        try {
+          const property: any = await prisma.properties.findUnique({
+            where: { id: folio.property_id },
+            select: { name: true },
+          });
+          await sendBookingConfirmationEmails(folio, property?.name ?? 'Hotel');
+        } catch (mailErr: any) {
+          console.error('[SyncCheckStatusBookingEngine] confirmation email failed:', mailErr?.message);
+        }
       } else if (status === 'expired') {
         // Expired: clear pending flag + cancel the reservation.
         // (Laravel writes int flags 2/3 into one column; node schema keeps a

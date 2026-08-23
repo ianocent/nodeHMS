@@ -1,4 +1,9 @@
 import 'dotenv/config';
+
+// Timezone sweep — pin Node TZ ke WIB (= Laravel config app.timezone Asia/Jakarta)
+// SEBELUM import modul lain agar semua Date default memakai zona ini.
+process.env.TZ = process.env.APP_TZ || 'Asia/Jakarta';
+
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import path from 'path';

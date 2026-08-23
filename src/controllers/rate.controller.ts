@@ -58,6 +58,30 @@ function buildGridTable(roomTypes: any[], fields: string[]): any[] {
 
 const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
+// Laravel RateConfigController store/update image persistence (:92-104/:147-160)
+// — base64 data-URI -> STORAGE_PATH/rate-config/<name>-<ts>.<ext>; returns the
+// stored relative path or null when the payload is not an image.
+function saveRateConfigImage(name: string, dataUri: any): string | null {
+  if (typeof dataUri !== 'string') return null;
+  const m = dataUri.match(/^data:image\/(\w+);base64,(.*)$/);
+  if (!m) return null;
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const ext = m[1].toLowerCase();
+    const buf = Buffer.from(m[2], 'base64');
+    const root = process.env.STORAGE_PATH || path.join(process.cwd(), 'storage');
+    const dir = path.join(root, 'rate-config');
+    fs.mkdirSync(dir, { recursive: true });
+    const fileName = `${String(name).replace(/\s+/g, '-')}-${Date.now()}.${ext}`;
+    fs.writeFileSync(path.join(dir, fileName), buf);
+    return `/rate-config/${fileName}`;
+  } catch (e: any) {
+    console.error('Rate config image save failed:', e?.message);
+    return null;
+  }
+}
+
 const RESTRICTION_FIELDS = ['stop_arrival', 'stop_departure', 'stop_sell', 'min_los'];
 
 // ── Linked-rate cascade (Laravel RateRate::getRules/updateRate + getValueRate) ──
@@ -286,6 +310,13 @@ const allCodePosts = await prisma.code_posts.findMany({
 
       applySearchField(where, req, table);
 
+      // Laravel RateController@index rate_id branch (:68-127): exclude the queried
+      // rate and prepend a synthetic BAR row (id 0) built from the first active bar.
+      const branchRateId = req.query.rate_id ? String(req.query.rate_id) : '';
+      if (/^\d+$/.test(branchRateId)) {
+        where.id = { not: BigInt(branchRateId) };
+      }
+
       const [rates, total] = await Promise.all([
         prisma.rates.findMany({
           where,
@@ -295,6 +326,36 @@ const allCodePosts = await prisma.code_posts.findMany({
         }),
         prisma.rates.count({ where }),
       ]);
+
+      let syntheticBar: any = null;
+      if (branchRateId) {
+        const firstBar = await prisma.rates.findFirst({
+          where: { module: 'bar', deleted_at: null, status: STATUS_ACTIVE },
+          orderBy: { start_date: 'asc' },
+          select: { start_date: true, end_date: true },
+        });
+        const bars = await prisma.rates.aggregate({
+          where: { module: 'bar', deleted_at: null, status: STATUS_ACTIVE },
+          _min: { start_date: true },
+          _max: { end_date: true },
+        });
+        syntheticBar = {
+          id: 0,
+          name: 'BAR',
+          code: 'BAR',
+          description: 'BAR',
+          rate_type: 'BAR',
+          code_post_id: 'BAR',
+          code_post_extra_bed_id: 'BAR',
+          start_date: bars._min.start_date ?? firstBar?.start_date ?? null,
+          end_date: bars._max.end_date ?? firstBar?.end_date ?? null,
+          online: false,
+          staah: false,
+          print_rate: false,
+          is_day_use: false,
+          status: STATUS_ACTIVE,
+        };
+      }
 
       // Types: cancellation-reservation / company-type / comm-code (Laravel Rate::formatData() keys)
       const rateIds = rates.map(r => r.id);
@@ -367,7 +428,24 @@ const allCodePosts = await prisma.code_posts.findMany({
         delete: req.user?.superUser || permFlags.delete,
       };
 
-      success(res, bigintToNumber(formatted), 'Success', 200, {
+      // Synthetic BAR row goes on top (= Laravel push($newformat) + sortBy id, id 0 first).
+      let finalRows: any[] = formatted;
+      if (syntheticBar) {
+        finalRows = [
+          {
+            ...syntheticBar,
+            start_date: syntheticBar.start_date ? formatDate(syntheticBar.start_date) : null,
+            end_date: syntheticBar.end_date ? formatDate(syntheticBar.end_date) : null,
+            status: getStatusLabel(STATUS_ACTIVE),
+            is_view: permFlags.view,
+            is_edit: permFlags.edit,
+            is_need_approval: false,
+          },
+          ...formatted,
+        ];
+      }
+
+      success(res, bigintToNumber(finalRows), 'Success', 200, {
         table,
         permission,
         search_data: dataSearch(req, table) as any,
@@ -453,6 +531,17 @@ const allCodePosts = await prisma.code_posts.findMany({
       if (Object.keys(errors).length > 0) {
         validationError(res, errors);
         return;
+      }
+
+      // Laravel RateController@store (:233-260): dup-code pre-check (global)
+      // + reserved-name guard WALK IN / HOUSE USE / COMPLIMENTARY.
+      const dupCode = await prisma.rates.findFirst({ where: { code: String(code) } });
+      if (dupCode) { badRequest(res, 'Code already exist'); return; }
+      const RESERVED_NAMES = ['WALK IN', 'HOUSE USE', 'COMPLIMENTARY'];
+      const incomingName = String(name).trim().toUpperCase();
+      if (RESERVED_NAMES.includes(incomingName)) {
+        const exists = await prisma.rates.findFirst({ where: { name: incomingName } });
+        if (exists) { badRequest(res, `${incomingName} already exist`); return; }
       }
 
       const rate = await prisma.rates.create({
@@ -1952,13 +2041,16 @@ const { name, time, status } = req.body;
         return;
       }
 
+      // Laravel RateConfigController@store (:92-104): base64 -> storage/rate-config.
+      const imagePath = saveRateConfigImage(String(name), image);
+
       const item = await prisma.rate_configs.create({
         data: {
           property_id: propertyId!,
           rate_id: rateId,
           name,
           description: description || null,
-image: image || null,
+          image: imagePath,
           status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? STATUS_ACTIVE)),
           created_by: userId,
         },
@@ -1988,10 +2080,16 @@ image: image || null,
 
 const { name, description, image, status } = req.body;
 
+      // Laravel RateConfigController@update (:147-160): new base64 -> save;
+      // otherwise keep the stored path.
+      const imagePath = /^data:image\//.test(String(image ?? ''))
+        ? saveRateConfigImage(String(name ?? ''), image)
+        : (existing as any).image;
+
       const data: any = { updated_at: new Date(), updated_by: userId };
       if (name !== undefined) data.name = name;
       if (description !== undefined) data.description = description;
-      if (image !== undefined) data.image = image;
+      if (image !== undefined) data.image = imagePath;
       if (status !== undefined) data.status = status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : status);
 
       await prisma.rate_configs.update({ where: { id }, data });
