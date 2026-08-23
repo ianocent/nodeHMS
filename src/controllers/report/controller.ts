@@ -811,13 +811,22 @@ export class ReportController {
   static async staffList(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
-      const users = await prisma.users.findMany({
-        where: { property_id: pid, deleted_at: null, status: 1 },
-        select: { id: true, name: true, username: true, email: true },
-        orderBy: { name: 'asc' },
+      // Laravel StaffController@index — membership via model_has_properties pivot,
+      // NOT the users.property_id default column.
+      const links = await prisma.model_has_properties.findMany({
+        where: { property_id: pid, model_type: 'App\\Models\\User' },
+        select: { model_id: true },
       });
+      const userIds = links.map((l: any) => BigInt(l.model_id));
+      const users = userIds.length
+        ? await prisma.users.findMany({
+            where: { id: { in: userIds }, deleted_at: null },
+            select: { id: true, name: true },
+            orderBy: { name: 'asc' },
+          })
+        : [];
 
-      success(res, users.map((u: any) => bigintToNumber(u)), 'Success');
+      success(res, users.map((u: any) => ({ value: Number(u.id), label: u.name })), 'Success');
     } catch (err: any) {
       console.error('Report staffList error:', err);
       error(res, 'Failed to fetch staff list', 500);
