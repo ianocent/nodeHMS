@@ -1782,16 +1782,70 @@ export class SystemController {
         where[searchField] = { contains: searchValue, mode: 'insensitive' };
       }
 
-      let orderBy: any = { created_at: 'desc' };
-      if (sort === 'id') orderBy = { id: 'asc' };
-      else if (sort === '-id') orderBy = { id: 'desc' };
-      else if (sort === 'created_at') orderBy = { created_at: 'asc' };
-      else if (sort === '-created_at') orderBy = { created_at: 'desc' };
+      // Raw SQL with JSON_EXTRACT property scoping (= Laravel whereJsonContains)
+      // so filtering happens in-DB instead of post-fetch.
+      let orderBySql = 'l.created_at DESC';
+      if (sort === 'id') orderBySql = 'l.id ASC';
+      else if (sort === '-id') orderBySql = 'l.id DESC';
+      else if (sort === 'created_at') orderBySql = 'l.created_at ASC';
+      else if (sort === '-created_at') orderBySql = 'l.created_at DESC';
 
-      const [data, total] = await Promise.all([
-        getPrisma().logs.findMany({ where, orderBy, skip: (page - 1) * limit, take: limit }),
-        getPrisma().logs.count({ where }),
-      ]);
+      const conds: string[] = [];
+      const params: any[] = [];
+      if (subjectType) { conds.push('l.subject_type = ?'); params.push(subjectType); }
+      if (hasNumericId) { conds.push('l.subject_id = ?'); params.push(BigInt(idRaw)); }
+      if (dateStr) {
+        const d = new Date(dateStr + 'T00:00:00.000Z');
+        const dNext = new Date(d.getTime() + 86400000);
+        conds.push('l.created_at >= ? AND l.created_at < ?');
+        params.push(d, dNext);
+      }
+      if (!isSpecificModuleRequest) {
+        // property scope — fast path intentionally skips it (= Laravel buildLogQuery early return)
+        if (propertyId) {
+          const pidJson = `"${propertyId}"`;
+          conds.push(`(
+            (l.properties::jsonb -> 'attributes' ->> 'property_id') = ?
+            OR (l.properties::jsonb -> 'old' ->> 'property_id') = ?
+            OR (l.properties::jsonb -> 'attributes' -> 'property_id') @> ?::jsonb
+            OR (l.properties::jsonb -> 'old' -> 'property_id') @> ?::jsonb
+          )`);
+          params.push(String(propertyId), String(propertyId), pidJson, pidJson);
+        }
+        if (search) {
+          const nameUsers = await getPrisma().users.findMany({ where: { name: { contains: search, mode: 'insensitive' } }, select: { id: true } });
+          const nameIds = nameUsers.map((u) => u.id);
+          const like = `%${search}%`;
+          const searchCond = ['l.subject_type LIKE ?', 'l.description LIKE ?', 'l.properties LIKE ?'];
+          const sparams: any[] = [like, like, like];
+          if (nameIds.length > 0) {
+            searchCond.push(`l.causer_id IN (${nameIds.map(() => '?').join(',')})`);
+            sparams.push(...nameIds);
+          }
+          conds.push('(' + searchCond.join(' OR ') + ')');
+          params.push(...sparams);
+        }
+        if (searchField && searchValue && !searchField.includes('subject_type') && ['event', 'log_name', 'description'].includes(searchField)) {
+          conds.push(`l.${searchField} LIKE ?`);
+          params.push(`%${searchValue}%`);
+        }
+      }
+
+      const whereSql = (() => {
+        let n = 0;
+        return conds.length > 0
+          ? 'WHERE ' + conds.join(' AND ').replace(/\?/g, () => `$${++n}`)
+          : '';
+      })();
+      const offset = (page - 1) * limit;
+      const data: any[] = await getPrisma().$queryRawUnsafe(
+        `SELECT l.* FROM logs l ${whereSql} ORDER BY ${orderBySql} LIMIT ${limit + 1} OFFSET ${offset}`,
+        ...params,
+      );
+      const hasMoreLogs = data.length > limit;
+      if (hasMoreLogs) data.pop();
+      // synthetic progressive total (Laravel :105-106 parity) — avoids COUNT on huge tables
+      const total = offset + data.length + (hasMoreLogs ? 1 : 0);
 
       // causer names (Laravel ->with('causer'))
       const causerIds = Array.from(new Set(data.map((l) => l.causer_id).filter((v) => v !== null && v !== undefined))) as bigint[];
@@ -1867,16 +1921,8 @@ export class SystemController {
         return base.replace(/([A-Z])/g, ' $1').replace(/^ /, '').replace(/ /g, ' ');
       };
 
-      // Laravel property filter (whereJsonContains properties->attributes/old->property_id) — apply post-fetch (page-scoped)
-      const filtered = propertyId
-        ? data.filter((log) => {
-            const props = parseProps(log.properties);
-            const attrs = props.attributes ?? {};
-            const old = props.old ?? {};
-            return Number(attrs?.property_id) === propertyId || Number(old?.property_id) === propertyId;
-          })
-        : data;
-      const pageData = filtered;
+      // Property scoping handled in SQL above (JSON_EXTRACT) — no post-fetch filter.
+      const pageData = data;
 
       const permission = { view: true, add: false, edit: false, delete: false, active: false, approve: false, reject: false };
       const includeModal = req.query.include_modal !== 'false'; // Laravel default true
