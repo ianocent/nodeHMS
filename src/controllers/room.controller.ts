@@ -1503,8 +1503,10 @@ export class RoomController {
       } = req.body;
 
       const updateData: any = { updated_at: new Date(), updated_by: userId };
-      if (room_type_id !== undefined) updateData.room_type_id = BigInt(room_type_id);
-      if (room_id !== undefined) updateData.room_id = room_id ? BigInt(room_id) : null;
+      // FE sends select values as {value,label} — unwrap before BigInt/Number casts
+      const unwrap = (v: any): any => (v !== null && typeof v === 'object' ? v.value : v);
+      if (room_type_id !== undefined) updateData.room_type_id = room_type_id ? BigInt(unwrap(room_type_id)) : null;
+      if (room_id !== undefined) updateData.room_id = room_id ? BigInt(unwrap(room_id)) : null;
       if (name !== undefined) updateData.name = name;
       if (description !== undefined) updateData.description = description;
       if (is_physical !== undefined) updateData.is_physical = Boolean(is_physical);
@@ -1530,7 +1532,8 @@ export class RoomController {
         const { floor, building } = req.body;
         const typeIds: bigint[] = [];
         for (const v of [...room_configuration_ids, floor, building]) {
-          if (v !== undefined && v !== null && v !== '' && v !== 0) typeIds.push(BigInt(v));
+          const raw = v !== null && typeof v === 'object' ? v.value : v;
+          if (raw !== undefined && raw !== null && raw !== '' && raw !== 0) typeIds.push(BigInt(raw));
         }
         await prisma.model_has_types.deleteMany({
           where: { model_id: id, model_type: 'App\\Models\\Room' },

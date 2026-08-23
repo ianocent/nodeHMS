@@ -24,13 +24,13 @@ router.post('/housekeeping/room-status/batch', authMiddleware, requirePermission
 router.post('/housekeeping/room-status/save-checklist', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.roomStatusSaveChecklist);
 router.get('/housekeeping/room-status/current-housekeepers', authMiddleware, requirePermission(158, 'view'), HousekeepingController.currentHousekeepers);
 router.put('/housekeeping/room-status/status/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.roomStatusUpdateStatus);
+router.put('/housekeeping/room-status/:id', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.roomStatusUpdate);
 router.get('/housekeeping/history', authMiddleware, requirePermission(158, 'view'), HousekeepingController.housekeeperHistoryList);
 router.get('/housekeeping/shift-user-list', authMiddleware, requirePermission(158, 'view'), HousekeepingController.shiftUserList);
 router.get('/housekeeping/room-status/create', authMiddleware, requirePermission(158, 'add'), RoomController.create);
 router.get('/housekeeping/room-status/:id', authMiddleware, requirePermission(158, 'view'), RoomController.show);
-router.get('/housekeeping/room-status/:id/update', authMiddleware, requirePermission(158, 'edit'), RoomController.edit);
+router.get('/housekeeping/room-status/:id/update', authMiddleware, requirePermission(158, 'edit'), HousekeepingController.roomStatusEdit);
 router.post('/housekeeping/room-status', authMiddleware, requirePermission(158, 'add'), RoomController.store);
-router.put('/housekeeping/room-status/:id', authMiddleware, requirePermission(158, 'edit'), RoomController.update);
 router.delete('/housekeeping/room-status/:id', authMiddleware, requirePermission(158, 'delete'), RoomController.destroy);
 router.get('/housekeeping/work-orders', authMiddleware, requirePermission(158, 'view'), HousekeepingController.workOrderList);
 router.post('/housekeeping/work-orders', authMiddleware, requirePermission(158, 'add'), HousekeepingController.workOrderStore);

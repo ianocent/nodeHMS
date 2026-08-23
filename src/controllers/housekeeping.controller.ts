@@ -278,7 +278,8 @@ success(res, bigintToNumber(data), 'Success', 200, {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const rawDate = (req.query.date as string) || new Date().toISOString().slice(0, 10);
       const dateStr = rawDate.replace(/\//g, '-').slice(0, 10);
-      const date = new Date(dateStr + 'T00:00:00');
+      // UTC midnight — must match how assignments store the date (T00:00:00.000Z)
+      const date = new Date(dateStr + 'T00:00:00.000Z');
       const roomStatus = req.query.room_status as string;
       const maidStatus = req.query.maid_status as string;
       const floor = req.query.floor as string;
@@ -323,7 +324,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
       const [histories, folioRows] = await Promise.all([
         prisma.housekeeper_history.findMany({
           where: { room_id: { in: roomIds }, date, done_inspection: null },
-          select: { room_id: true, user_id: true },
+          select: { id: true, room_id: true },
         }),
         prisma.reservations.findMany({
           where: {
@@ -336,8 +337,18 @@ success(res, bigintToNumber(data), 'Success', 200, {
           select: { room_id: true, folio_id: true },
         }),
       ]);
-      const hkUserIds = [...new Set(histories.filter((h: any) => h.user_id).map((h: any) => h.user_id))];
-      const hkUsers = hkUserIds.length ? await prisma.users.findMany({ where: { id: { in: hkUserIds } }, select: { id: true, name: true } }) : [];
+      // Assignment lives in the housekeeper_history_user pivot — history.user_id is unused
+      const historyIds = histories.map((h) => h.id);
+      const hkPivots = historyIds.length
+        ? await prisma.housekeeper_history_user.findMany({
+            where: { housekeeper_history_id: { in: historyIds }, deleted_at: null },
+            select: { housekeeper_history_id: true, user_id: true },
+          })
+        : [];
+      const roomIdByHistory = new Map(histories.map((h) => [Number(h.id), Number(h.room_id)]));
+      const hkPairs = hkPivots.map((p) => ({ room_id: roomIdByHistory.get(Number(p.housekeeper_history_id)), user_id: p.user_id }));
+      const hkUserIds = [...new Set(hkPairs.filter((h) => h.user_id).map((h) => Number(h.user_id)))];
+      const hkUsers = hkUserIds.length ? await prisma.users.findMany({ where: { id: { in: hkUserIds.map((i) => BigInt(i)) } }, select: { id: true, name: true } }) : [];
       const hkUserMap = new Map(hkUsers.map((u: any) => [Number(u.id), u.name]));
 
       const folioIds = [...new Set(folioRows.map((f: any) => f.folio_id))];
@@ -347,11 +358,13 @@ success(res, bigintToNumber(data), 'Success', 200, {
         folios.forEach((f: any) => folioMap.set(Number(f.id), f));
       }
       const hkByRoom = new Map<number, { value: number; label: string }[]>();
-      histories.forEach((h: any) => {
+      hkPairs.forEach((h: any) => {
         const rid = Number(h.room_id);
         const name = hkUserMap.get(Number(h.user_id));
-        if (name && !(hkByRoom.get(rid) || []).some((x: any) => x.value === Number(h.user_id))) {
-          hkByRoom.set(rid, [...(hkByRoom.get(rid) || []), { value: Number(h.user_id), label: name }]);
+        if (!rid || !name) return;
+        const cur = hkByRoom.get(rid) || [];
+        if (!cur.some((x: any) => x.value === Number(h.user_id))) {
+          hkByRoom.set(rid, [...cur, { value: Number(h.user_id), label: name }]);
         }
       });
       const guestByRoom = new Map<number, any>();
@@ -399,10 +412,50 @@ success(res, bigintToNumber(data), 'Success', 200, {
 
       const businessDate = await AuthController.getBusinessDate(pid).catch(() => null);
 
+      // Housekeeper dropdown options — users whose role grants any HK transaction
+      // action (perform_cleaning / perform_inspection / assign_housekeeper) via
+      // role_menu_crud.transaction_actions, scoped to the property.
+      // (= Laravel ServiceSchedulerController@housekeepers JSON_EXTRACT parity)
+      const hkActions = ['perform_cleaning', 'perform_inspection', 'assign_housekeeper'];
+      const rmcs = await prisma.role_menu_crud.findMany({ select: { role_id: true, transaction_actions: true } });
+      const hkRoleIds = rmcs
+        .filter((r) => {
+          if (!r.transaction_actions) return false;
+          try {
+            const ta = JSON.parse(r.transaction_actions);
+            return hkActions.some((a) => ta[a] === true || ta[a] === 1 || ta[a] === 'true');
+          } catch { return false; }
+        })
+        .map((r) => r.role_id);
+      let housekeeperOptions: any[] = [];
+      if (hkRoleIds.length > 0) {
+        const links = await prisma.model_has_roles.findMany({
+          where: { model_type: 'App\\Models\\User', role_id: { in: hkRoleIds } },
+          select: { model_id: true },
+          distinct: ['model_id'],
+        });
+        let hkUserIds = [...new Set(links.map((l: any) => Number(l.model_id)))];
+        // property scope
+        const userProps = await prisma.model_has_properties.findMany({
+          where: { property_id: pid, model_type: 'App\\Models\\User' },
+          select: { model_id: true },
+        });
+        const propSet = new Set(userProps.map((p: any) => Number(p.model_id)));
+        hkUserIds = hkUserIds.filter((id) => propSet.has(id));
+        if (hkUserIds.length > 0) {
+          const hks = await prisma.users.findMany({
+            where: { deleted_at: null, id: { in: hkUserIds.map((id) => BigInt(id)) } },
+            select: { id: true, name: true },
+            orderBy: { name: 'asc' },
+          });
+          housekeeperOptions = hks.map((u: any) => ({ value: Number(u.id), label: u.name }));
+        }
+      }
+
       success(res, formatted, 'Success', 200, {
         table: [
           { label: 'Unit', key: 'name', type: 'none', is_link: false, is_search: false },
-          { label: 'Housekeeper', key: 'housekeeper', type: 'select_multiple', is_search: false, options: [] },
+          { label: 'Housekeeper', key: 'housekeeper', type: 'select_multiple', is_search: false, options: housekeeperOptions },
           { label: 'Clean Status', key: 'maid_status', type: 'none', is_search: false, options: Object.values(MAID_STATUSES).map((s) => ({ value: s.id, label: s.name })) },
           { label: 'Room Status', key: 'room_status', type: 'none', is_search: false, options: Object.values(ROOM_STATUSES).map((s) => ({ value: s.id, label: s.name })) },
           { label: 'Room type', key: 'room_type_id', type: 'none', is_search: false, options: [] },
@@ -422,6 +475,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
           roomStatuses: Object.values(ROOM_STATUSES).map((s) => ({ value: s.id, label: s.name })),
           business_date: businessDate,
           currentHousekeepers: [],
+          housekeepers: housekeeperOptions,
         },
         permission: getPermissionFlags(req.user, 158),
         search_data: [
@@ -1210,6 +1264,231 @@ success(res, bigintToNumber(data), 'Success', 200, {
       await prisma.housekeeper_history.update({ where: { id: history.id }, data });
       success(res, null, 'Success');
     } catch (err: any) { console.error('Room status save checklist error:', err); error(res, 'Failed to save checklist', 500); }
+  }
+
+  // ==================== ROOM STATUS: UPDATE (assign housekeeper + cleaning time) ====================
+  // Laravel HouseKeepingRoomStatusController@update (:316-410) — PUT housekeeping/room-status/{room}.
+  static async roomStatusUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const roomId = BigInt(idParam);
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const body = req.body || {};
+
+      const normIds = (v: any): bigint[] => {
+        if (v === undefined || v === null) return [];
+        const arr = Array.isArray(v) ? v : [v];
+        return arr
+          .map((x) => (x && typeof x === 'object' ? x.value : x))
+          .filter((x) => x !== null && x !== undefined && x !== '' && /^\d+$/.test(String(x)))
+          .map((x) => BigInt(String(x)));
+      };
+      const housekeeperOri = normIds(body.housekeeper_ori);
+      const housekeeperNew = normIds(body.housekeeper);
+
+      const room = await prisma.rooms.findUnique({ where: { id: roomId } });
+      if (!room || room.deleted_at) { notFound(res, 'Not Found'); return; }
+
+      if (!body.cleaning_time) { badRequest(res, 'The cleaning time field is required.'); return; }
+      await prisma.rooms.update({ where: { id: roomId }, data: { cleaning_time: new Date(body.cleaning_time), updated_at: new Date() } });
+
+      const dateStr = String(body.date ?? (req.user as any)?.bussinesDate ?? new Date().toISOString().slice(0, 10));
+      const dateObj = new Date(dateStr.length <= 10 ? dateStr + 'T00:00:00.000Z' : dateStr);
+
+      let history = await prisma.housekeeper_history.findFirst({
+        where: { room_id: roomId, date: dateObj, done_inspection: null },
+        orderBy: { created_at: 'desc' },
+      });
+      if (!history) {
+        history = await prisma.housekeeper_history.create({
+          data: { room_id: roomId, date: dateObj, property_id: pid, status: 1, created_at: new Date(), created_by: req.user?.id },
+        });
+      }
+
+      await prisma.housekeeper_history_user.deleteMany({ where: { housekeeper_history_id: history.id } });
+
+      const finalIds = housekeeperNew.length > 0 ? housekeeperNew : housekeeperOri;
+      if (finalIds.length > 0) {
+        await prisma.housekeeper_history_user.createMany({
+          data: finalIds.map((uid) => ({
+            property_id: pid,
+            user_id: uid,
+            housekeeper_history_id: history!.id,
+            status: 1,
+            created_by: req.user?.id ?? null,
+            created_at: new Date(),
+          })),
+        });
+      }
+
+      const refreshedRoom = await prisma.rooms.findUnique({ where: { id: roomId } });
+      success(res, bigintToNumber(refreshedRoom), 'Success', 200);
+    } catch (err: any) {
+      console.error('HK room-status update error:', err);
+      error(res, 'Failed to update room status', 500);
+    }
+  }
+
+  // ==================== ROOM STATUS: EDIT FORM ====================
+  // Laravel HouseKeepingRoomStatusController@edit (:186-258) — GET :id/update.
+  // Returns the ROOM row + master incl. houseKeeperHistory (scoped to caller's
+  // perform_cleaning/perform_inspection rights) so the FE can show its action buttons.
+  static async roomStatusEdit(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const roomId = BigInt(idParam);
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const userId = req.user?.id ?? 0n;
+
+      const room = await prisma.rooms.findUnique({
+        where: { id: roomId },
+        include: { room_types: { select: { id: true, name: true } } },
+      });
+      if (!room || room.deleted_at) { notFound(res, 'Not Found'); return; }
+
+      const businessDate = await AuthController.getBusinessDate(pid);
+
+      // Caller rights (= hasTransactionPermission on menu 172)
+      const userRoleLinks = await prisma.model_has_roles.findMany({
+        where: { model_type: 'App\\Models\\User', model_id: userId },
+        select: { role_id: true },
+      });
+      const roleIds = userRoleLinks.map((r) => r.role_id);
+      let canClean = false; let canInspect = false;
+      if (roleIds.length > 0) {
+        const rmcs = await prisma.role_menu_crud.findMany({
+          where: { role_id: { in: roleIds } },
+          select: { transaction_actions: true },
+        });
+        for (const r of rmcs) {
+          if (!r.transaction_actions) continue;
+          try {
+            const ta = JSON.parse(r.transaction_actions);
+            if (ta.perform_cleaning === true || ta.perform_cleaning === 1 || ta.perform_cleaning === 'true') canClean = true;
+            if (ta.perform_inspection === true || ta.perform_inspection === 1 || ta.perform_inspection === 'true') canInspect = true;
+          } catch { /* ignore */ }
+        }
+      }
+
+      const attachUsers = async (histories: any[]): Promise<any[]> => {
+        const ids = histories.map((h) => h.id);
+        if (!ids.length) return histories;
+        const pivots = await prisma.housekeeper_history_user.findMany({
+          where: { housekeeper_history_id: { in: ids }, deleted_at: null },
+          select: { housekeeper_history_id: true, user_id: true },
+        });
+        const uIds = [...new Set(pivots.map((p) => Number(p.user_id)).filter(Boolean))];
+        const users = uIds.length ? await prisma.users.findMany({ where: { id: { in: uIds.map((i) => BigInt(i)) } }, select: { id: true, name: true } }) : [];
+        const nameMap = new Map(users.map((u) => [Number(u.id), u.name]));
+        return histories.map((h) => ({
+          ...h,
+          users: pivots
+            .filter((p) => Number(p.housekeeper_history_id) === Number(h.id))
+            .map((p) => ({ user_id: Number(p.user_id), userData: { id: Number(p.user_id), name: nameMap.get(Number(p.user_id)) ?? '' } })),
+        }));
+      };
+
+      const bdDate = new Date(String(businessDate) + 'T00:00:00.000Z');
+      const baseWhere = { room_id: roomId, date: bdDate };
+      let houseKeeperHistory: any = null;
+
+      if (canClean && !canInspect) {
+        const rows: any[] = await attachUsers(
+          await prisma.housekeeper_history.findMany({
+            where: { ...baseWhere, done_inspection: null },
+            orderBy: { created_at: 'desc' },
+          }),
+        );
+        houseKeeperHistory = rows.find((h) => (h.users || []).some((u: any) => Number(u.user_id) === Number(userId))) ?? null;
+      } else if (canInspect) {
+        let rows = await prisma.housekeeper_history.findMany({
+          where: { ...baseWhere, NOT: { done_inspection: null as any }, start_clean_time: { not: null } },
+          orderBy: { created_at: 'desc' },
+        });
+        rows = rows.filter((h) => h.end_clean_time != null);
+        houseKeeperHistory = (await attachUsers(rows))[0] ?? null;
+      }
+      if (!houseKeeperHistory) {
+        const rows = await attachUsers(
+          await prisma.housekeeper_history.findMany({ where: baseWhere, orderBy: { created_at: 'desc' } }),
+        );
+        houseKeeperHistory = rows[0] ?? null;
+      }
+
+      // Master data (= Laravel edit() tail)
+      const [roomTypes, roomsList] = await Promise.all([
+        prisma.room_types.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+        prisma.rooms.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+      ]);
+      const hkActions = ['perform_cleaning', 'perform_inspection', 'assign_housekeeper'];
+      const rmcsAll = await prisma.role_menu_crud.findMany({ select: { role_id: true, transaction_actions: true } });
+      const hkRoleIds = rmcsAll
+        .filter((r) => {
+          if (!r.transaction_actions) return false;
+          try {
+            const ta = JSON.parse(r.transaction_actions);
+            return hkActions.some((a) => ta[a] === true || ta[a] === 1 || ta[a] === 'true');
+          } catch { return false; }
+        })
+        .map((r) => r.role_id);
+      let housekeepers: any[] = [];
+      if (hkRoleIds.length > 0) {
+        const links = await prisma.model_has_roles.findMany({
+          where: { model_type: 'App\\Models\\User', role_id: { in: hkRoleIds } },
+          select: { model_id: true },
+          distinct: ['model_id'],
+        });
+        const propLinks = await prisma.model_has_properties.findMany({
+          where: { property_id: pid, model_type: 'App\\Models\\User' },
+          select: { model_id: true },
+        });
+        const propSet = new Set(propLinks.map((p: any) => Number(p.model_id)));
+        const hkUserIds = [...new Set(links.map((l) => Number(l.model_id)))].filter((id) => propSet.has(id));
+        if (hkUserIds.length > 0) {
+          const hks = await prisma.users.findMany({
+            where: { deleted_at: null, id: { in: hkUserIds.map((i) => BigInt(i)) } },
+            select: { id: true, name: true },
+            orderBy: { name: 'asc' },
+          });
+          housekeepers = hks.map((u: any) => ({ value: Number(u.id), label: u.name }));
+        }
+      }
+
+      const mht = await prisma.model_has_types.findMany({
+        where: { model_id: roomId, model_type: 'App\\Models\\Room' },
+        include: { types: { select: { id: true, name: true, group: true } } },
+      });
+      const floorType = mht.find((m) => m.types.group === 'floor');
+      const buildingType = mht.find((m) => m.types.group === 'building');
+
+      const statusLabel = (code: any, map: Record<string, { id: number; name: string }>) => {
+        const found = Object.values(map).find((s) => s.id === Number(code));
+        return { value: Number(code), label: found?.name ?? String(code ?? '') };
+      };
+
+      success(res, bigintToNumber(room), 'Success', 200, {
+        master: {
+          statuses: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }],
+          maidStatuses: Object.values(MAID_STATUSES).map((s) => ({ value: s.id, label: s.name })),
+          roomStatuses: Object.values(ROOM_STATUSES).map((s) => ({ value: s.id, label: s.name })),
+          roomTypes: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
+          rooms: roomsList.map((r: any) => ({ value: Number(r.id), label: r.name })),
+          current_user_id: Number(userId),
+          housekeepers,
+          houseKeeperHistory: bigintToNumber(houseKeeperHistory),
+          business_date: businessDate,
+        },
+        // extra field mirrors used by the FE form
+        room_status: statusLabel(room.room_status, ROOM_STATUSES),
+        maid_status: statusLabel(room.maid_status, MAID_STATUSES),
+        room_type_id: { value: Number(room.room_type_id), label: room.room_types?.name ?? '' },
+        floor: floorType ? { value: Number(floorType.types.id), label: floorType.types.name } : {},
+        building: buildingType ? { value: Number(buildingType.types.id), label: buildingType.types.name } : {},
+      } as any);
+    } catch (err: any) {
+      console.error('HK room-status edit error:', err);
+      error(res, 'Failed to load room status form', 500);
+    }
   }
 
   // ==================== ROOM STATUS: BATCH UPDATE ====================

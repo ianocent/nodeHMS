@@ -47,6 +47,7 @@ router.put('/reservation/changeRoom/:id', authMiddleware, requirePermission(60, 
 // ── Singular static routes ──
 router.get('/reservation', authMiddleware, requirePermission(60, 'view'), ReservationController.list);
 router.get('/reservation/create', authMiddleware, requirePermission(60, 'add'), ReservationController.create);
+router.post('/reservation/create', authMiddleware, requirePermission(60, 'add'), ReservationController.store); // Laravel cms.php:980
 router.post('/reservation', authMiddleware, requirePermission(60, 'add'), ReservationController.store);
 router.get('/reservation/calendar', authMiddleware, requirePermission(60, 'view'), ReservationController.calendar);
 router.get('/reservation/arrivals', authMiddleware, requirePermission(60, 'view'), ReservationController.arrivals);
