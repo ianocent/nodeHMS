@@ -134,11 +134,18 @@ router.get('/profile/guest-family', authMiddleware, requirePermission(82, 'view'
 router.post('/profile/guest-family', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.familyStore(req, res); });
 router.delete('/profile/guest-family/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.familyDestroy);
 router.get('/profile/guest-history', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.historyList(req, res); });
+router.post('/profile/guest-history', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.historyStore(req, res); });
+router.put('/profile/guest-history/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.historyUpdate);
+router.delete('/profile/guest-history/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.historyDestroy);
 router.get('/profile/guest-preference', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.preferenceList(req, res); });
+router.get('/profile/guest-preferences', authMiddleware, requirePermission(82, 'view'), GuestController.preferenceListAll);
 router.post('/profile/guest-preference', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.preferenceStore(req, res); });
+router.put('/profile/guest-preference/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.preferenceUpdate);
+router.post('/profile/guest-preference/:id/done', authMiddleware, requirePermission(82, 'edit'), GuestController.preferenceMarkDone);
 router.delete('/profile/guest-preference/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.preferenceDestroy);
 router.get('/profile/guest-loyalty-card', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.loyaltyList(req, res); });
 router.post('/profile/guest-loyalty-card', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.loyaltyStore(req, res); });
+router.put('/profile/guest-loyalty-card/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.loyaltyUpdate);
 router.delete('/profile/guest-loyalty-card/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.loyaltyDestroy);
 
 // Merge Guest (menu 84)

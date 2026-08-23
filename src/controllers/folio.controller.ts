@@ -6,6 +6,26 @@ import { success, error, badRequest, notFound } from '../utils/response';
 import { folioBalanceWithoutPosting, transferTransactionsForCheckout } from './front-desk.controller';
 import { AuthController } from './auth.controller';
 import { enqueueJob } from '../config/queue';
+import { priceNight } from '../utils/reservationPricing';
+
+// Wrapper for drag/copy rebuild — priced per-night row creation against an arbitrary tx client.
+function priceNightPublic(tx: any, opts: {
+  rateId: bigint | null;
+  roomTypeId: bigint;
+  night: Date;
+  getNight: number;
+  adult: number;
+  child: number;
+  isTax: boolean;
+  rateCodePost: any;
+}) {
+  return priceNight({
+    prisma: tx as any,
+    ...opts,
+    quantity: 1,
+    promos: [],
+  } as any);
+}
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
@@ -481,6 +501,200 @@ export class FolioController {
         const updated: any = await prisma.folios.findUnique({ where: { id } });
         success(res, bigintToNumber(updated), 'Status updated successfully');
         return;
+      }
+
+      // ── Laravel setUpdateStatus action: confirm_reservation (:2003-2029) ──
+      if (status_reservation === 'confirm_reservation') {
+        const remarkKey = { remark_confirm_reservation: reason ?? null };
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        updateData.status_reservation = STATUS_RESERVATION.reservation.id;
+        updateData.is_pending = false;        updateData.data = JSON.stringify({ ...(folio.data ? JSON.parse(folio.data as string) : {}), ...remarkKey });
+        if (isGitParent) {
+          const children = await prisma.folios.findMany({
+            where: { parent: id, status_reservation: { not: STATUS_RESERVATION.cancel_reservation.id } },
+          });
+          for (const child of children) {
+            await prisma.folios.update({
+              where: { id: child.id },
+              data: {
+                status_reservation: STATUS_RESERVATION.reservation.id,
+                is_pending: false,
+                data: JSON.stringify({ ...(child.data ? JSON.parse(child.data as string) : {}), ...remarkKey }),
+                updated_at: new Date(),
+              },
+            });
+          }
+        }
+        await prisma.folios.update({ where: { id }, data: updateData });
+        const updated: any = await prisma.folios.findUnique({ where: { id } });
+        enqueueJob('sync-staah-room-availability', { propertyId: Number(updated?.property_id ?? 0) });
+        success(res, bigintToNumber(updated), 'Reservation confirmed');
+        return;
+      }
+
+      // ── Laravel setUpdateStatus action: copy_reservation (:1942-2001) ──
+      if (status_reservation === 'copy_reservation') {
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        if (isGitParent) { badRequest(res, 'Action not allowed'); return; }
+
+        const bussinesDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+        const srcResvs = await prisma.reservations.findMany({
+          where: { folio_id: id, deleted_at: null },
+          orderBy: { date: 'asc' },
+          include: { room_types: { select: { name: true } }, rates: { select: { id: true, name: true, code_post_id: true } } },
+        });
+        const firstResv = srcResvs[0];
+        const getNight = firstResv
+          ? Math.max(1, Math.ceil((new Date(String(firstResv.check_out_date ?? Date.now())).getTime() - new Date(String(firstResv.check_in_date ?? Date.now())).getTime()) / 86400000))
+          : 1;
+        const newCheckIn = `${bussinesDate}T00:00:00`;
+        const newCheckOutDate: Date = new Date(new Date(newCheckIn).getTime() + getNight * 86400000);
+
+        // Generate new folio number (Laravel generateCodeReservation)
+        const lastFolio = await prisma.folios.findFirst({
+          where: { property_id: folio.property_id, type_reservation: folio.type_reservation },
+          orderBy: { id: 'desc' },
+          select: { folio_number: true },
+        });
+        let seq = 1;
+        if (lastFolio?.folio_number) {
+          const parts = String(lastFolio.folio_number).split('/');
+          const lastSeg = parseInt(parts[parts.length - 1], 10);
+          if (!isNaN(lastSeq(lastFolio.folio_number))) seq = lastSeq(lastFolio.folio_number) + 1;
+        }
+        function lastSeq(fn: string): number {
+          const p = fn.split('/');
+          return parseInt(p[p.length - 1], 10) || 0;
+        }
+        const prefix = String(folio.folio_number ?? '').split('/')[0] || 'RES';
+        const newFolioNumber = `${prefix}/${String(seq).padStart(3, '0')}`;
+
+        const newCheckInDate = new Date(newCheckIn);
+        const folioReplicate = await prisma.folios.create({
+          data: {
+            property_id: folio.property_id,
+            type_reservation: folio.type_reservation,
+            guest_profile_id: folio.guest_profile_id,
+            company_profile_id: folio.company_profile_id,
+            company_name: folio.company_name ?? null,
+            first_name: folio.first_name,
+            last_name: folio.last_name,
+            email: folio.email,
+            telp: folio.telp,
+            address: folio.address ?? null,
+            nationality_id: folio.nationality_id ?? null,
+            check_in_date: new Date(newCheckIn),
+            check_out_date: newCheckOutDate,
+            booking_no: folio.booking_no ?? null,
+            remark: folio.remark ?? null,
+            folio_number: newFolioNumber,
+            is_pending: false,
+            status_reservation: STATUS_RESERVATION.reservation.id,
+            parent: 0n,
+            is_compliment_tour_leader: false,
+            status: 1,
+            created_at: new Date(),
+            updated_at: new Date(),
+            created_by: userId,
+          },
+        });
+
+        // Copy inclusive items (Laravel :1968-1985)
+        const srcCodeItems: any[] = await prisma.$queryRaw`
+          SELECT * FROM model_has_code_items
+          WHERE model_id = ${id} AND model_type = ${'App\\Models\\Folio'}`;
+        for (const ci of srcCodeItems) {
+          await prisma.$executeRaw`
+            INSERT INTO model_has_code_items (model_id, model_type, code_item_id, reason, start_date, end_date, sales, process_on, code_post_id, name, description)
+            VALUES (${folioReplicate.id}, ${'App\\Models\\Folio'}, ${ci.code_item_id}, ${ci.reason ?? ''},
+                    ${newCheckInDate}, ${newCheckOutDate},
+                    ${ci.sales ?? null}, ${ci.process_on ?? null}, ${ci.code_post_id ? Number(ci.code_post_id) : null},
+                    ${ci.name ?? null}, ${ci.description ?? null})`;
+        }
+
+        // Priced per-night rows via saveReservation engine (rate_rates + occupancy + markup).
+        if (firstResv) {
+          const property: any = await prisma.properties.findUnique({ where: { id: folio.property_id }, select: { is_tax: true } });
+          const isTax = property?.is_tax === 1;
+          let cpRow: any = null;
+          if (firstResv.rate_id) {
+            const rate: any = await prisma.rates.findUnique({ where: { id: BigInt(firstResv.rate_id) }, select: { code_post_id: true } });
+            if (rate?.code_post_id) cpRow = await prisma.code_posts.findUnique({ where: { id: BigInt(rate.code_post_id) } });
+          }
+          const rtId = BigInt(firstResv.room_type_id ?? 0);
+          for (let i = 0; i < getNight; i++) {
+            const nightDate = new Date(newCheckInDate.getTime() + i * 86400000);
+            const pricing = await priceNightPublic(prisma, {
+              rateId: firstResv.rate_id ? BigInt(firstResv.rate_id) : null,
+              roomTypeId: rtId,
+              night: nightDate,
+              getNight,
+              adult: Number(firstResv.adult ?? 1),
+              child: Number(firstResv.child ?? 0),
+              isTax,
+              rateCodePost: cpRow,
+            });
+            await prisma.reservations.create({
+              data: {
+                property_id: folio.property_id,
+                folio_id: folioReplicate.id,
+                rate_id: firstResv.rate_id ? BigInt(firstResv.rate_id) : null,
+                room_type_id: rtId,
+                room_id: null,
+                adult: firstResv.adult ?? 1,
+                child: firstResv.child ?? 0,
+                add_bed: firstResv.add_bed ?? 0,
+                check_in_date: new Date(newCheckIn),
+                check_out_date: newCheckOutDate,
+                date: nightDate,
+                night: getNight,
+                amount: pricing.amount,
+                total: pricing.total,
+                service_charge: pricing.service_charge,
+                pb1: pricing.pb1,
+                tax3: pricing.tax3,
+                status_reservation: STATUS_RESERVATION.reservation.id,
+                status: 1,
+                created_by: userId,
+              },
+            });
+          }
+        }
+
+        enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+        success(res, { folio_id: Number(folioReplicate.id), folio_number: folioReplicate.folio_number }, 'Reservation copied');
+        return;
+      }
+
+      // ── Laravel setUpdateStatus action: move_reservation → performMoveReservation (:1137-1201) ──
+      if (status_reservation === 'move_reservation') {
+        const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
+        if (isGitParent) { badRequest(res, 'Action not allowed'); return; }
+        const toDateStr = req.body.to_date ?? req.body.date;
+        const fromDateStr = req.body.from_date;
+        if (!toDateStr) { badRequest(res, 'To Date is required'); return; }
+
+        const fromStart = new Date(`${(fromDateStr ?? folio.check_in_date?.toISOString().slice(0, 10) ?? '')}T00:00:00`);
+        const fromEnd = new Date(fromStart.getTime() + 86400000);
+        const toStart = new Date(`${toDateStr}T00:00:00`);
+        const shiftDays = Math.round((toStart.getTime() - fromStart.getTime()) / 86400000);
+
+        const resvsToMove = await prisma.reservations.findMany({
+          where: { folio_id: id, deleted_at: null, date: { gte: fromStart, lt: fromEnd } },
+        });
+        for (const r of resvsToMove) {
+          const newDate = new Date(r.date!.getTime() + shiftDays * 86400000);
+          await prisma.reservations.update({
+            where: { id: r.id },
+            data: { date: newDate, updated_at: new Date(), updated_by: userId },
+          });
+        }
+        // Shift folio check-in/out by same delta
+        if (folio.check_in_date) updateData.check_in_date = new Date(folio.check_in_date.getTime() + shiftDays * 86400000);
+        if (folio.check_out_date) updateData.check_out_date = new Date(folio.check_out_date.getTime() + shiftDays * 86400000);
+
+        enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+        // fall through to generic save below
       }
 
       // Map action keys to actual status codes (Laravel parity)

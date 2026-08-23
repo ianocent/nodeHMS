@@ -912,6 +912,66 @@ export class SystemController {
     }
   }
 
+  static async guestRequestsList(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = BigInt(req.user?.lastProperty ?? 0);
+      const limit = parseInt((req.query.limit as string) || '20');
+      const page = Math.max(1, parseInt((req.query.page as string) || '1'));
+
+      const where: any = {
+        property_id: propertyId,
+        status: 1,
+        request_status: 'pending',
+        remark: { not: '' },
+      };
+
+      const [rows, total] = await Promise.all([
+        getPrisma().guest_profile_preferences.findMany({
+          where,
+          orderBy: { updated_at: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          select: {
+            id: true, id_guest_profile: true, remark: true,
+            updated_at: true, created_at: true, request_status: true,
+            guest_profiles: { select: { first_name: true, last_name: true } },
+          },
+        }),
+        getPrisma().guest_profile_preferences.count({ where }),
+      ]);
+
+      const fmtDT = (d: Date) => d.toISOString().slice(0, 16).replace('T', ' ');
+      const rowsMapped = rows.map((p: any) => ({
+        id: Number(p.id),
+        room: '-',
+        guest: p.guest_profiles
+          ? `${p.guest_profiles.first_name ?? ''} ${p.guest_profiles.last_name ?? ''}`.trim()
+          : `Guest (ID: ${Number(p.id_guest_profile)})`,
+        request: String(p.remark ?? '-').slice(0, 80),
+        time: fmtDT(new Date(p.updated_at)),
+        status: p.request_status,
+        link: `/cms/guest-profiles/${Number(p.id_guest_profile)}?tab=preferences`,
+        created_at: fmtDT(new Date(p.created_at)),
+        updated_at: fmtDT(new Date(p.updated_at)),
+      }));
+
+      success(res, rowsMapped, rowsMapped.length ? 'Success' : 'No pending guest requests found', 200, {
+        table: [
+          { label: 'Guest', key: 'guest', type: 'none' },
+          { label: 'Request', key: 'request', type: 'none' },
+          { label: 'Duration', key: 'time', type: 'none' },
+          { label: 'Status', key: 'status', type: 'none' },
+          { label: 'Created', key: 'created_at', type: 'none' },
+          { label: 'Read', key: 'updated_at', type: 'none' },
+        ],
+        pagination: laravelPaging(total, limit, page),
+      });
+    } catch (err: any) {
+      console.error('Guest requests list error:', err);
+      error(res, 'Failed to fetch guest requests', 500);
+    }
+  }
+
   static async shiftDetail(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -3027,7 +3087,43 @@ const payload = formatSystemBalanceData(
           break;
         }
         case 'guest_requests': {
-          detail = { type: 'guest-request-list', label: 'Guest Requests', span: 4, count: 0, items: [], url: '/cms/guest-request' };
+          // Laravel DashboardController::guestRequests (:1673-1719) — pending
+          // preference remarks as actionable widget items.
+          const prefWhere: any = {
+            property_id: BigInt(propertyId),
+            status: 1,
+            request_status: 'pending',
+            remark: { not: '' },
+          };
+          const pendingCount = await getPrisma().guest_profile_preferences.count({ where: prefWhere });
+          const prefs = await getPrisma().guest_profile_preferences.findMany({
+            where: prefWhere,
+            orderBy: { updated_at: 'desc' },
+            take: 5,
+            select: {
+              id: true, id_guest_profile: true, remark: true,
+              updated_at: true, created_at: true, request_status: true,
+              guest_profiles: { select: { first_name: true, last_name: true } },
+            },
+          });
+          const timeAgo = (d: Date): string => {
+            const diff = Math.floor((Date.now() - d.getTime()) / 60000);
+            if (diff < 1) return 'just now';
+            if (diff < 60) return `${diff} minute ago`;
+            const h = Math.floor(diff / 60);
+            if (h < 24) return `${h} hour ago`;
+            return `${Math.floor(h / 24)} day ago`;
+          };
+          const items = prefs.map((p: any) => ({
+            id: Number(p.id),
+            room: '-',
+            guest: p.guest_profiles ? `${p.guest_profiles.first_name ?? ''} ${p.guest_profiles.last_name ?? ''}`.trim() : 'Guest',
+            request: String(p.remark ?? '-').slice(0, 55),
+            time: timeAgo(new Date(p.updated_at)),
+            status: p.request_status,
+            link: `/cms/guest-profiles/${Number(p.id_guest_profile)}?tab=preferences`,
+          }));
+          detail = { type: 'guest-request-list', label: 'Guest Requests', span: 4, count: pendingCount, items, url: '/cms/dashboard/guest-requests' };
           break;
         }
         case 'market_segment_1':

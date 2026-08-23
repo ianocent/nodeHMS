@@ -963,6 +963,53 @@ export class GuestController {
     } catch (err: any) { console.error('History list error:', err); error(res, 'Failed to list history', 500); }
   }
 
+  // Laravel GuestProfileHistoryController@store — fields: remark (required), is_arrival
+  static async historyStore(req: Request, res: Response): Promise<void> {
+    try {
+      const guestId = idParamBig(req.params.guestId);
+      const pid = req.user?.lastProperty ?? 0n;
+      const { remark, is_arrival } = req.body;
+      if (!remark) { badRequest(res, 'The remark field is required.'); return; }
+      if (is_arrival === undefined) { badRequest(res, 'The is arrival field is required.'); return; }
+      const data = await prisma.guest_profile_histories.create({
+        data: {
+          property_id: pid,
+          id_guest_profile: guestId,
+          remark,
+          is_arrival: !!is_arrival,
+          status: 1,
+          created_at: new Date(),
+          created_by: req.user?.id,
+        },
+      });
+      success(res, bigintToNumber(data), 'Note created successfully.', 200);
+    } catch (err: any) { console.error('History store error:', err); error(res, 'Failed to add history', 500); }
+  }
+
+  // Laravel GuestProfileHistoryController@update — remark required
+  static async historyUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const existing = await prisma.guest_profile_histories.findUnique({ where: { id } });
+      if (!existing || existing.deleted_at) { notFound(res, 'History not found'); return; }
+      if (!req.body.remark) { badRequest(res, 'The remark field is required.'); return; }
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
+      data.remark = req.body.remark;
+      if (req.body.is_arrival !== undefined) data.is_arrival = !!req.body.is_arrival;
+      await prisma.guest_profile_histories.update({ where: { id }, data });
+      success(res, bigintToNumber(existing), 'Success');
+    } catch (err: any) { console.error('History update error:', err); error(res, 'Failed to update history', 500); }
+  }
+
+  // Laravel GuestProfileHistoryController@destroy
+  static async historyDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      await prisma.guest_profile_histories.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+      success(res, null, 'History deleted');
+    } catch (err: any) { error(res, 'Failed to delete history', 500); }
+  }
+
   // ==================== PREFERENCE ====================
   static async preferenceList(req: Request, res: Response): Promise<void> {
     try {
@@ -994,6 +1041,71 @@ export class GuestController {
     } catch (err: any) { error(res, 'Failed to delete preference', 500); }
   }
 
+  // Laravel GuestProfilePreferenceController@update
+  static async preferenceUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const existing = await prisma.guest_profile_preferences.findUnique({ where: { id } });
+      if (!existing || existing.deleted_at) { notFound(res, 'Preference not found'); return; }
+      const { preference, remark } = req.body;
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
+      if (preference !== undefined) data.preference = preference;
+      if (remark !== undefined) data.remark = remark;
+      await prisma.guest_profile_preferences.update({ where: { id }, data });
+      success(res, bigintToNumber(existing), 'Success');
+    } catch (err: any) { console.error('Preference update error:', err); error(res, 'Failed to update preference', 500); }
+  }
+
+  // Laravel GuestProfilePreferenceController@markAsDone
+  static async preferenceMarkDone(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const existing = await prisma.guest_profile_preferences.findUnique({ where: { id } });
+      if (!existing || existing.deleted_at) { notFound(res, 'Preference not found'); return; }
+      const done = req.body?.done !== false;
+      await prisma.guest_profile_preferences.update({
+        where: { id },
+        data: {
+          request_status: done ? 'done' : 'pending',
+          completed_at: done ? new Date() : null,
+          updated_at: new Date(),
+          updated_by: req.user?.id,
+        },
+      });
+      success(res, null, 'Success');
+    } catch (err: any) { console.error('Preference mark-done error:', err); error(res, 'Failed to mark preference done', 500); }
+  }
+
+  // Laravel GuestProfilePreferenceController@listAll — all preferences across
+  // guests for the property (dashboard / global list).
+  static async preferenceListAll(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 20;
+      const where: any = { property_id: pid, deleted_at: null };
+      if (req.query.request_status) where.request_status = req.query.request_status;
+
+      const [rows, total] = await Promise.all([
+        prisma.guest_profile_preferences.findMany({
+          where,
+          orderBy: { updated_at: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+          include: { guest_profiles: { select: { first_name: true, last_name: true } } },
+        }),
+        prisma.guest_profile_preferences.count({ where }),
+      ]);
+      const mapped = rows.map((p: any) => ({
+        ...bigintToNumber(p),
+        guest: p.guest_profiles ? `${p.guest_profiles.first_name ?? ''} ${p.guest_profiles.last_name ?? ''}`.trim() : '',
+      }));
+      success(res, mapped, 'Success', 200, {
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
+    } catch (err: any) { console.error('Preference list-all error:', err); error(res, 'Failed to list all preferences', 500); }
+  }
+
   // ==================== LOYALTY CARD ====================
   static async loyaltyList(req: Request, res: Response): Promise<void> {
     try {
@@ -1014,6 +1126,24 @@ export class GuestController {
       });
       success(res, bigintToNumber(data), 'Loyalty card created', 201);
     } catch (err: any) { console.error('Loyalty store error:', err); error(res, 'Failed to create loyalty card', 500); }
+  }
+
+  // Laravel GuestProfileLoyaltyCardController@update
+  static async loyaltyUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const existing = await prisma.guest_profile_loyalty_cards.findUnique({ where: { id } });
+      if (!existing || existing.deleted_at) { notFound(res, 'Loyalty card not found'); return; }
+      const { card_type, card_number, join_date, card_expiry, is_default } = req.body;
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
+      if (card_type !== undefined) data.card_type = card_type;
+      if (card_number !== undefined) data.card_number = card_number;
+      if (join_date !== undefined) data.join_date = join_date;
+      if (card_expiry !== undefined) data.card_expiry = card_expiry ? new Date(card_expiry) : null;
+      if (is_default !== undefined) data.is_default = is_default;
+      await prisma.guest_profile_loyalty_cards.update({ where: { id }, data });
+      success(res, bigintToNumber(existing), 'Success');
+    } catch (err: any) { console.error('Loyalty update error:', err); error(res, 'Failed to update loyalty card', 500); }
   }
 
   static async loyaltyDestroy(req: Request, res: Response): Promise<void> {

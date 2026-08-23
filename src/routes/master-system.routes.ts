@@ -199,6 +199,8 @@ router.get('/get-dashboard/:code', authMiddleware, SystemController.getDashboard
 router.get('/dashboard/today-revenue', authMiddleware, SystemController.todayRevenue);
 router.get('/dashboard/mtd-revenue', authMiddleware, SystemController.mtdRevenue);
 router.get('/dashboard/ytd-revenue', authMiddleware, SystemController.ytdRevenue);
+// Laravel DashboardController::guestRequestsList (:1733-1806)
+router.get('/dashboard/guest-requests', authMiddleware, SystemController.guestRequestsList);
 router.get('/hotel-competitor-dashboard', authMiddleware, SystemController.hotelCompetitorDashboard);
 
 // Helper endpoints
