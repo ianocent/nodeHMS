@@ -1,50 +1,48 @@
-# HMS Anyaman — Backend Node (Express + PostgreSQL)
+<p align="center"><a href="https://nodejs.org" target="_blank"><img src="https://raw.githubusercontent.com/nodejs/nodejs.org/main/public/static/images/logo-hexagon-card.svg" width="120" alt="Node.js Logo"></a></p>
 
-## Repo lain yang nyambung
+## About Node.js
 
-| Repo                    | Isinya                                  |
-| ----------------------- | --------------------------------------- |
-| `ianocent/hms-backend`  | Backend Laravel lama (sumber referensi) |
-| `ianocent/hms-frontend` | Frontend Next.js                        |
-| `ianocent/nodefeHMS`    | Adaptasi frontend buat backend ini      |
+Node.js is an open-source and cross-platform JavaScript runtime environment. It is a popular tool for almost any kind of project!
 
-## Stack
+Node.js runs the V8 JavaScript engine, the core of Google Chrome, outside of the browser. This allows Node.js to be very performant.
 
-- Express 5 + TypeScript
-- Prisma 7 + PostgreSQL (Laragon, port 5432, DB `hms_anyaman`)
-- Auth Sanctum-compatible (token `id|40char`, di-hash SHA-256, dikirim lewat `Authorization: Bearer` — `X-Token` masih didukung buat aplikasi native)
-- Payload response di-enkripsi AES-256-CBC biar bentuknya sama kayak Laravel
+A Node.js app runs in a single process, without creating a new thread for every request. Node.js provides a set of asynchronous I/O primitives in its standard library that prevent JavaScript code from blocking. In addition, libraries in Node.js are generally written using non-blocking paradigms. Accordingly, blocking behavior is the exception rather than the norm in Node.js.
 
-## Struktur
+When Node.js performs an I/O operation, like reading from the network, accessing a database or the filesystem, instead of blocking the thread and wasting CPU cycles waiting, Node.js will resume the operations when the response comes back.
 
-```
-src/
-├── index.ts               # entry point, mount semua route di /api dan /cms
-├── config/permissions.ts  # menuId-based permission
-├── controllers/           # 26 controller (auth, reservation, front-desk, folio, staah, ...)
-├── middleware/            # auth, permission, errorHandler, requestParser, logger
-├── routes/                # 14 grup route
-├── services/              # staah.service, token.service
-├── scripts/               # migrasi data & verifikasi (phase 1)
-└── utils/                 # aes, encryption, response, queryParamHelper
-```
+This allows Node.js to handle thousands of concurrent connections with a single server without introducing the burden of managing thread concurrency, which could be a significant source of bugs.
 
-## Command yang kepake
+## An Example Node.js Application
 
-```bash
-npm run dev               # nodemon, hot reload
-npm run build             # tsc -> dist/
-npm start                 # jalanin dist (PORT ambil dari .env, default 3000)
-npm run phase1:data       # migrasi data MySQL -> PostgreSQL (ada flag --table=<nama>)
-npm run phase1:verify     # bandingin row count MySQL vs PG
-npm test                  # jest smoke test
-npx prisma generate       # setelah schema berubah
-npx prisma migrate dev    # hati-hati, riwayat migration manual — pake migrate diff kalau error
+The most common example Hello World of Node.js is a web server:
+
+```javascript
+const { createServer } = require('node:http');
+
+const hostname = '127.0.0.1';
+const port = 3000;
+
+const server = createServer((req, res) => {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/plain');
+  res.end('Hello World');
+});
+
+server.listen(port, hostname, () => {
+  console.log(`Server running at http://${hostname}:${port}/`);
+});
 ```
 
-## Status migrasi
+To run this snippet, save it as a `server.js` file and run `node server.js` in your terminal.
 
-- M1 Database ✅ (187 tabel, sisa mismatch cuma data yang emang ditulis app baru)
-- M2 Core + middleware ✅
-- M3 Auth ✅ (parity sama Laravel AuthController)
-- M4 API endpoints 🔄 (26 controller, 14 grup route)
+This code first includes the Node.js [`http` module](https://nodejs.org/api/http.html). Node.js has a fantastic [standard library](https://nodejs.org/api/), including first-class support for networking.
+
+## Documentation
+
+Documentation for Node.js can be found on the [Node.js website](https://nodejs.org/learn/getting-started/introduction-to-nodejs).
+
+If you haven't already done so, [download](https://nodejs.org/en/download) Node.js.
+
+## License
+
+The Node.js runtime is open-sourced software licensed under the [MIT license](https://github.com/nodejs/node/blob/main/LICENSE).
