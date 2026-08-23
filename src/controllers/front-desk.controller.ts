@@ -906,6 +906,38 @@ room: roomName,
           data: { status_reservation: STATUS_RESERVATION.check_out.id, atd: new Date() },
         });
 
+        // GIT master auto-checkout (Laravel FrontDeskController :187-195):
+        // when ALL non-cancel children of a GIT parent are checked out,
+        // auto-checkout the parent too.
+        const gitParents = new Set<bigint>();
+        for (const folioId of passed) {
+          const f = folios.find((x) => x.id === folioId);
+          if (!f || !f.parent) continue;
+          const parentFolio = await prisma.folios.findUnique({ where: { id: f.parent }, select: { type_reservation: true, status_reservation: true } });
+          if (parentFolio && String(parentFolio.type_reservation ?? '').toLowerCase() === 'git' && parentFolio.status_reservation === STATUS_RESERVATION.check_in.id) {
+            gitParents.add(f.parent);
+          }
+        }
+        for (const parentId of gitParents) {
+          const openChildren = await prisma.folios.count({
+            where: {
+              parent: parentId,
+              status_reservation: STATUS_RESERVATION.check_in.id,
+              deleted_at: null,
+            },
+          });
+          if (openChildren === 0) {
+            await prisma.folios.update({
+              where: { id: parentId },
+              data: { status_reservation: STATUS_RESERVATION.check_out.id, check_out_date: bDate, updated_at: new Date() },
+            });
+            await prisma.reservations.updateMany({
+              where: { folio_id: parentId, deleted_at: null },
+              data: { status_reservation: STATUS_RESERVATION.check_out.id, atd: new Date() },
+            });
+          }
+        }
+
         // Update room status for all rooms: vacant (0), maid_status: dirty (1)
         const roomIds: bigint[] = [];
         for (const folio of folios) {
@@ -1389,12 +1421,11 @@ room: roomName,
   }
 
   static async transactionVoid(req: Request, res: Response): Promise<void> {
-    try {
-      const id = idParamBig(req.params.id);
-      const { void_code, reason } = req.body;
-      await prisma.transactions.update({ where: { id }, data: { is_void: 1, void_code, remark: reason, updated_at: new Date(), updated_by: req.user?.id } });
-      success(res, null, 'Transaction voided');
-    } catch (err: any) { error(res, 'Failed to void transaction', 500); }
+    // Laravel parity: single-id void goes through the SAME reversal logic as bulk.
+    // (was: bare is_void=1 without reversal row — breaks double-entry)
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    req.body = { idx: [id], remark: req.body?.reason ?? req.body?.remark ?? '' };
+    return FrontDeskController.transactionVoidBulk(req, res);
   }
 
   // POST /transaction/void?folio_id= — Laravel TransactionController@void parity (:711-745)

@@ -740,8 +740,9 @@ export class FolioController {
           badRequest(res, 'Payment required');
           return;
         }
-        const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
-        await transferTransactionsForCheckout(folio, businessDate);
+        // Laravel restricts transferTransaction auto-pull to check_out only
+        // (:792) — cancel does NOT trigger auto-transfer pulls.
+        // (removed transferTransactionsForCheckout call that was here)
 
         // reset room change pointers
         await prisma.reservations.updateMany({
