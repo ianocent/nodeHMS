@@ -102,7 +102,7 @@ async function formatNightAuditFolios(data: any[]): Promise<any[]> {
 }
 
 // Laravel SystemBalance::storeBalance parity — rebuilds system_balances rows for the night audit date
-export async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
+export async function rebuildSystemBalanceRows(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
   const prisma = getPrisma();
   const nextObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000);
   const dayRange: any = { gte: dateObj, lt: nextObj };
@@ -244,15 +244,22 @@ export async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyI
   }
 }
 
+// storeBalance = rebuild + push (night audit path)
+export async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
+  await rebuildSystemBalanceRows(dateObj, prevObj, propertyId);
+}
+
+// Laravel SystemBalance::restoreBalance (:898-1290) parity — delete + rebuild WITHOUT back-office push.
+export async function restoreSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
+  await rebuildSystemBalanceRows(dateObj, prevObj, propertyId);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Back-office push — Laravel SystemBalance::storeBalance tail + getRoomStatistics.
-// SAFETY (localhost-first):
-//   • HTTP POST /daily_summary hanya jalan bila BACK_OFFICE_PUSH_ENABLED=true.
-//   • Host DIPAKSA 127.0.0.1 kecuali BACK_OFFICE_ALLOW_REMOTE=true — payload
-//     produksi tidak akan pernah terkirim ke IP live secara tidak sengaja.
-//   • ThirdPartyLog selalu ditulis (payload + response/err/skipped).
+// Back-office payload builder — Laravel SystemBalance::getBalance (:495-863).
+// Resolves GL account_uid/account_name per payment/posting row via
+// typePayment→codePost→codeGl / codePost→codeGl chains (= Laravel :523/:551).
 // ─────────────────────────────────────────────────────────────────────────────
-async function pushBackOfficeSummary(dateObj: Date, propertyId: number): Promise<void> {
+async function buildBackOfficePayload(dateObj: Date, propertyId: number) {
   const prisma = getPrisma();
   const propertyBig = BigInt(propertyId);
   const nextObj = new Date(dateObj.getTime() + 24 * 60 * 60 * 1000);
@@ -374,23 +381,44 @@ async function pushBackOfficeSummary(dateObj: Date, propertyId: number): Promise
 
   const journalLines: any[] = [];
 
-  // Payment journal lines (grouped by type_payment_id)
+  // GL resolution chains (= Laravel getBalance :523/:551):
+  // payment row → type_payments.code_post_id → code_posts.code_gl_id → code_gls
+  // posting row → code_id (code_post id) → code_posts.code_gl_id → code_gls
   const balanceRows: any[] = await prisma.system_balances.findMany({
     where: { property_id: propertyBig, date: dayRange },
   });
+  const payRowIds = balanceRows.filter((r) => r.type === 'payment').map((r) => Number(r.code_id)).filter((x) => x > 0);
+  const postRowIds = balanceRows.filter((r) => r.type === 'posting').map((r) => Number(r.code_id)).filter((x) => x > 0);
+  const tpsGl = payRowIds.length ? await prisma.type_payments.findMany({ where: { id: { in: payRowIds.map((id) => BigInt(id)) } }, select: { id: true, code_post_id: true } }) : [];
+  const tpCodePostIds = tpsGl.map((t: any) => Number(t.code_post_id)).filter((x: number) => x > 0);
+  const cpIdsUniq = [...new Set([...tpCodePostIds, ...postRowIds])];
+  const cpsGl = cpIdsUniq.length ? await prisma.code_posts.findMany({ where: { id: { in: cpIdsUniq.map((id) => BigInt(id)) } }, select: { id: true, name: true, code_gl_id: true } }) : [];
+  const glIdSet = [...new Set(cpsGl.map((c: any) => Number(c.code_gl_id)).filter((x: number) => x > 0))];
+  const glsRows = glIdSet.length ? await prisma.code_gls.findMany({ where: { id: { in: glIdSet.map((id) => BigInt(id)) } }, select: { id: true, account_uid: true, name: true } }) : [];
+  const tpGlById = new Map<number, any>(tpsGl.map((t: any) => [Number(t.id), t]));
+  const cpGlById = new Map<number, any>(cpsGl.map((c: any) => [Number(c.id), c]));
+  const glFullById = new Map<number, any>(glsRows.map((g: any) => [Number(g.id), g]));
+  const glChainFor = (codePostId: number | null): { accountUid: string | null; accountName: string | null } => {
+    const cp = codePostId ? cpGlById.get(Number(codePostId)) : null;
+    const glRec = cp?.code_gl_id ? glFullById.get(Number(cp.code_gl_id)) : null;
+    return { accountUid: glRec?.account_uid ?? null, accountName: glRec?.name ?? null };
+  };
+
+  // Payment journal lines (grouped by type_payment_id)
   for (const row of balanceRows.filter((r) => r.type === 'payment')) {
     const items = tbs.filter((t) => Number(t.type_payment_id ?? -1) === Number(row.code_id));
     if (!items.length) continue;
+    const glc = glChainFor(tpGlById.get(Number(row.code_id))?.code_post_id ?? null);
     let debtor: any = null;
     const details: any[] = [];
     for (const t of items) {
       const d = await resolveDebtor(t);
       if (d && !debtor) debtor = d; // first debtor wins like the Laravel loop
-      details.push(detailRow(t, d, (row as any).account_uid ?? row.name));
+      details.push(detailRow(t, d, glc.accountUid));
     }
     const amount = Math.abs(items.reduce((s, t) => s + signedAmount(t), 0));
     journalLines.push({
-      account_uid: (row as any).account_uid ?? row.name,
+      account_uid: glc.accountUid ?? glc.accountName,
       entrytype: Number(row.debit) !== 0 ? 'D' : 'C',
       amount: Math.round(amount * 100) / 100,
       linedesc: row.name,
@@ -402,10 +430,11 @@ async function pushBackOfficeSummary(dateObj: Date, propertyId: number): Promise
   for (const row of balanceRows.filter((r) => r.type === 'posting')) {
     const items = tbs.filter((t) => String(t.code ?? '') === String(row.code_id));
     if (!items.length) continue;
+    const glc = glChainFor(Number(row.code_id));
     const details = items.map((t) => detailRow(t, null, null));
     const amount = Math.abs(items.reduce((s, t) => s + signedAmount(t), 0));
     journalLines.push({
-      account_uid: (row as any).account_uid ?? row.name,
+      account_uid: glc.accountUid ?? glc.accountName,
       entrytype: Number(row.debit) !== 0 ? 'D' : 'C',
       amount: Math.round(amount * 100) / 100,
       linedesc: row.name,
@@ -536,6 +565,20 @@ async function pushBackOfficeSummary(dateObj: Date, propertyId: number): Promise
     journal_lines: journalLines,
   };
 
+  return sendToBackOffice;
+}
+
+// Laravel getBalance($request) with implicit push — build payload then POST /daily_summary
+// (storeBalance tail :866-893). SAFETY (localhost-first):
+//   • HTTP POST /daily_summary hanya jalan bila BACK_OFFICE_PUSH_ENABLED=true.
+//   • Host DIPAKSA 127.0.0.1 kecuali BACK_OFFICE_ALLOW_REMOTE=true.
+//   • ThirdPartyLog selalu ditulis (payload + response/err/skipped).
+async function pushBackOfficeSummary(dateObj: Date, propertyId: number): Promise<void> {
+  const prisma = getPrisma();
+  const refdate = dateObj.toISOString().slice(0, 10);
+  const sendToBackOffice = await buildBackOfficePayload(dateObj, propertyId);
+  const property: any = await prisma.properties.findUnique({ where: { id: BigInt(propertyId) } });
+
   // ── HTTP push: OFF by default; host dipaksa localhost ──
   const pushEnabled = process.env.BACK_OFFICE_PUSH_ENABLED === 'true';
   const allowRemote = process.env.BACK_OFFICE_ALLOW_REMOTE === 'true';
@@ -662,7 +705,8 @@ export function normalizeSystemBalanceType(rawType?: string): string {
 
 export function formatSystemBalanceData(rows: any[], type: string) {
   const mapped = rows.map((item: any) => ({
-    id: type === 'payment' ? Number(item.code_id ?? item.id ?? 0) : 0,
+    // code_id kept for posting rows too — drill-down needs it (= Laravel :107)
+    id: type === 'tax' || type === 'deposit' || type === 'ledger' ? 0 : Number(item.code_id ?? item.id ?? 0),
     name: item.name ?? '',
     debit: toNumber(item.debit),
     credit: toNumber(item.credit),
@@ -1198,13 +1242,22 @@ export class SystemController {
           await tx.reservations.updateMany({ where: { id: value.id }, data: { is_posting: 1 } });
         }
 
-        // 5. Additional item per folio inclusive (Laravel model_has_code_items loop — Prisma @@ignore, raw SQL)
+        // 5. Additional item per folio inclusive (Laravel :713-790).
+        // Candidate folios = whereHas codeItem OR whereHas inclusive (morph model_has_rate_inclusives).
+        // Inner loop hanya mem-post baris model_has_code_items — folio dengan inclusive saja tidak
+        // menghasilkan transaksi di Laravel juga; tetap diikutkan demi paritas struktural.
         const mhciRows: any[] = await tx.$queryRaw`
           SELECT model_id FROM model_has_code_items WHERE model_type = 'App\\Models\\Folio'
         `;
-        const mhciFolioIds = mhciRows.map((m: any) => BigInt(String(m.model_id)));
+        const mhriRows: any[] = await tx.$queryRaw`
+          SELECT model_id FROM model_has_rate_inclusives WHERE model_type = 'App\\Models\\Folio'
+        `;
+        const candidateFolioIds = [...new Set([
+          ...mhciRows.map((m: any) => String(m.model_id)),
+          ...mhriRows.map((m: any) => String(m.model_id)),
+        ])].map((s) => BigInt(s));
         const inclusiveFolios = await tx.folios.findMany({
-          where: { property_id: BigInt(propertyId), status_reservation: 0, deleted_at: null, id: { in: mhciFolioIds } },
+          where: { property_id: BigInt(propertyId), status_reservation: 0, deleted_at: null, id: { in: candidateFolioIds } },
           orderBy: { created_at: 'asc' },
         });
         for (const folio of inclusiveFolios) {
@@ -1384,26 +1437,25 @@ export class SystemController {
         badRequest(res, 'Invalid system balance type');
         return;
       }
-
-      const where: any = { property_id: propertyId };
-      if (date) {
-        const dateObj = new Date(date);
-        if (Number.isNaN(dateObj.getTime())) {
-          badRequest(res, 'date must be a valid date');
-          return;
-        }
-        const start = new Date(dateObj);
-        start.setHours(0, 0, 0, 0);
-        const end = new Date(start);
-        end.setDate(end.getDate() + 1);
-        where.date = { gte: start, lt: end };
+      // Laravel `where('date', $request->date)` — no date means an empty result set,
+      // never unbounded. Enforce explicitly instead of leaking all rows.
+      if (!date) {
+        badRequest(res, 'date is required');
+        return;
       }
 
-      // Cumulative logic (Laravel SystemBalanceController parity):
-      // posting = sum(posting) + sum(payment)
-      // tax = sum(tax) + sum(posting + payment)
-      // deposit = sum(deposit) + sum(payment + posting + tax)
-      // ledger = sum(ledger) + sum(payment + posting + tax + deposit)
+      const dateObj = new Date(date);
+      if (Number.isNaN(dateObj.getTime())) {
+        badRequest(res, 'date must be a valid date');
+        return;
+      }
+      const start = new Date(dateObj);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+
+      // Data rows show PRIMARY type only (= Laravel :57/:103/:162). Foreign
+      // cumulative types feed ONLY the Total row (:125-126 etc).
       const cumulativeTypes: Record<string, string[]> = {
         payment: ['payment'],
         posting: ['posting', 'payment'],
@@ -1411,16 +1463,26 @@ export class SystemController {
         deposit: ['deposit', 'tax', 'posting', 'payment'],
         ledger: ['ledger', 'deposit', 'tax', 'posting', 'payment'],
       };
-
       const typesToQuery = cumulativeTypes[mappedType] ?? [mappedType];
-      where.type = { in: typesToQuery };
 
       const rows = await getPrisma().system_balances.findMany({
-        where,
+        where: { property_id: propertyId, date: { gte: start, lt: end }, type: mappedType },
         orderBy: { id: 'asc' },
       });
 
-const payload = formatSystemBalanceData(
+      // posting Total includes payment sums; tax includes posting+payment; etc.
+      let totalDebit = 0; let totalCredit = 0;
+      if (typesToQuery.length > 1) {
+        const cumRows = await getPrisma().system_balances.findMany({
+          where: { property_id: propertyId, date: { gte: start, lt: end }, type: { in: typesToQuery } },
+        });
+        for (const r of cumRows) {
+          totalDebit += Number(r.debit ?? 0);
+          totalCredit += Number(r.credit ?? 0);
+        }
+      }
+
+      const payload = formatSystemBalanceData(
         rows.map((row: any) => ({
           id: Number(row.code_id ?? 0),
           name: row.name ?? '',
@@ -1429,6 +1491,14 @@ const payload = formatSystemBalanceData(
         })),
         mappedType
       );
+
+      if (typesToQuery.length > 1) {
+        const totalRow: any = payload.data[payload.data.length - 1];
+        if (totalRow?.is_total) {
+          totalRow.debit = '<b>' + moneyFormat(totalDebit < 0 ? totalDebit * -1 : totalDebit) + '</b>';
+          totalRow.credit = '<b>' + moneyFormat(totalCredit < 0 ? totalCredit * -1 : totalCredit) + '</b>';
+        }
+      }
 
       success(res, payload.data, 'Success', 200, {
         table: payload.table,
@@ -1488,20 +1558,60 @@ const payload = formatSystemBalanceData(
 
       const mapped = rows.map((row: any) => ({
         id: Number(row.id ?? 0),
-        name: `${row.folios?.folio_number ?? ''} ( ${String(row.type ?? '').replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())} )${row.is_transfer === 1 || row.is_transfer === 2 ? ` (${row.remark ?? ''})` : ''}`.trim(),
+        name: `${row.folios?.folio_number ?? ''}( ${String(row.type ?? '').replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())} ) ${row.is_transfer === 1 || row.is_transfer === 2 ? `(${row.remark ?? ''})` : ''}`.trim(),
         debit: row.type_amount === 'MINUS' ? toNumber(row.amount) : 0,
         credit: row.type_amount === 'PLUS' ? toNumber(row.amount) : 0,
       }));
 
-      const payload = formatSystemBalanceData(mapped, mappedType || 'payment');
-      success(res, payload.data, 'Success', 200, {
-        table: payload.table,
-        pagination: payload.pagination,
-        permission: payload.permission,
+      // Laravel getListByIdPost (:350-366) returns RAW rows — no Total row appended.
+      success(res, mapped, 'Success', 200, {
+        table: SYSTEM_BALANCE_TABLE,
+        pagination: {
+          current_page: 1,
+          last_page: 1,
+          per_page: 99999,
+          total: mapped.length,
+          from: 1,
+          to: mapped.length,
+        },
+        permission: { view: false, add: false, edit: false, delete: false },
       });
     } catch (err: any) {
       console.error('System balance detail error:', err);
       error(res, 'Failed to fetch system balance detail', 500);
+    }
+  }
+
+  // Laravel SystemBalance::getBalance with push='no-push' — journal_lines payload preview.
+  static async systemBalanceGet(req: Request, res: Response): Promise<void> {
+    try {
+      const dateStr = (req.query.date as string) ?? '';
+      if (!dateStr) { badRequest(res, 'date is required'); return; }
+      const dateObj = new Date(`${dateStr}T00:00:00`);
+      if (Number.isNaN(dateObj.getTime())) { badRequest(res, 'date must be a valid date'); return; }
+      const propertyId = Number(req.user?.lastProperty ?? 0);
+      const payload = await buildBackOfficePayload(dateObj, propertyId);
+      success(res, payload, 'Success', 200);
+    } catch (err: any) {
+      console.error('System balance get-balance error:', err);
+      error(res, 'Failed to build system balance payload', 500);
+    }
+  }
+
+  // Laravel SystemBalance::restoreBalance (:898) — delete + rebuild rows for date, no push.
+  static async systemBalanceRestore(req: Request, res: Response): Promise<void> {
+    try {
+      const dateStr = (req.body?.date as string) ?? (req.query.date as string);
+      if (!dateStr) { badRequest(res, 'date is required'); return; }
+      const propertyId = Number(req.user?.lastProperty ?? 0);
+      if (!propertyId) { badRequest(res, 'Property is required'); return; }
+      const dateObj = new Date(`${dateStr}T00:00:00`);
+      if (Number.isNaN(dateObj.getTime())) { badRequest(res, 'date must be a valid date'); return; }
+      await restoreSystemBalance(dateObj, new Date(dateObj.getTime() - 24 * 60 * 60 * 1000), propertyId);
+      success(res, { date: dateStr }, 'System balance restored');
+    } catch (err: any) {
+      console.error('System balance restore error:', err);
+      error(res, 'Failed to restore system balance', 500);
     }
   }
 

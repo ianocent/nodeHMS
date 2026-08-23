@@ -83,6 +83,7 @@ router.delete('/profile/company-statistic/:id', authMiddleware, CompanyControlle
 // Company Profile Billing Setup
 router.get('/company-profile-billing-setup', authMiddleware, CompanyController.billingSetupList);
 router.post('/company-profile-billing-setup', authMiddleware, CompanyController.billingSetupStore);
+router.put('/company-profile-billing-setup/:id', authMiddleware, CompanyController.billingSetupUpdate);
 router.delete('/company-profile-billing-setup/:id', authMiddleware, CompanyController.billingSetupDestroy);
 
 export default router;

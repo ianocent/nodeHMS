@@ -328,7 +328,8 @@ export class GuestController {
         short_code, first_name, last_name, region, nationality_id, city_id, country_id,
         telp, mobile_phone, card_type, card_number, card_expiry, email,
         gender, birth_of_date, fax, address, postal_code, car_reg_number,
-        guest_status, guest_title, status, image
+        guest_status, guest_title, status, image,
+        status_profile, blacklist, is_subscribe
       } = req.body;
 
       const errors: Record<string, string[]> = {};
@@ -340,6 +341,18 @@ export class GuestController {
         if (!card_number) errors.card_number = ['The card number field is required.'];
       }
 
+      // Laravel parity — card uniqueness BEFORE create (no orphan row on duplicate)
+      if (card_type && card_number) {
+        const dupCard = await prisma.guest_profiles.findFirst({
+          where: { card_type, card_number, deleted_at: null },
+          select: { id: true },
+        });
+        if (dupCard) {
+          badRequest(res, 'Card number already exists');
+          return;
+        }
+      }
+
       if (Object.keys(errors).length > 0) {
         validationError(res, errors);
         return;
@@ -347,8 +360,10 @@ export class GuestController {
 
       const propertyId = req.user?.lastProperty;
 
-      // Generate account number
+      // Generate account number — active rows only (soft-deleted excluded so
+      // numbers can't collide with a restored profile)
       const lastAccount = await prisma.guest_profiles.findFirst({
+        where: { deleted_at: null },
         orderBy: { account: 'desc' },
         select: { account: true }
       });
@@ -382,24 +397,18 @@ export class GuestController {
         property_id: propertyId,
         account: newAccount
       };
+      if (status_profile !== undefined) data.status_profile = Number(status_profile) || 0;
+      if (blacklist !== undefined) data.blacklist = Number(blacklist) || 0;
+      if (is_subscribe !== undefined) data.is_subscribe = is_subscribe === true || is_subscribe === 1 || is_subscribe === '1';
+      if (card_type && card_number) {
+        data.card_type = card_type;
+        data.card_number = card_number;
+        data.card_expiry = card_expiry || null;
+      }
 
       Object.keys(data).forEach(k => data[k] === undefined && delete data[k]);
 
       const guest = await prisma.guest_profiles.create({ data });
-
-      if (card_type && card_number) {
-        const existingCard = await prisma.guest_profiles.findFirst({
-          where: { card_type, card_number, id: { not: guest.id } }
-        });
-        if (existingCard) {
-          badRequest(res, 'Card number already exists');
-          return;
-        }
-        await prisma.guest_profiles.update({
-          where: { id: guest.id },
-          data: { card_type, card_number, card_expiry: card_expiry || null }
-        });
-      }
 
       // Sync types via model_has_types
       const guestTitleId = guest_title?.value ?? guest_title;
@@ -913,6 +922,36 @@ export class GuestController {
       await prisma.guest_profile_documents.update({ where: { id }, data: { deleted_at: new Date() } });
       success(res, null, 'Document deleted');
     } catch (err: any) { error(res, 'Failed to delete document', 500); }
+  }
+
+  static async documentUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const { file, description, status } = req.body;
+      const row = await prisma.guest_profile_documents.findUnique({ where: { id } });
+      if (!row || row.deleted_at) { notFound(res, 'Not Found'); return; }
+      await prisma.guest_profile_documents.update({
+        where: { id },
+        data: {
+          ...(file !== undefined ? { file } : {}),
+          ...(description !== undefined ? { description } : {}),
+          ...(status !== undefined ? { status } : {}),
+          updated_at: new Date(),
+          updated_by: req.user?.id,
+        },
+      });
+      success(res, bigintToNumber(await prisma.guest_profile_documents.findUnique({ where: { id } })), 'Document updated');
+    } catch (err: any) { console.error('Document update error:', err); error(res, 'Failed to update document', 500); }
+  }
+
+  static async documentRestore(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParamBig(req.params.id);
+      const row = await prisma.guest_profile_documents.findUnique({ where: { id } });
+      if (!row) { notFound(res, 'Not Found'); return; }
+      await prisma.guest_profile_documents.update({ where: { id }, data: { deleted_at: null } });
+      success(res, null, 'Document restored');
+    } catch (err: any) { error(res, 'Failed to restore document', 500); }
   }
 
   // ==================== FAMILY MEMBER ====================

@@ -622,8 +622,49 @@ export class CompanyController {
       success(res, bn(d), 'Created');
     } catch (err: any) { console.error('Billing setup store error:', err); error(res, 'Failed', 500); }
   }
-  static async billingSetupDestroy(req: Request, res: Response): Promise<void> {
+static async billingSetupDestroy(req: Request, res: Response): Promise<void> {
     try { const id = idP(req.params.id); await prisma.company_profile_billing_setups.update({ where: { id }, data: { deleted_at: new Date(), deleted_by: req.user?.id } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
+  }
+
+  // PUT /company-profile-billing-setup/:codeBillingId + ?company_id — Laravel
+  // CompanyProfileBillingSetupController@update (:69-112): upsert billing flag per (code_billing, company).
+  static async billingSetupUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const codeBillingId = idP(req.params.id);
+      const companyIdRaw = String(req.body?.company_id ?? req.query.company_id ?? '');
+      if (!companyIdRaw || !/^\d+$/.test(companyIdRaw)) { badRequest(res, 'The company id field is required.'); return; }
+      const companyId = BigInt(companyIdRaw);
+
+      const codeBilling = await prisma.code_billings.findUnique({ where: { id: codeBillingId } });
+      if (!codeBilling) { notFound(res, 'Code billing not found'); return; }
+
+      const existing = await prisma.company_profile_billing_setups.findFirst({
+        where: { code_billing_id: codeBillingId, company_profile_id: companyId, deleted_at: null },
+      });
+      if (!existing) {
+        const created = await prisma.company_profile_billing_setups.create({
+          data: {
+            property_id: req.user?.lastProperty ?? 0n,
+            company_profile_id: companyId,
+            code_billing_id: codeBillingId,
+            billing: req.body?.billing ?? null,
+            status: 1,
+            created_at: new Date(),
+            updated_at: new Date(),
+            created_by: req.user?.id,
+          },
+        });
+        success(res, bn(created), 'Billing setup updated successfully.', 200);
+        return;
+      }
+      if (!existing) { badRequest(res, 'Billing setup not found'); return; }
+      await prisma.company_profile_billing_setups.update({
+        where: { id: existing.id },
+        data: { billing: req.body?.billing ?? existing.billing, updated_at: new Date(), updated_by: req.user?.id },
+      });
+      const updatedRow = await prisma.company_profile_billing_setups.findUnique({ where: { id: existing.id } });
+      success(res, bn(updatedRow), 'Billing setup updated successfully.', 200);
+    } catch (err: any) { console.error('Billing setup update error:', err); error(res, 'Failed', 500); }
   }
 }
 

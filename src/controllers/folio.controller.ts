@@ -849,16 +849,20 @@ export class FolioController {
         const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
         const bStart = new Date(businessDate + 'T00:00:00.000Z');
         const bEnd = new Date(bStart.getTime() + 86400000);
-        const checkoutIsToday = folio.check_out_date
-          ? new Date(folio.check_out_date.getTime() - folio.check_out_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10) === businessDate
-          : false;
+        const folioCheckoutStr = folio.check_out_date
+          ? new Date(folio.check_out_date.getTime() - folio.check_out_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+          : '';
 
-        if (folio.check_out_date && folio.check_out_date < new Date()) {
-          updateData.check_out_date = new Date();
+        // Laravel :1843-1848 — compare against BUSINESS DATE (not wall clock);
+        // stale checkout → re-date to business date + convert to virtual.
+        if (folio.check_out_date && folioCheckoutStr < businessDate) {
+          updateData.check_out_date = bStart;
           updateData.type_reservation = 'vr';
+          updateData.is_virtual = true;
         }
         if (to_virtual) {
           updateData.type_reservation = 'vr';
+          updateData.is_virtual = true;
         }
         updateData.status_reservation = STATUS_RESERVATION.check_in.id;
         updateData.data = JSON.stringify({
@@ -866,35 +870,13 @@ export class FolioController {
           remark_un_check_out: reason,
         });
 
-        // room restore: occupied/due_out unless another active reservation holds the room
-        if (to_virtual != 1) {
-          const lastResv = await prisma.reservations.findFirst({
-            where: { folio_id: id, deleted_at: null },
-            orderBy: { date: 'desc' },
-            select: { room_id: true, room_id_next: true },
-          });
-          const roomId = lastResv?.room_id_next ?? lastResv?.room_id;
-          if (roomId != null) {
-            const others = await prisma.reservations.count({
-              where: {
-                folio_id: { not: id },
-                deleted_at: null,
-                date: { gte: bStart, lt: bEnd },
-                status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
-                OR: [{ room_id: roomId }, { room_id_next: roomId }],
-              },
-            });
-            if (others > 0) {
-              // keep occupied — another guest holds the room
-            } else if (checkoutIsToday) {
-              await prisma.rooms.update({ where: { id: roomId }, data: { room_status: 2, updated_at: new Date() } });
-            } else {
-              await prisma.rooms.update({ where: { id: roomId }, data: { room_status: 1, updated_at: new Date() } });
-            }
-          }
-        }
+        // NOTE: Laravel's main-folio room-status block here (:1858-1894) is DEAD CODE —
+        // `$room` is only assigned inside other action branches (un_check_in/confirm_change_room/
+        // check_out), so `if ($room && ...)` short-circuits false on every un_check_out request.
+        // Room status stays whatever check-out left behind (vacant+dirty). Not emulated.
 
-        // GIT parent → children back to check_in with due_out rooms
+        // GIT parent → children back to check_in with due_out rooms (= Laravel :1902-1935).
+        // AvailableRoom 400-guard skipped (room-availability engine not ported).
         const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
         if (isGitParent) {
           const children = await prisma.folios.findMany({

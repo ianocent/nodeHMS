@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { decrypt } from '../utils/encryption';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
@@ -39,6 +40,240 @@ async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: str
   ]);
   const isOOO = room?.room_status === 4; // out_of_order
   return !!room && !room.deleted_at && !isOOO && avail.length === 0 && workOrders.length === 0 && reservations.length === 0;
+}
+
+// Laravel Allotment::checkAllotmentRoom (:31-82) — quota decrement per weekday is
+// PERSISTED at check-in time. Returns error message or null when OK.
+async function checkAllotmentRoom(folio: any): Promise<string | null> {
+  const allot = await prisma.allotments.findFirst({
+    where: {
+      deleted_at: null,
+      start_date: { lte: folio.check_in_date },
+      end_date: { gte: folio.check_out_date },
+      ...(folio.company_profile_id
+        ? { model_id: folio.company_profile_id, model_type: 'App\\Models\\CompanyProfile' }
+        : { model_id: folio.guest_profile_id ?? 0n, model_type: 'App\\Models\\GuestProfile' }),
+    },
+  });
+  if (!allot) return 'No Allotment';
+
+  const roomAllots = await prisma.room_allotments.findMany({ where: { allotment_id: allot.id, deleted_at: null } });
+  const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  for (const resv of folio.reservations) {
+    // Laravel builds each night as date→date+1 → diffInDays is always 1
+    const ra = roomAllots.find((x) => Number(x.room_type_id) === Number(resv.room_type_id));
+    if (!ra) return 'No Room Allotment';
+    let dataJson: any;
+    try {
+      dataJson = typeof ra.data === 'string' ? JSON.parse(ra.data || '{}') : (ra.data || {});
+    } catch { dataJson = {}; }
+    for (let i = 0; i < 1; i++) {
+      const d = new Date(resv.date);
+      d.setDate(d.getDate() + i);
+      const dayName = DAY_NAMES[d.getUTCDay()];
+      const quota = Number(dataJson[dayName] ?? 0);
+      if (quota >= 1) dataJson[dayName] = quota - 1;
+      else return `No Room Allotment In ${dataJson[dayName] ?? 0}`;
+    }
+    await prisma.room_allotments.update({ where: { id: ra.id }, data: { data: JSON.stringify(dataJson), updated_at: new Date() } });
+  }
+  return null;
+}
+
+const DAY_USE_REF = 'RESERVATION DAY USE';
+const timeStr = (d: Date | null | undefined): string => (d ? d.toISOString().slice(11, 19) : '00:00:00');
+const safeParseData = (raw: any): any => {
+  try { return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {}); } catch { return {}; }
+};
+
+// Laravel ExtraDayUseService (:29-199) — ETD calc + extra-quantity manual_posting txn.
+async function processExtraDayUse(folio: any, firstResv: any): Promise<{ code: number; message: string } | null> {
+  if (!folio.is_day_use) return null;
+  const quantityExtraDayUse = Number(firstResv.quantity_extra_day_use ?? 0);
+  const quantityDayUse = Number(firstResv.quantity ?? 1);
+
+  // Folio is already status check_in at call time → Laravel uses ATA as base.
+  const eta = timeStr(firstResv.ata ?? firstResv.eta);
+
+  const packageDayUse = firstResv.package_id
+    ? await prisma.rate_day_uses.findFirst({ where: { id: BigInt(firstResv.package_id), deleted_at: null } })
+    : null;
+  if (!packageDayUse) return { code: 404, message: 'Day use Package Not Found.' };
+
+  const timeDayUse = Number(packageDayUse.time ?? 0) * quantityDayUse;
+  const [eh, em, es] = eta.split(':').map(Number);
+  const etdBase = new Date();
+  etdBase.setUTCHours(eh || 0, em || 0, es || 0, 0);
+  const etd = new Date(etdBase.getTime() + timeDayUse * 60000);
+
+  // Extra-quantity transaction (is_check_in → delta = full requested qty)
+  if (quantityExtraDayUse !== 0) {
+    const prop: any = await prisma.properties.findUnique({ where: { id: folio.property_id }, select: { id: true, day_use_item_code: true } });
+    const itemCode = prop?.day_use_item_code ? await prisma.code_items.findUnique({ where: { id: BigInt(prop.day_use_item_code) } }) : null;
+    const codePost = itemCode?.code_post_id ? await prisma.code_posts.findUnique({ where: { id: BigInt(itemCode.code_post_id) } }) : null;
+    if (!itemCode || !codePost) return { code: 404, message: 'Item Code or Code Post not found for extra day use.' };
+
+    const amount = Math.abs(quantityExtraDayUse) * Number(itemCode.sales ?? 0);
+    const calc = calculateCodePost(
+      {
+        tax: codePost.tax ?? false,
+        tax_percentage: codePost.tax_percentage ? Number(codePost.tax_percentage) : 0,
+        local_tax: codePost.local_tax ?? false,
+        local_tax_percentage: codePost.local_tax_percentage ? Number(codePost.local_tax_percentage) : 0,
+        service_charge: codePost.service_charge ?? false,
+        service_charge_percentage: codePost.service_charge_percentage ? Number(codePost.service_charge_percentage) : 0,
+        service_charge_include_local_tax: codePost.service_charge_include_local_tax ?? false,
+        tax_include_local_tax: codePost.tax_include_local_tax ?? false,
+      },
+      amount,
+      false
+    );
+    await prisma.transactions.create({
+      data: {
+        property_id: folio.property_id,
+        folio_id: folio.id,
+        type: 'manual_posting',
+        type_amount: quantityExtraDayUse > 0 ? 'PLUS' : 'MINUS',
+        date: new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z'),
+        code: String(codePost.id),
+        code_name: codePost.name,
+        amount: calc.amount,
+        svr_chrg: calc.service,
+        tax3: calc.tax3,
+        pb1: calc.pb1,
+        total: calc.total,
+        surcharge: 0,
+        remark: 'EXTRA DAY USE',
+        description: 'EXTRA DAY USE',
+        reference: DAY_USE_REF,
+        model_type: folio.guest_profile_id ? 'App\\Models\\GuestProfile' : 'App\\Models\\CompanyProfile',
+        model_id: folio.guest_profile_id ?? folio.company_profile_id,
+        is_posting: 1,
+        status: 1,
+        created_at: new Date(),
+      },
+    });
+  }
+
+  // New ETD: +30 min per extra quantity, else base ETD (= Laravel :77-96)
+  const newEtd = quantityExtraDayUse > 0 ? new Date(etd.getTime() + 30 * 60000 * quantityExtraDayUse) : etd;
+  await prisma.reservations.updateMany({ where: { folio_id: folio.id, deleted_at: null }, data: { etd: newEtd } });
+  return null;
+}
+
+// Laravel ExtraDayUseService@postingRevenueDayUse (:201-407) — room_revenue + extra_bed +
+// additional_item posting with DAY USE reference; marks rows posted.
+async function postingRevenueDayUse(folioId: bigint, pid: bigint, businessDate: string): Promise<void> {
+  const dateObj = new Date(businessDate + 'T00:00:00.000Z');
+  const postOne = async (
+    folio: any, codePost: any, amount: number, type: string, ledgerRow: any | null
+  ) => {
+    const calc = calculateCodePost(
+      {
+        tax: codePost.tax ?? false,
+        tax_percentage: codePost.tax_percentage ? Number(codePost.tax_percentage) : 0,
+        local_tax: codePost.local_tax ?? false,
+        local_tax_percentage: codePost.local_tax_percentage ? Number(codePost.local_tax_percentage) : 0,
+        service_charge: codePost.service_charge ?? false,
+        service_charge_percentage: codePost.service_charge_percentage ? Number(codePost.service_charge_percentage) : 0,
+        service_charge_include_local_tax: codePost.service_charge_include_local_tax ?? false,
+        tax_include_local_tax: codePost.tax_include_local_tax ?? false,
+      },
+      amount,
+      false
+    );
+    let profileModelType: string | null = null;
+    let profileId: bigint | null = null;
+    if (ledgerRow) {
+      profileModelType = String(ledgerRow.profileable_type ?? '').split('\\').pop() === 'GuestProfile'
+        ? 'App\\Models\\GuestProfile' : 'App\\Models\\CompanyProfile';
+      profileId = BigInt(Number(ledgerRow.profileable_id));
+    } else if (folio.company_profile_id) {
+      profileModelType = 'App\\Models\\CompanyProfile';
+      profileId = folio.company_profile_id;
+    }
+    await prisma.transactions.create({
+      data: {
+        property_id: BigInt(pid),
+        folio_id: folio.id,
+        type,
+        type_amount: 'PLUS',
+        date: dateObj,
+        code: String(codePost.id),
+        code_name: codePost.name,
+        amount: calc.amount,
+        svr_chrg: calc.service,
+        tax3: calc.tax3,
+        pb1: calc.pb1,
+        total: calc.total,
+        surcharge: 0,
+        reference: DAY_USE_REF,
+        model_type: profileModelType ?? undefined,
+        model_id: profileId ?? undefined,
+        is_posting: 1,
+        is_end_of_day: 1,
+        is_endshift: 1,
+        status: 1,
+        created_at: new Date(),
+      },
+    });
+  };
+
+  const folios = await prisma.folios.findMany({
+    where: { id: folioId, is_virtual: false, deleted_at: null },
+    include: { reservations: { where: { is_posting: 0, deleted_at: null }, include: { rates: true } } },
+  });
+  // ledgers has no Prisma relation to folios — query by folio_id
+  const folioLedgers = await prisma.ledgers.findMany({ where: { folio_id: Number(folioId) } });
+  for (const folio of folios) {
+    for (const value of folio.reservations) {
+      const codePost = value.rates?.code_post_id ? await prisma.code_posts.findUnique({ where: { id: BigInt(value.rates.code_post_id) } }) : null;
+      if (codePost) {
+        const ledgerRow = codePost.code_billing_id
+          ? folioLedgers.find((l: any) => Number(l.code_billing_id) === Number(codePost.code_billing_id)) ?? null
+          : null;
+        await postOne(folio, codePost, Number(value.total ?? 0), 'room_revenue', ledgerRow);
+      }
+      if (Number(value.total_extra_bed ?? 0) > 0 && value.rates?.code_post_extra_bed_id) {
+        const cpExtra = await prisma.code_posts.findUnique({ where: { id: BigInt(value.rates.code_post_extra_bed_id) } });
+        if (cpExtra) {
+          const ledgerRow = cpExtra.code_billing_id
+            ? folioLedgers.find((l: any) => Number(l.code_billing_id) === Number(cpExtra.code_billing_id)) ?? null
+            : null;
+          await postOne(folio, cpExtra, Number(value.total_extra_bed), 'extra_bed', ledgerRow);
+        }
+      }
+      await prisma.reservations.update({ where: { id: value.id }, data: { is_posting: 1 } });
+    }
+
+    // additional_item loop for this folio (= Laravel :318-396)
+    const items: any[] = await prisma.$queryRaw`
+      SELECT * FROM model_has_code_items
+      WHERE model_id = ${folio.id} AND model_type = 'App\\Models\\Folio'
+        AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+    `;
+    if (items.length > 0) {
+      for (const item of items) {
+        const codeItemId = Number(item.code_item_id);
+        if (!codeItemId) continue;
+        const codeItem = await prisma.code_items.findUnique({ where: { id: BigInt(codeItemId) } });
+        if (!codeItem?.code_post_id) continue;
+        const codePost = await prisma.code_posts.findUnique({ where: { id: BigInt(codeItem.code_post_id) } });
+        if (!codePost) continue;
+        const ledgerRow = codePost.code_billing_id
+          ? folioLedgers.find((l: any) => Number(l.code_billing_id) === Number(codePost.code_billing_id)) ?? null
+          : null;
+        const upsales = Number(item.upsales ?? 0);
+        const sales = Number(item.sales ?? 0);
+        await postOne(folio, codePost, upsales > 0 ? upsales : sales, 'additional_item', ledgerRow);
+      }
+      await prisma.$executeRaw`
+        UPDATE model_has_code_items SET is_posting = 1
+        WHERE model_id = ${folio.id} AND model_type = 'App\\Models\\Folio'
+          AND start_date <= ${dateObj} AND end_date >= ${dateObj}
+      `;
+    }
+  }
 }
 
 // Tax calc helper — Laravel TransactionController@tax parity (:664-709) for non-payment types
@@ -131,7 +366,18 @@ export async function transferTransactionsForCheckout(
   const bDate = new Date(businessDate + 'T00:00:00.000Z');
   let isAutoTransfer = false;
 
-  const copyBreakdowns = async (fromTxnId: bigint, toTxnId: bigint, targetFolioId: bigint | null, reversed: boolean, isTransfer: number, remarkSuffix: string) => {
+  // Laravel replicates breakdowns with field-level control:
+  //  • void copies   → keep original date + uuid (only txn/type/void_code/remark change)
+  //  • transfer copies → date = businessDate + FRESH uuid (= Folio.php :835-837/:883-886)
+  const copyBreakdowns = async (
+    fromTxnId: bigint,
+    toTxnId: bigint,
+    targetFolioId: bigint | null,
+    reversed: boolean,
+    isTransfer: number,
+    remarkSuffix: string,
+    opts: { resetDateAndUuid?: boolean } = {}
+  ) => {
     const rows = await prisma.transaction_breakdowns.findMany({ where: { transaction_id: fromTxnId } });
     for (const b of rows) {
       await prisma.transaction_breakdowns.create({
@@ -140,7 +386,7 @@ export async function transferTransactionsForCheckout(
           transaction_id: toTxnId,
           folio_id: targetFolioId ?? b.folio_id,
           type: b.type,
-          date: bDate,
+          date: opts.resetDateAndUuid ? bDate : b.date,
           code: b.code,
           type_payment_id: b.type_payment_id,
           rate_inclusive_id: b.rate_inclusive_id,
@@ -166,6 +412,7 @@ export async function transferTransactionsForCheckout(
           is_split: b.is_split,
           is_has_inclusive: b.is_has_inclusive,
           status: b.status,
+          uuid: opts.resetDateAndUuid ? randomUUID() : b.uuid,
           created_at: new Date(),
         },
       });
@@ -244,6 +491,7 @@ export async function transferTransactionsForCheckout(
       where: { folio_id: sourceFolio.id, model_type: 'App\\Models\\CompanyProfile', ...FOR_TRANSFER },
     });
     for (const t of txns) {
+      // void row + reversed breakdown copies (= Laravel :798-816/:846-864)
       const voidRow = await replicateTxn(t, {
         folio_id: sourceFolio.id,
         void_code: String(t.id),
@@ -254,6 +502,25 @@ export async function transferTransactionsForCheckout(
       });
       await copyBreakdowns(t.id, voidRow.id, null, true, 1, `To - ${folio.folio_number ?? ''}`);
 
+      if (t.type === 'room_revenue') {
+        // Laravel room_revenue branch (:818-843): plain 'from -' remark (original NOT
+        // preserved) on the new txn; breakdowns re-dated to business date + fresh uuid;
+        // ORIGINAL txn left untouched (early return — no is_transfer=1 mark).
+        const newRow = await replicateTxn(t, {
+          folio_id: folio.id,
+          void_code: String(t.id),
+          is_transfer: 2,
+          remark: `from - ${sourceFolio.folio_number ?? ''}`,
+          uuid: randomUUID(),
+        });
+        await copyBreakdowns(t.id, newRow.id, folio.id, false, 2, `from - ${sourceFolio.folio_number ?? ''}`, { resetDateAndUuid: true });
+        if (folio.company_profile_id) {
+          await prisma.transactions.update({ where: { id: newRow.id }, data: { model_type: 'App\\Models\\CompanyProfile', model_id: folio.company_profile_id } });
+        }
+        continue;
+      }
+
+      // non-room_revenue (:866-893): original remark preserved; original marked transferred.
       const newRow = await replicateTxn(t, {
         folio_id: folio.id,
         void_code: String(t.id),
@@ -261,7 +528,7 @@ export async function transferTransactionsForCheckout(
         remark: t.remark ? `${t.remark} - from - ${sourceFolio.folio_number ?? ''}` : `from - ${sourceFolio.folio_number ?? ''}`,
         uuid: randomUUID(),
       });
-      await copyBreakdowns(t.id, newRow.id, folio.id, false, 2, `from - ${sourceFolio.folio_number ?? ''}`);
+      await copyBreakdowns(t.id, newRow.id, folio.id, false, 2, `from - ${sourceFolio.folio_number ?? ''}`, { resetDateAndUuid: true });
 
       // attach to target folio's company profile ledger
       if (folio.company_profile_id) {
@@ -280,21 +547,19 @@ export async function transferTransactionsForCheckout(
       where: { folio_id: targetFolio.id, model_type: 'App\\Models\\CompanyProfile', ...FOR_TRANSFER },
     });
     for (const t of txns) {
+      // Laravel case (:900-927) moves BARE transactions only — no breakdown copies,
+      // no fresh uuid (replicate keeps source uuid), void row keeps original date.
       const voidRow = await replicateTxn(t, {
         void_code: String(t.id),
         type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
         is_transfer: 1,
         remark: `To - ${folio.folio_number ?? ''}`,
-        uuid: randomUUID(),
       });
-      await copyBreakdowns(t.id, voidRow.id, null, true, 1, `To - ${folio.folio_number ?? ''}`);
 
       const newRow = await replicateTxn(t, {
         folio_id: folio.id,
         is_transfer: 1,
-        uuid: randomUUID(),
       });
-      await copyBreakdowns(t.id, newRow.id, folio.id, false, 1, '');
 
       if (folio.company_profile_id) {
         await prisma.transactions.update({ where: { id: newRow.id }, data: { model_type: 'App\\Models\\CompanyProfile', model_id: folio.company_profile_id } });
@@ -610,7 +875,14 @@ room: roomName,
       const folio = await prisma.folios.findUnique({
         where: { id },
         include: {
-          reservations: { where: { deleted_at: null }, select: { id: true, room_id: true, room_id_next: true, date: true, is_24_hour: true } },
+          reservations: {
+            where: { deleted_at: null },
+            select: {
+              id: true, room_id: true, room_id_next: true, room_type_id: true, date: true,
+              is_24_hour: true, package_id: true, quantity: true, quantity_extra_day_use: true,
+              adult: true, child: true, add_bed: true, eta: true, etd: true,
+            },
+          },
         },
       });
       if (!folio || folio.deleted_at) {
@@ -692,12 +964,26 @@ room: roomName,
         }
       }
 
+      // Laravel parity (Folio.php:1301-1334): allotment quota check + persistent
+      // weekday decrement when the folio consumes an allotment.
+      if (folio.use_allotment) {
+        const allotErr = await checkAllotmentRoom(folio);
+        if (allotErr) {
+          badRequest(res, allotErr);
+          return;
+        }
+      }
+
       // ── All guards passed — mutate now ──
 
       await prisma.folios.update({
         where: { id },
         data: {
           status_reservation: STATUS_RESERVATION.check_in.id,
+          // Laravel parity (Folio.php:1365-1367): remark_check_in persisted in folio data JSON
+          ...(req.body?.remark
+            ? { data: JSON.stringify({ ...(folio.data ? safeParseData(folio.data) : {}), remark_check_in: req.body.remark }) }
+            : {}),
           updated_at: new Date(),
         },
       });
@@ -728,6 +1014,17 @@ room: roomName,
             updated_at: now,
           },
         });
+      }
+
+      // Laravel parity (Folio.php:1370-1406): day-use folios get ExtraDayUseService
+      // processing (ETD calc + extra-quantity txn) and immediate revenue posting.
+      if (folio.is_day_use && folio.reservations.length > 0) {
+        const dayUseErr = await processExtraDayUse(folio, folio.reservations[0]);
+        if (dayUseErr) {
+          error(res, dayUseErr.message, dayUseErr.code);
+          return;
+        }
+        await postingRevenueDayUse(BigInt(id), BigInt(folio.property_id), businessDate);
       }
 
       // Laravel dispatches SyncStaahRoomAvailability after every folio mutation
@@ -1162,16 +1459,32 @@ room: roomName,
       const folio = await prisma.folios.findUnique({ where: { id: BigInt(folio_id) }, select: { id: true, company_profile_id: true, guest_profile_id: true } });
       if (!folio) { badRequest(res, 'The selected folio id is invalid.'); return; }
 
-      // Laravel :459-478 — open shift guard (super-user bypass; role-menu check approximated)
-      if (!req.user?.superUser) {
+      // Laravel :459-478 parity — NO super-user bypass. First role of the user
+      // (model_has_roles, no property scope) must have menus with visibility='transaction'
+      // (role→menu morph via model_has_menus) AND an open shift on the business date;
+      // otherwise 'Shift is not open'.
+      const userId = req.user?.id ?? 0n;
+      const userRole = await prisma.model_has_roles.findFirst({
+        where: { model_type: 'App\\Models\\User', model_id: userId },
+        select: { role_id: true },
+      });
+      const txnMenuCount = userRole
+        ? await prisma.model_has_menus.count({
+            where: { model_type: 'App\\Models\\Role', model_id: userRole.role_id, menus: { visibility: 'transaction' } },
+          })
+        : 0;
+      if (txnMenuCount > 0) {
         const businessDate = await AuthController.getBusinessDate(pid);
         const bStart = new Date(businessDate + 'T00:00:00.000Z');
         const bEnd = new Date(bStart.getTime() + 86400000);
         const openShift = await prisma.shifts.findFirst({
-          where: { property_id: pid, user_id: req.user?.id ?? 0n, date: { gte: bStart, lt: bEnd }, end: null, deleted_at: null },
+          where: { property_id: pid, user_id: userId, date: { gte: bStart, lt: bEnd }, end: null, deleted_at: null },
           select: { id: true },
         });
         if (!openShift) { badRequest(res, 'Shift is not open'); return; }
+      } else {
+        badRequest(res, 'Shift is not open');
+        return;
       }
 
       const sumPrice = Number(body.amount ?? 0);
@@ -1973,6 +2286,55 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
       }
       success(res, bigintToNumber(created), 'Batch posting created', 201);
     } catch (err: any) { console.error('Batch posting error:', err); error(res, 'Failed to create batch posting', 500); }
+  }
+
+  // GET /transaction/print — Laravel TransactionController@print (:50-57): decrypt
+  // AES folio_id query param then delegate to the list handler.
+  static async transactionPrint(req: Request, res: Response): Promise<void> {
+    try {
+      const raw = req.query.folio_id as string | undefined;
+      if (raw) {
+        let folioId = raw;
+        try { folioId = decrypt(raw); } catch { /* plain id passthrough */ }
+        if (/^\d+$/.test(folioId.trim())) {
+          req.query.folio_id = folioId.trim();
+        }
+      }
+      return await FrontDeskController.transactionList(req, res);
+    } catch (err: any) { console.error('Transaction print error:', err); error(res, 'Failed to print transactions', 500); }
+  }
+
+  // DELETE /batch-posting/:id — soft delete + status inactive (= BatchPostingController@destroy :328)
+  static async batchPostingDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const row = await prisma.transaction_temps.findUnique({ where: { id: BigInt(idParam) } });
+      if (!row) { notFound(res, 'Not Found'); return; }
+      await prisma.transaction_temps.update({ where: { id: row.id }, data: { deleted_at: new Date(), status: 0 } });
+      success(res, [], 'Success', 200);
+    } catch (err: any) { console.error('Batch posting destroy error:', err); error(res, 'Failed to delete batch posting', 500); }
+  }
+
+  // DELETE /batch-posting/:id/delete — force delete (= BatchPostingController@delete :346)
+  static async batchPostingDeleteForce(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const row = await prisma.transaction_temps.findUnique({ where: { id: BigInt(idParam) } });
+      if (!row) { notFound(res, 'Not Found'); return; }
+      await prisma.transaction_temps.delete({ where: { id: row.id } });
+      success(res, [], 'Success', 200);
+    } catch (err: any) { console.error('Batch posting force-delete error:', err); error(res, 'Failed to delete batch posting', 500); }
+  }
+
+  // PATCH /batch-posting/:id/restore — restore + status inactive (= BatchPostingController@restore :367)
+  static async batchPostingRestore(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const row = await prisma.transaction_temps.findUnique({ where: { id: BigInt(idParam) } });
+      if (!row) { notFound(res, 'Not Found'); return; }
+      await prisma.transaction_temps.update({ where: { id: row.id }, data: { deleted_at: null, status: 0 } });
+      success(res, [], 'Success', 200);
+    } catch (err: any) { console.error('Batch posting restore error:', err); error(res, 'Failed to restore batch posting', 500); }
   }
 
   // ==================== DEPOSIT ====================

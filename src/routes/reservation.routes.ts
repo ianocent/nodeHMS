@@ -34,7 +34,15 @@ router.post('/reservations/:id/assign-room', authMiddleware, requirePermission(6
 
 // ── Reservation items (room grid per folio, ReservationItemController parity) ──
 router.get('/reservation-item', authMiddleware, requirePermission(60, 'view'), ReservationController.reservationItemIndex);
-router.put('/reservation-item/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.reservationItemUpdate);
+      router.put('/reservation-item/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.reservationItemUpdate);
+// Laravel cms.php:1028-1031 — restore / force-delete / destroy
+router.patch('/reservation-item/:id/restore', authMiddleware, requirePermission(60, 'edit'), ReservationController.reservationItemRestore);
+router.delete('/reservation-item/:id/delete', authMiddleware, requirePermission(60, 'delete'), ReservationController.reservationItemDeleteForce);
+router.delete('/reservation-item/:id', authMiddleware, requirePermission(60, 'delete'), ReservationController.reservationItemDestroy);
+// Laravel cms.php:975 storeData (remark/message/assign_room)
+router.put('/reservation/data/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.storeData);
+// Laravel cms.php:956 ChangeRoom — repricing preview + room pointers update
+router.put('/reservation/changeRoom/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.changeRoom);
 
 // ── Singular static routes ──
 router.get('/reservation', authMiddleware, requirePermission(60, 'view'), ReservationController.list);

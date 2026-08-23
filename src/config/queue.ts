@@ -116,12 +116,17 @@ export async function initQueue() {
       await prisma.$disconnect();
     });
 
-    // Schedule cron jobs (equivalent to Laravel Console/Kernel.php)
-    await bossInstance.schedule('sync-price-staah', '* * * * *'); // every minute
+  // Schedule cron jobs (equivalent to Laravel Console/Kernel.php)
+  await bossInstance.schedule('sync-price-staah', '* * * * *'); // Kernel :35 everyMinute
+  // Laravel Kernel :20-21/:25 have PullStaahReservations + reconcile availability
+  // COMMENTED OUT — node crons for them are gated behind an opt-in env flag so
+  // default behavior matches base instead of polling STAAH every 5 minutes.
+  if (process.env.STAAH_POLL_CRON_ENABLED === 'true') {
     await bossInstance.schedule('pull-staah-reservations', '*/5 * * * *'); // every 5 minutes
     await bossInstance.schedule('dispatch-staah-availability', '*/5 * * * *'); // every 5 minutes
-    await bossInstance.schedule('check-expired-request-bookings', '0 * * * *'); // hourly
-    await bossInstance.schedule('night-audit-post', '0 2 * * *'); // daily at 2 AM - night audit
+  }
+  await bossInstance.schedule('check-expired-request-bookings', '0 * * * *'); // hourly
+  await bossInstance.schedule('night-audit-post', '0 2 * * *'); // daily at 2 AM - night audit
     // Laravel Kernel :30/:40 — booking engine price + payment status checks, every minute.
     await bossInstance.schedule('sync-price-booking-engine', '* * * * *');
     await bossInstance.schedule('sync-check-status-booking-engine', '* * * * *');

@@ -153,6 +153,52 @@ export async function processNightAuditPost(job: any) {
         });
       }
 
+      // 0b. Pending-confirmation guards (Laravel postNightAudit :377-532 parity):
+      // room change / no-show / over-stay lists must be confirmed by staff before
+      // posting. Unattended cron cannot confirm them — skip the property, same as
+      // the open-shift guard above (Laravel blocks with 400 on the HTTP flow).
+      const roomChangePending = await prisma.folios.findMany({
+        where: {
+          property_id: pid,
+          is_posting: false,
+          deleted_at: null,
+          reservations: { some: { OR: [{ room_type_id_next: { not: null } }, { room_id_next: { not: null } }] } },
+        },
+        select: { id: true },
+      });
+      if (roomChangePending.length > 0) {
+        console.warn(`[NightAuditPost] Property ${pid} skipped: ${roomChangePending.length} room change(s) need confirmation`);
+        continue;
+      }
+      const noShowPending = await prisma.folios.findMany({
+        where: {
+          property_id: pid,
+          status_reservation: { in: [STATUS_RESERVATION.reservation, STATUS_RESERVATION.pending] },
+          check_in_date: { lte: dateObj },
+          is_posting: false,
+          deleted_at: null,
+        },
+        select: { id: true },
+      });
+      if (noShowPending.length > 0) {
+        console.warn(`[NightAuditPost] Property ${pid} skipped: ${noShowPending.length} no-show folio(s) need confirmation`);
+        continue;
+      }
+      const overStayPending = await prisma.folios.findMany({
+        where: {
+          property_id: pid,
+          status_reservation: STATUS_RESERVATION.check_in,
+          check_out_date: { lte: dateObj },
+          is_posting: false,
+          deleted_at: null,
+        },
+        select: { id: true },
+      });
+      if (overStayPending.length > 0) {
+        console.warn(`[NightAuditPost] Property ${pid} skipped: ${overStayPending.length} over-stay folio(s) need confirmation`);
+        continue;
+      }
+
       // 1. Post room revenue for checked-in folios
       const reservations = await prisma.reservations.findMany({
         where: {

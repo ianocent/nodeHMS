@@ -55,6 +55,8 @@ router.post('/guests/:id/restore', authMiddleware, requirePermission(82, 'edit')
 // Guest Documents
 router.get('/guests/:guestId/documents', authMiddleware, requirePermission(82, 'view'), GuestController.documentList);
 router.post('/guests/:guestId/documents', authMiddleware, requirePermission(82, 'add'), GuestController.documentStore);
+router.put('/guests/documents/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.documentUpdate);
+router.patch('/guests/documents/:id/restore', authMiddleware, requirePermission(82, 'edit'), GuestController.documentRestore);
 router.delete('/guests/documents/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.documentDestroy);
 
 // Guest Family

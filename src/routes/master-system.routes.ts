@@ -130,6 +130,9 @@ router.get('/check-value', authMiddleware, requirePermission(69, 'view'), System
 
 router.get('/system-balance/:type', authMiddleware, requirePermission(69, 'view'), SystemController.systemBalance);
 router.get('/system-balance/:type/:id', authMiddleware, requirePermission(69, 'view'), SystemController.getListByIdPost);
+// Node-extra ops endpoints (Laravel keeps these as model methods only)
+router.get('/system-balance-get', authMiddleware, requirePermission(69, 'view'), SystemController.systemBalanceGet);
+router.post('/system-balance-restore', authMiddleware, requirePermission(69, 'edit'), SystemController.systemBalanceRestore);
 
 // ══════════════════════════════════════════════════════════
 // System — Logs, Setup, Post Code Budget

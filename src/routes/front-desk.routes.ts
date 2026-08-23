@@ -55,6 +55,7 @@ router.post('/transactions/:id/void', authMiddleware, FrontDeskController.transa
 // Singular aliases for transactions
 router.get('/transaction', authMiddleware, FrontDeskController.transactionList);
 router.post('/transaction', authMiddleware, FrontDeskController.transactionStore);
+router.get('/transaction/print', authMiddleware, FrontDeskController.transactionPrint); // Laravel cms.php:288
 router.get('/transaction/folio', authMiddleware, FrontDeskController.transactionFolio);
 router.get('/transaction/create', authMiddleware, FrontDeskController.transactionCreate);
 router.get('/transaction/pos', authMiddleware, requirePermission(69, 'view'), PosController.listTransactions);
@@ -73,6 +74,12 @@ router.post('/batch-posting', authMiddleware, FrontDeskController.batchPostingSt
 // GLOBALSAVE commit — Laravel cms.php:1006 (BatchPostingController@batchPosting); temps → transactions
 router.post('/batch-posting/batch-posting', authMiddleware, FrontDeskController.batchPostingCommit);
 router.post('/batch-postings/batch-postings', authMiddleware, FrontDeskController.batchPostingCommit);
+
+// Per-row temp lifecycle — Laravel cms.php:1007-1011 (restore/delete/destroy)
+router.delete('/batch-posting/:id/delete', authMiddleware, requirePermission(63, 'delete'), FrontDeskController.batchPostingDeleteForce);
+router.patch('/batch-posting/:id/restore', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.batchPostingRestore);
+router.delete('/batch-posting/:id', authMiddleware, requirePermission(63, 'delete'), FrontDeskController.batchPostingDestroy);
+router.delete('/batch-postings/:id', authMiddleware, requirePermission(63, 'delete'), FrontDeskController.batchPostingDestroy);
 
 // Deposit
 router.get('/deposits', authMiddleware, FrontDeskController.depositList);
