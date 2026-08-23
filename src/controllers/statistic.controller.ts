@@ -590,6 +590,396 @@ export class StatisticController {
     } catch (err: any) { error(res, 'Failed to load statistic rate codes', 500); }
   }
 
+  // Laravel StatisticController@statisticsRoomTypeGrouping (:1782-2410)
+  static async statisticsRoomTypeGrouping(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const businessDate = (req.user as any)?.bussinesDate || new Date().toISOString().split('T')[0];
+      const startParam = (req.query.start as string) || businessDate;
+      const endParam = (req.query.end as string) || null;
+
+      const start = new Date(startParam + 'T00:00:00');
+      const endBase = new Date((endParam || startParam) + 'T00:00:00');
+      endBase.setDate(endBase.getDate() + 7);
+      const end = endBase;
+
+      const NIGHT = Math.round((end.getTime() - start.getTime()) / 86400000);
+      const fmt = (d: Date | string | null): string => {
+        if (!d) return '';
+        const dt = typeof d === 'string' ? new Date(d.length <= 10 ? d + 'T00:00:00' : d) : d;
+        return dt.toISOString().split('T')[0];
+      };
+      const dayList: string[] = [];
+      for (let i = 0; i <= NIGHT; i++) {
+        const d = new Date(start); d.setDate(d.getDate() + i);
+        dayList.push(d.toISOString().split('T')[0]);
+      }
+
+      const getTooltip = (data: any, label: any = '') =>
+        `<div class="tooltiptbl w-full text-center">${label !== '' ? label : data}<span class="tooltiptext">${data}<br/></span></div>`;
+      const getOccupancy = (totalRoom: number, roomSold: number) => {
+        const occ = Math.round((roomSold / (totalRoom <= 0 ? 1 : totalRoom)) * 10000) / 10000;
+        return occ * 100 + '%';
+      };
+
+      // ── Table ──
+      const table: any[] = [
+        { label: 'Room Type', key: 'name', type: 'none', is_search: false },
+        { label: 'Total Room', key: 'total', type: 'none', is_html: true, is_search: false },
+      ];
+      for (const day of dayList) {
+        table.push({
+          label: new Date(day + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/,/g, ''),
+          key: day,
+          type: 'none',
+          is_body_double_click: true,
+          is_header_double_click: true,
+          double_click_action: [
+            { id: 0, type: 'form', key: 'daily_rate_code', date: day, label: 'Daily Rate Code', endpoint: '/cms/statistic/statistic-room-type/add-rate-code', form: [{ label: 'Message', key: 'text', type: 'base', type_input: 'text' }] },
+            { id: 0, type: 'form', key: 'add_message', date: day, label: 'Add Message', endpoint: '/cms/statistic/statistic-room-type/add-message', form: [{ label: 'Message', key: 'text', type: 'textarea', type_input: 'text' }] },
+          ],
+          is_html: true,
+          is_search: false,
+        });
+      }
+
+      // ── Data sources ──
+      const [groupingTypes, messages, rateCodes, overbookingRows, availRows, workOrderRows] = await Promise.all([
+        prisma.types.findMany({
+          where: { property_id: pid, group: 'room-type-grouping', deleted_at: null },
+          orderBy: [{ status: 'desc' }, { sort: 'asc' }],
+        }),
+        prisma.statistic_messages.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
+        prisma.statistic_rate_codes.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
+        prisma.overbookings.findMany({ where: { property_id: pid, deleted_at: null, date: { gte: start, lte: end } } }),
+        prisma.room_availabilities.findMany({ where: { property_id: Number(pid), deleted_at: null, date: { gte: start, lte: end } } }),
+        prisma.work_orders.findMany({
+          where: {
+            property_id: pid,
+            deleted_at: null,
+            status: 1,
+            date: { lte: start },
+            room_id: { not: null },
+            OR: [{ end_date: { gte: start } }, { end_date: null }],
+          },
+        }),
+      ]);
+
+      const rtLinks = groupingTypes.length
+        ? await prisma.model_has_types.findMany({
+            where: { model_type: 'App\\Models\\RoomType', type_id: { in: groupingTypes.map((t: any) => t.id) } },
+            select: { model_id: true, type_id: true },
+          })
+        : [];
+
+      const membersByGroup = new Map<bigint, bigint[]>();
+      for (const t of groupingTypes) {
+        const ids = rtLinks.filter((l: any) => Number(l.type_id) === Number(t.id)).map((l: any) => l.model_id as bigint);
+        membersByGroup.set(t.id, ids);
+      }
+      const allMemberRtIds = [...new Set([...membersByGroup.values()].flat())];
+
+      const rooms = await prisma.rooms.findMany({
+        where: { property_id: pid, deleted_at: null, status: 1 },
+        select: { id: true, name: true, room_type_id: true, room_status: true },
+      });
+      const roomsById = new Map(rooms.map((r: any) => [r.id, r]));
+      const pluckRoom = rooms.filter((r: any) => allMemberRtIds.includes(r.room_type_id)).map((r: any) => r.id);
+      const pluckRoomSet = new Set(pluckRoom.map(Number));
+
+      const reservationRows = await prisma.reservations.findMany({
+        where: { property_id: pid, deleted_at: null, date: { gte: start, lte: end } },
+        select: {
+          id: true, folio_id: true, date: true, room_id: true, room_type_id: true, adult: true, child: true,
+          folios: { select: { id: true, folio_number: true, check_in_date: true, check_out_date: true, status_reservation: true, type_reservation: true } },
+        },
+      });
+      const firstResByFolio = new Map<bigint, any>();
+      for (const r of reservationRows) {
+        if (!firstResByFolio.has(r.folio_id)) firstResByFolio.set(r.folio_id, r);
+      }
+
+      const [allotmentRows, allotmentExpiredRows, folioAllotmentRows] = await Promise.all([
+        prisma.room_allotments.findMany({
+          where: { property_id: pid, deleted_at: null, allotments: { is: { start_date: { lte: end }, end_date: { gte: start } } } },
+          include: { allotments: { select: { start_date: true, end_date: true } } },
+        }),
+        prisma.room_allotments.findMany({
+          where: { property_id: pid, deleted_at: null, allotments: { is: { end_date: { lt: start } } } },
+          include: { allotments: { select: { end_date: true } } },
+        }),
+        prisma.folios.findMany({
+          where: { property_id: pid, deleted_at: null, use_allotment: true, check_in_date: { lte: end }, check_out_date: { gte: start } },
+          select: { check_in_date: true, check_out_date: true },
+        }),
+      ]);
+
+      const sumAllotmentData = (rows: any[]): number =>
+        rows.reduce((acc, ra) => {
+          try { const vals: any = Object.values(JSON.parse(ra.data || '{}')); return acc + vals.reduce((a: number, v: any) => a + (Number(v) || 0), 0); } catch { return acc; }
+        }, 0);
+
+      // ── Lookup maps ──
+      const msgByDate = new Map(messages.map((m: any) => [fmt(m.date), m.text]));
+      const rcByDate = new Map(rateCodes.map((r: any) => [fmt(r.date), r.text]));
+      const obByKey = new Map<string, number>();
+      for (const ob of overbookingRows) {
+        const k = fmt(ob.date) + ':' + String(ob.room_type_id);
+        obByKey.set(k, (obByKey.get(k) || 0) + ob.overbooking);
+      }
+      const availByKey = new Map<string, number[]>();
+      for (const a of availRows) {
+        const k = fmt(a.date);
+        if (!availByKey.has(k)) availByKey.set(k, []);
+        availByKey.get(k)!.push(Number(a.room_id));
+      }
+      const folioStatus = (r: any) => r.folios?.status_reservation ?? null;
+
+      // ── Rows ──
+      const data: any[] = [];
+      const pushBlank = () => {
+        const row: any = { id: 0, name: '', total: '' };
+        for (const day of dayList) row[day] = '';
+        data.push(row);
+      };
+
+      const msgRow: any = { id: 0, name: 'Message', total: '' };
+      for (const day of dayList) {
+        const t = msgByDate.get(day);
+        msgRow[day] = t ? `<div class="bg-success px-1 py-1 text-white rounded-md mt-1 text-center">${t}</div>` : '';
+      }
+      data.push(msgRow);
+
+      const rcRow: any = { id: 0, name: 'Daily Rate Code', total: '' };
+      for (const day of dayList) {
+        const t = rcByDate.get(day);
+        rcRow[day] = t ? `<div class="bg-cyan px-1 py-1 text-white rounded-md mt-1 text-center">${t}</div>` : '';
+      }
+      data.push(rcRow);
+
+      pushBlank();
+
+      // Group rows
+      interface GroupMeta { memberRtIds: bigint[]; groupRooms: any[]; blocked: Map<string, number>; ooo: Map<string, number>; cellValue: Map<string, number>; }
+      const groupMeta = new Map<number, GroupMeta>();
+      let totalRoomAll = 0;
+      for (const gt of groupingTypes) {
+        const memberRtIds = membersByGroup.get(gt.id) || [];
+        const groupRooms = rooms.filter((r: any) => memberRtIds.includes(r.room_type_id));
+        const totalRoom = groupRooms.length;
+        totalRoomAll += totalRoom;
+        const meta: GroupMeta = { memberRtIds, groupRooms, blocked: new Map(), ooo: new Map(), cellValue: new Map() };
+        const row: any = { id: Number(gt.id), name: gt.name, total: totalRoom };
+        for (const day of dayList) {
+          const blockedIds = availByKey.get(day)?.filter((rid) => groupRooms.some((gr: any) => Number(gr.id) === rid)) || [];
+          row.blocked = row.blocked || {};
+          row.blocked_room_names = row.blocked_room_names || {};
+          row.out_of_order = row.out_of_order || {};
+          row.room_sold = row.room_sold || {};
+          meta.blocked.set(day, blockedIds.length);
+          row.blocked[day] = blockedIds.length;
+          row.blocked_room_names[day] = blockedIds.map((rid) => roomsById.get(BigInt(rid))?.name).filter(Boolean).join(', ');
+          const oooCount = groupRooms.filter((gr: any) => gr.room_status === 4).length;
+          meta.ooo.set(day, oooCount);
+          row.out_of_order[day] = oooCount;
+          const roomSold = reservationRows.filter((r: any) =>
+            fmt(r.date) === day && memberRtIds.includes(r.room_type_id) && folioStatus(r) !== 2 && folioStatus(r) !== 5
+          ).length;
+          row.room_sold[day] = roomSold;
+          const overbooking = memberRtIds.reduce((acc, rtId) => acc + (obByKey.get(day + ':' + String(rtId)) || 0), 0);
+          meta.cellValue.set(day, totalRoom + overbooking);
+          row[day] = totalRoom + overbooking;
+        }
+        data.push(row);
+        groupMeta.set(Number(gt.id), meta);
+      }
+
+      for (let i = 0; i < 3; i++) pushBlank();
+
+      // Total Room
+      const totalRow: any = { id: 0, name: 'Total Room', total: '' };
+      for (const day of dayList) totalRow[day] = totalRoomAll;
+      data.push(totalRow);
+
+      // Room Sold (folio != cancel only)
+      const resNotCancel = reservationRows.filter((r: any) => folioStatus(r) !== 2);
+      const soldCount = (day: string) => resNotCancel.filter((r: any) =>
+        fmt(r.date) === day && r.room_id != null && pluckRoomSet.has(Number(r.room_id))
+      ).length;
+      const soldRow: any = { id: 0, name: 'Room Sold', total: '' };
+      for (const day of dayList) soldRow[day] = soldCount(day);
+      data.push(soldRow);
+
+      // Out of Order
+      const isOooStrict = (w: any, day: string): boolean => {
+        const s = w.start_date ? fmt(w.start_date) : null;
+        const e = w.end_date ? fmt(w.end_date) : null;
+        if (!s || s > day) return false;
+        return e == null || e > day;
+      };
+      const oooCount = (day: string) => workOrderRows.filter((w: any) => isOooStrict(w, day)).length;
+      const oooRow: any = { id: 0, name: 'Out of Order', total: '' };
+      for (const day of dayList) oooRow[day] = oooCount(day);
+      data.push(oooRow);
+
+      // Blocked
+      const blockCount = (day: string) => (availByKey.get(day) || []).filter((rid) => pluckRoomSet.has(rid)).length;
+      const blockRow: any = { id: 0, name: 'Blocked', total: '' };
+      for (const day of dayList) blockRow[day] = blockCount(day);
+      data.push(blockRow);
+
+      // Available Room (Laravel quirk: OOO here uses end_date >= day)
+      const isOooLoose = (w: any, day: string): boolean => {
+        const s = w.start_date ? fmt(w.start_date) : null;
+        const e = w.end_date ? fmt(w.end_date) : null;
+        if (!s || s > day) return false;
+        return e == null || e >= day;
+      };
+      const availRow: any = { id: 0, name: 'Available Room', total: '' };
+      for (const day of dayList) {
+        availRow[day] = totalRoomAll - soldCount(day)
+          - workOrderRows.filter((w: any) => isOooLoose(w, day)).length
+          - blockCount(day);
+      }
+      data.push(availRow);
+
+      // Allotment Setup "x/y"
+      const setupCount = (day: string) => sumAllotmentData(allotmentRows.filter((ra: any) =>
+        fmt(ra.allotments.start_date) <= day && fmt(ra.allotments.end_date) >= day));
+      const usedCount = (day: string) => folioAllotmentRows.filter((f: any) =>
+        fmt(f.check_in_date) <= day && fmt(f.check_out_date) >= day)
+        .reduce((acc: number, f: any) => acc + (Math.round((new Date(fmt(f.check_out_date)).getTime() - new Date(fmt(f.check_in_date)).getTime()) / 86400000) + 1), 0);
+      const setupRow: any = { id: 0, name: 'Allotment Setup', total: '' };
+      for (const day of dayList) setupRow[day] = setupCount(day) + '/' + usedCount(day);
+      data.push(setupRow);
+
+      // Allotment Used
+      const usedRow: any = { id: 0, name: 'Allotment Used', total: '' };
+      for (const day of dayList) usedRow[day] = usedCount(day);
+      data.push(usedRow);
+
+      // Allotment Expired
+      const expiredCount = sumAllotmentData(allotmentExpiredRows);
+      const expiredRow: any = { id: 0, name: 'Allotment Expired', total: '' };
+      for (const day of dayList) expiredRow[day] = expiredCount;
+      data.push(expiredRow);
+
+      // Allotment Available
+      const allotAvailRow: any = { id: 0, name: 'Allotment Available', total: '' };
+      for (const day of dayList) allotAvailRow[day] = setupCount(day);
+      data.push(allotAvailRow);
+
+      // Occupancy rows (property-wide active rooms)
+      const totalRoomsProp = rooms.length;
+      const totalRoomsNoOoo = rooms.filter((r: any) => r.room_status !== 4).length;
+      const occupancyRow: any = { id: 0, name: 'Occupancy', total: '' };
+      for (const day of dayList) occupancyRow[day] = getOccupancy(totalRoomsProp, soldCount(day));
+      data.push(occupancyRow);
+
+      const occupancyOooRow: any = { id: 0, name: 'Occupancy with OOO', total: '' };
+      for (const day of dayList) occupancyOooRow[day] = getOccupancy(totalRoomsNoOoo, soldCount(day));
+      data.push(occupancyOooRow);
+
+      // Occupancy ext GPT — exclude GIT+pending
+      const soldGptCount = (day: string) => resNotCancel.filter((r: any) => {
+        if (fmt(r.date) !== day || r.room_id == null || !pluckRoomSet.has(Number(r.room_id))) return false;
+        const t = r.folios?.type_reservation;
+        return (t === 'git' && folioStatus(r) !== 5) || t !== 'git';
+      }).length;
+      const occupancyGptRow: any = { id: 0, name: 'Occupancy ext GPT', total: '' };
+      for (const day of dayList) occupancyGptRow[day] = getOccupancy(totalRoomsProp, soldGptCount(day));
+      data.push(occupancyGptRow);
+
+      // Total Arrivals Pax
+      const arrivalsPaxRow: any = { id: 0, name: 'Total Arrivals Pax', total: '' };
+      for (const day of dayList) {
+        const rowsD = resNotCancel.filter((r: any) =>
+          fmt(r.folios?.check_in_date) === day && r.room_id != null && pluckRoomSet.has(Number(r.room_id)));
+        const uniqFolio = [...new Set(rowsD.map((r: any) => String(r.folio_id)))];
+        arrivalsPaxRow[day] = uniqFolio.reduce((acc, fid) => {
+          const r: any = reservationRows.find((x: any) => String(x.folio_id) === fid);
+          return acc + (r.adult || 0) + (r.child || 0);
+        }, 0);
+      }
+      data.push(arrivalsPaxRow);
+
+      // Total Departures Pax (PHP quirk preserved: adult ?? (0 + child ?? 0))
+      const departureFolios = await prisma.folios.findMany({
+        where: { property_id: pid, deleted_at: null, check_out_date: { gte: start, lte: end }, status_reservation: { not: 2 } },
+        select: { check_out_date: true, reservations: { select: { adult: true, child: true }, take: 1, orderBy: { id: 'asc' } } },
+      });
+      const depPaxRow: any = { id: 0, name: 'Total Departures Pax', total: '' };
+      for (const day of dayList) {
+        depPaxRow[day] = departureFolios.filter((f: any) => fmt(f.check_out_date) === day).reduce((acc: number, f: any) => {
+          const first: any = f.reservations?.[0];
+          const a = first?.adult;
+          return acc + (a != null ? a : (first?.child || 0));
+        }, 0);
+      }
+      data.push(depPaxRow);
+
+      // Total Arrivals Rooms
+      const arrRoomRow: any = { id: 0, name: 'Total Arrivals Rooms', total: '' };
+      for (const day of dayList) {
+        arrRoomRow[day] = resNotCancel.filter((r: any) =>
+          fmt(r.folios?.check_in_date) === day && fmt(r.date) === day && pluckRoomSet.has(Number(r.room_id))).length;
+      }
+      data.push(arrRoomRow);
+
+      // Total Departures Rooms
+      const depRoomRow: any = { id: 0, name: 'Total Departures Rooms', total: '' };
+      for (const day of dayList) {
+        depRoomRow[day] = departureFolios.filter((f: any) => fmt(f.check_out_date) === day).length;
+      }
+      data.push(depRoomRow);
+
+      // ── Tooltip pass (Laravel :2291-2389) ──
+      for (const item of data) {
+        item.double_click_action = {};
+        for (const day of dayList) {
+          item.double_click_action[day] = [
+            { id: item.id, type: 'form', key: 'daily_rate_code', date: day, label: 'Daily Rate Code', endpoint: '/cms/statistic/statistic-room-type/add-rate-code', form: [{ label: 'Message', key: 'text', type: 'base', type_input: 'text' }] },
+            { id: item.id, type: 'form', key: 'add_message', date: day, label: 'Add Message', endpoint: '/cms/statistic/statistic-room-type/add-message', form: [{ label: 'Message', key: 'text', type: 'textarea', type_input: 'text' }] },
+            { id: item.id, type: 'info', key: 'more_info', date: day, label: 'More Info', description: item[day] },
+            { id: item.id, type: 'url', key: 'print', date: day, label: 'Print', url: '' },
+          ];
+
+          if (item.id > 0) {
+            const meta = groupMeta.get(item.id)!;
+            const dataCurrent = item[day];
+            const soldRes = reservationRows.filter((r: any) =>
+              meta.memberRtIds.includes(r.room_type_id) && fmt(r.date) === day &&
+              folioStatus(r) !== 2 && folioStatus(r) !== 5);
+            const pendingRes = reservationRows.filter((r: any) =>
+              meta.memberRtIds.includes(r.room_type_id) && fmt(r.date) === day && folioStatus(r) === 5);
+            const resLine = (r: any) => `Folio #${r.folios?.folio_number ?? ''} Room#${roomsById.get(r.room_id)?.name ?? 'Unassign'} IN-${fmt(r.folios?.check_in_date)} OUT-${fmt(r.folios?.check_out_date)}`;
+            let description = `Room Type Group ${item.name} on ${new Date(day + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }).replace(/,/g, '')}<br>`;
+            const available = Number(dataCurrent) - soldRes.length - (meta.blocked.get(day) || 0) - (meta.ooo.get(day) || 0);
+            description += `Available Room = ${available}<br>`;
+            description += `Rooms Sold = ${soldRes.length}<br>`;
+            description += `Blocked Room = ${meta.blocked.get(day) || 0}<br>`;
+            description += `Out of Order = ${meta.ooo.get(day) || 0}<br>`;
+            description += '<br>';
+            description += 'Reserved Room: <br>';
+            description += soldRes.map(resLine).join('<br>');
+            description += '<br>';
+            description += 'Pending Reservation: <br>';
+            description += pendingRes.map(resLine).join('<br>');
+            item[day] = getTooltip(description, available);
+          } else {
+            item[day] = getTooltip(item[day]);
+          }
+        }
+      }
+
+      success(res, bigintToNumber(data), 'Data has been loaded', 200, {
+        table,
+        permission: getPermissionFlags(req.user, 1141),
+        pagination: laravelPaging(data.length, 9999, 1),
+      } as any);
+    } catch (err: any) { console.error('Statistic room type grouping error:', err); error(res, 'Failed to load statistic grouping', 500); }
+  }
+
   static async roomStatisticGrid(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
