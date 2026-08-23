@@ -738,6 +738,117 @@ export function formatSystemBalanceData(rows: any[], type: string) {
   };
 }
 
+
+// ── Security Audit log helpers (Laravel LogController parity) ──
+const LOG_EXCLUDE_KEYS = ['id', 'updated_by', 'updated_at', 'created_by', 'created_at', 'deleted_by', 'deleted_at', 'property_id'];
+const LOG_HIDDEN_KEYS = [
+  'id', 'code_name', 'parent', 'code', 'folio_id', 'reservation_id', 'nationality_id', 'country_id',
+  'room_id', 'room_type_id', 'company_profile_id', 'guest_profile_id', 'model_id', 'model_type',
+  'type_payment_id', 'type_amount', 'source', 'rate_id', 'uuid',
+  'updated_by', 'created_by', 'deleted_by', 'property_id',
+];
+const LOG_CUSTOM_BOOL_LABELS: Record<string, { yes: string; no: string }> = {
+  is_cancel: { yes: 'Cancelled', no: 'Active' },
+  is_checkin: { yes: 'Checked In', no: 'Not Checked In' },
+  is_early_checkout: { yes: 'Early Checkout', no: 'Normal' },
+  is_long_stay: { yes: 'Long Stay', no: 'Regular' },
+  is_compliment_tour_leader: { yes: 'Complimentary', no: 'Regular' },
+  is_do_not_disturb: { yes: 'Do Not Disturb', no: '' },
+};
+const LOG_STATUS_MAPS: Record<string, Record<number, string>> = {
+  status_reservation: { 0: 'Check In', 1: 'Check Out', 2: 'Cancelled', 3: 'Reservation', 4: 'In House', 5: 'Pending' },
+  room_status: { 0: 'Vacant', 1: 'Occupied', 2: 'Due Out', 3: 'Blocked', 4: 'Out of Order' },
+  maid_status: { 0: 'Clean', 1: 'Dirty', 2: 'Maid in Room', 3: 'Inspection Required' },
+};
+const escHtml = (s: any): string =>
+  String(s ?? '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c] as string));
+const headlineClass = (subjectType: string | null | undefined): string => {
+  const base = String(subjectType ?? '').split('\\').pop() ?? '';
+  return base.replace(/([a-z\d])([A-Z])/g, '$1 $2');
+};
+const titleCaseKey = (k: string): string =>
+  k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+const displayValueFor = (key: string, value: any): any => {
+  const map = LOG_STATUS_MAPS[key];
+  if (map) {
+    if (typeof value === 'number' || /^\d+$/.test(String(value ?? ''))) {
+      const n = Number(value);
+      if (map[n] !== undefined) return map[n];
+    }
+    return typeof value === 'string' && value.trim() !== '' ? value : '-';
+  }
+  if (key.startsWith('is_')) {
+    let norm: boolean | null = null;
+    if (value === true || value === 1 || value === '1' || value === 'true') norm = true;
+    else if (value === false || value === 0 || value === '0' || value === 'false') norm = false;
+    if (norm === null) return value;
+    const custom = LOG_CUSTOM_BOOL_LABELS[key];
+    if (custom) return norm ? custom.yes : custom.no;
+    return norm ? 'Yes' : 'No';
+  }
+  return value;
+};
+
+function buildHistoriesModal(log: any, exclude: string[]): string {
+  const isKosong = (v: any): boolean =>
+    v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0) ||
+    (typeof v === 'string' && v.trim() === '') || String(v) === '\u2192';
+  let props: any = {};
+  try { props = JSON.parse(log.properties ?? '{}'); } catch { props = {}; }
+  const old: any = props.old ?? {};
+  const nw: any = props.attributes ?? {};
+
+  const modalId = `modal-${String(log.id)}`;
+  let html = `<div id="${modalId}" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">`;
+  html += '<div class="bg-white rounded-xl shadow-2xl w-11/12 md:w-3/4 lg:w-3/5 max-h-[90vh] overflow-hidden flex flex-col">';
+  html += '<div class="flex justify-between items-center px-6 py-4 border-b bg-gradient-to-r from-gray-50 to-gray-100">';
+  html += `<h2 class="text-xl font-bold text-gray-900">Security Audit Details <span class="text-sm font-normal text-gray-500">(${escHtml(headlineClass(log.subject_type))})</span></h2>`;
+  html += `<button class="text-gray-500 hover:text-red-600 text-2xl font-bold transition" onclick="document.getElementById('${modalId}').classList.add('hidden')">&times;</button>`;
+  html += '</div>';
+  html += '<div class="overflow-y-auto flex-1 p-6 space-y-6">';
+  html += '<div class="bg-blue-50 border rounded-lg p-4"><h3 class="font-bold mb-3">Audit Information</h3><div class="space-y-1 text-sm">';
+  html += `<div><strong>Event :</strong> ${escHtml(String(log.event ?? '').toUpperCase())}</div>`;
+  html += `<div><strong>Model :</strong> ${escHtml(String(log.subject_type ?? '').split('\\').pop() ?? '')}</div>`;
+  html += `<div><strong>Datetime :</strong> ${escHtml(new Date(log.created_at).toISOString().slice(0, 19).replace('T', ' '))}</div>`;
+  html += '</div></div>';
+  html += '<div><h3 class="text-lg font-semibold text-gray-800 mb-4">Changes</h3>';
+
+  let rowHtml = '';
+  let changeCount = 0;
+  for (const key of Object.keys(nw)) {
+    if (LOG_HIDDEN_KEYS.includes(key) || exclude.includes(key)) continue;
+    const value = nw[key];
+    if (key === 'data') {
+      const oldData = old.data ?? {};
+      const newData = value ?? {};
+      if (newData && typeof newData === 'object') {
+        for (const subKey of Object.keys(newData)) {
+          if (LOG_HIDDEN_KEYS.includes(subKey)) continue;
+          const oldSub = (oldData as any)[subKey] ?? null;
+          if (JSON.stringify(newData[subKey]) === JSON.stringify(oldSub)) continue;
+          changeCount++;
+          const dispOld = oldSub !== null && typeof oldSub === 'object' ? JSON.stringify(oldSub) : String(oldSub ?? '');
+          const dispNew = newData[subKey] !== null && typeof newData[subKey] === 'object' ? JSON.stringify(newData[subKey]) : String(newData[subKey] ?? '');
+          rowHtml += `<div class="border rounded-lg p-3 mb-2"><div class="font-medium text-gray-700 mb-1">${titleCaseKey(subKey)}</div><div class="text-sm"><span class="line-through text-red-600">${escHtml(dispOld)}</span> &rarr; <span class="text-green-700 font-semibold">${escHtml(dispNew)}</span></div></div>`;
+        }
+      }
+      continue;
+    }
+    const oldValue = old[key] ?? null;
+    const dispNew = displayValueFor(key, value);
+    const dispOld = displayValueFor(key, oldValue);
+    if (isKosong(dispNew) && isKosong(dispOld)) continue;
+    if (dispNew == dispOld) continue;
+    changeCount++;
+    rowHtml += `<div class="border rounded-lg p-3 mb-2"><div class="font-medium text-gray-700 mb-1">${titleCaseKey(key)}</div><div class="text-sm"><span class="line-through text-red-600">${escHtml(dispOld)}</span> &rarr; <span class="text-green-700 font-semibold">${escHtml(dispNew)}</span></div></div>`;
+  }
+
+  html += changeCount === 0
+    ? '<div class="text-center text-gray-500 italic py-8">No Changes Found</div>'
+    : rowHtml;
+  html += '</div></div></div></div>';
+  return html;
+}
 export class SystemController {
   static async shiftConfirmationList(req: Request, res: Response): Promise<void> {
     try {
@@ -1615,6 +1726,7 @@ export class SystemController {
     }
   }
 
+
   static async logList(req: Request, res: Response): Promise<void> {
     try {
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -1641,10 +1753,18 @@ export class SystemController {
         const pascal = headline.replace(/([A-Z])/g, (m, p) => (headline.indexOf(m) === 0 ? m : ' ' + m)).split(' ').filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join('');
         subjectType = 'App\\Models\\' + (pascal || headline);
       }
+      // Laravel :253-255 — &type= filter → App\Models\{Type}
+      const typeParam = req.query.type as string;
+      if (typeParam && !subjectType) {
+        subjectType = 'App\\Models\\' + typeParam.charAt(0).toUpperCase() + typeParam.slice(1);
+      }
+
+      const hasNumericId = !!idRaw && idRaw !== 'null' && idRaw !== 'undefined' && /^\d+$/.test(idRaw);
+      const isSpecificModuleRequest = !!(subjectType && hasNumericId);
 
       const where: any = {};
       if (subjectType) where.subject_type = subjectType;
-      if (idRaw && idRaw !== 'null' && idRaw !== 'undefined') where.subject_id = BigInt(idRaw);
+      if (hasNumericId) where.subject_id = BigInt(idRaw);
       if (dateStr) {
         where.created_at = { gte: new Date(dateStr + 'T00:00:00.000Z'), lte: new Date(dateStr + 'T23:59:59.999Z') };
       }
@@ -1758,6 +1878,48 @@ export class SystemController {
         : data;
       const pageData = filtered;
 
+      const permission = { view: true, add: false, edit: false, delete: false, active: false, approve: false, reject: false };
+      const includeModal = req.query.include_modal !== 'false'; // Laravel default true
+
+      // Fast path (Laravel :79-106): module+id — skip hasRealChanges, title+modal format,
+      // synthetic total via limit+1 probe.
+      if (isSpecificModuleRequest) {
+        const fastRows = pageData.map((log: any) => {
+          const props = parseProps(log.properties);
+          let modalHtml = '';
+          if (includeModal) modalHtml = buildHistoriesModal(log, LOG_EXCLUDE_KEYS);
+          const title = `${String(log.event ?? '').replace(/\b\w/g, (c) => c.toUpperCase())}. ${headline(log.subject_type)}`;
+          let html = `<div class="flex flex-col-reverse"><div class="grid grid-cols-2 gap-4 p-4 border-b border-gray-200"><div><div class="font-bold">${title}</div></div>`;
+          if (includeModal) {
+            html += `<div class="text-right"><button type="button" class="bg-orange text-black px-3 py-1 rounded-lg" onclick="document.getElementById('modal-${String(log.id)}').classList.remove('hidden')">View Details</button></div>`;
+          }
+          html += '</div>';
+          html += modalHtml;
+          html += '</div>';
+          return {
+            id: Number(log.id),
+            log_name: log.log_name ?? null,
+            batch_uuid: log.batch_uuid ?? null,
+            event: log.event ?? null,
+            subject_type: { value: log.subject_type, label: headline(log.subject_type) },
+            properties: props,
+            description: html,
+            created_at: log.created_at ? new Date(log.created_at).toISOString().slice(0, 19).replace('T', ' ') : '',
+            causer: causerMap.get(log.causer_id as any) ?? 'System',
+            type: headline(log.subject_type),
+            is_view: false,
+            is_edit: false,
+            is_need_approval: false,
+          };
+        });
+        success(res, fastRows, 'Success', 200, {
+          table: LOG_TABLE,
+          permission,
+          pagination: { current_page: page, last_page: Math.ceil((total + 1) / limit), per_page: limit, total: total + (pageData.length === limit ? 1 : 0), from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        });
+        return;
+      }
+
       const rows = pageData
         .filter((log) => hasRealChanges(log))
         .map((log) => {
@@ -1792,7 +1954,13 @@ export class SystemController {
           if (extraInfo !== '') title += ` (${extraInfo})`;
           if (rightTag !== '') title += ` <span class="text-gray-500 font-normal">• ${rightTag.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c] as string))}</span>`;
 
-          const html = `<div class="flex flex-col-reverse"><div class="grid grid-cols-2 gap-4 p-4 border-b border-gray-200"><div><div class="font-bold">${title}</div></div></div></div>`;
+          let html = `<div class="grid grid-cols-2 gap-4 p-4 border-b border-gray-200"><div><div class="font-bold">${title}</div></div>`;
+          if (includeModal) {
+            html += `<div class="text-right"><button type="button" class="bg-orange text-black px-3 py-1 rounded-lg" onclick="document.getElementById('modal-${String(log.id)}').classList.remove('hidden')">View Details</button></div>`;
+          }
+          html += '</div>';
+          if (includeModal) html += buildHistoriesModal(log, LOG_EXCLUDE_KEYS);
+          const wrappedHtml = `<div class="flex flex-col-reverse">${html}</div>`;
 
           return {
             id: Number(log.id),
@@ -1800,7 +1968,7 @@ export class SystemController {
             batch_uuid: log.batch_uuid ?? null,
             event: log.event ?? null,
             subject_type: { value: log.subject_type, label: headline(log.subject_type) },
-            description: html,
+            description: wrappedHtml,
             created_at: log.created_at ? new Date(log.created_at).toISOString().slice(0, 19).replace('T', ' ') : '',
             causer: log.causer_id !== null && log.causer_id !== undefined ? causerMap.get(log.causer_id) ?? 'System' : 'System',
             type: headline(log.subject_type),
@@ -1810,7 +1978,6 @@ export class SystemController {
           };
         });
 
-      const permission = { view: true, add: false, edit: false, delete: false, active: false, approve: false, reject: false };
       success(res, rows, 'Success', 200, {
         table: LOG_TABLE,
         permission,
