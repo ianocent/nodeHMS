@@ -3,16 +3,18 @@ import { StaahController } from '../controllers/staah.controller';
 import { StaahWebhookController } from '../controllers/staah-webhook.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
+import { staahRateLimit } from '../middleware/staahSecurity';
 
 const router = Router();
 
-// ═══════════════════════════════════════════════════
-// STAAH Webhook Routes (no auth — called by Staah)
-// ═══════════════════════════════════════════════════
+// ─────────────────────────────────────────────────
+// STAAH Webhook Routes (no auth - called by Staah)
+// Rate-limited: Laravel parity 10k/hour per source
+// ─────────────────────────────────────────────────
 
-router.get('/staah/webhook/health', StaahWebhookController.healthCheck);
-router.post('/staah/webhook/reservation-push', StaahWebhookController.handleReservationPush);
-router.post('/staah/webhook/confirm-booking', StaahWebhookController.processConfirmBooking);
+router.get('/staah/webhook/health', staahRateLimit, StaahWebhookController.healthCheck);
+router.post('/staah/webhook/reservation-push', staahRateLimit, StaahWebhookController.handleReservationPush);
+router.post('/staah/webhook/confirm-booking', staahRateLimit, StaahWebhookController.processConfirmBooking);
 
 // ═══════════════════════════════════════════════════
 // STAAH Interface Management

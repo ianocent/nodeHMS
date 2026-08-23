@@ -11,6 +11,7 @@ import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { dataSearch, applySearchField } from '../utils/search';
 import { AuthController } from './auth.controller';
 import { enqueueJob } from '../config/queue';
+import { sendTemplateEmail } from '../services/mail.service';
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
@@ -1034,6 +1035,17 @@ room: roomName,
         dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
         dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
       });
+
+      // Laravel parity (Folio.php:1408-1419): email builder "Check In" to guest.
+      // Skipped silently when the template is absent; never blocks the response.
+      if (folio.guest_profile_id) {
+        const guest = await prisma.guest_profiles.findUnique({
+          where: { id: folio.guest_profile_id },
+          select: { email: true },
+        }).catch(() => null);
+        sendTemplateEmail(prisma, 'Check In', guest?.email).catch(() => {});
+      }
+
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_in.id }, 'Check-in success');
     } catch (err: any) {
       console.error('FrontDesk checkIn error:', err);
@@ -1129,6 +1141,17 @@ room: roomName,
         dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
         dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
       });
+
+      // Laravel parity (Folio.php:1811-1820): email builder "Check Out" to guest
+      // with hardcoded fallbacks; never blocks the response.
+      if (folio.guest_profile_id) {
+        const guest = await prisma.guest_profiles.findUnique({
+          where: { id: folio.guest_profile_id },
+          select: { email: true },
+        }).catch(() => null);
+        sendTemplateEmail(prisma, 'Check Out', guest?.email, 'Check Out', 'Your reservation has been checked out').catch(() => {});
+      }
+
       success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_out.id, balance }, 'Check-out success');
     } catch (err: any) {
       console.error('FrontDesk checkOut error:', err);
@@ -1507,15 +1530,19 @@ room: roomName,
         if (tp.card_name && !body.card_name) { badRequest(res, 'The card name field is required.'); return; }
         if (tp.voucher && !body.voucher) { badRequest(res, 'The voucher field is required.'); return; }
 
-        // Laravel :553-575 — company AR stop-credit check
+        // Laravel :553-575 — company AR stop-credit check.
+        // Laravel computes $hasCredit but never uses it (dead code). Here we make
+        // the flag meaningful: a company flagged is_stop_credit cannot receive
+        // new company-AR payment postings.
         if (body.bill_to && String(body.bill_to).endsWith('-company')) {
           const cpId = String(body.bill_to).split('-')[0];
-          const [cp, payment] = await Promise.all([
-            prisma.company_profiles.findUnique({ where: { id: BigInt(cpId) }, select: { is_stop_credit: true } }),
-            Promise.resolve(tp),
-          ]);
-          if (cp && payment.is_company_ar === true && !cp.is_stop_credit) {
-            // Laravel sets $hasCredit=true but never uses it — no-op parity
+          const cp = await prisma.company_profiles.findUnique({
+            where: { id: BigInt(cpId) },
+            select: { is_stop_credit: true },
+          });
+          if (cp && tp.is_company_ar === true && cp.is_stop_credit === true) {
+            badRequest(res, 'Cant make Transactions, credit is stopped for this company');
+            return;
           }
         }
       }

@@ -7,6 +7,7 @@ import { folioBalanceWithoutPosting, transferTransactionsForCheckout } from './f
 import { AuthController } from './auth.controller';
 import { enqueueJob } from '../config/queue';
 import { priceNight } from '../utils/reservationPricing';
+import { availableRoom } from '../utils/roomAvailability';
 
 // Wrapper for drag/copy rebuild — priced per-night row creation against an arbitrary tx client.
 function priceNightPublic(tx: any, opts: {
@@ -876,7 +877,7 @@ export class FolioController {
         // Room status stays whatever check-out left behind (vacant+dirty). Not emulated.
 
         // GIT parent → children back to check_in with due_out rooms (= Laravel :1902-1935).
-        // AvailableRoom 400-guard skipped (room-availability engine not ported).
+        // Includes AvailableRoom 400-guard per child room.
         const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
         if (isGitParent) {
           const children = await prisma.folios.findMany({
@@ -890,9 +891,15 @@ export class FolioController {
             }
             await prisma.folios.update({ where: { id: child.id }, data });
             const childResvs = await prisma.reservations.findMany({ where: { folio_id: child.id, deleted_at: null }, select: { room_id: true, room_id_next: true } });
-            const cRoomIds = childResvs.map(r => r.room_id_next ?? r.room_id).filter((x): x is bigint => x != null);
-            if (cRoomIds.length > 0) {
-              await prisma.rooms.updateMany({ where: { id: { in: cRoomIds } }, data: { room_status: 2, updated_at: new Date() } });
+            for (const r of childResvs) {
+              const rid = r.room_id_next ?? r.room_id;
+              if (rid == null) continue;
+              const ok = await availableRoom(prisma, rid, bStart, bEnd, id);
+              if (!ok) {
+                badRequest(res, 'Room Not Available');
+                return;
+              }
+              await prisma.rooms.update({ where: { id: rid }, data: { room_status: 2, updated_at: new Date() } });
             }
           }
         }

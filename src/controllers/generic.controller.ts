@@ -121,7 +121,22 @@ function sanitizeBody(body: any): any {
 }
 
 // Models whose rows must stay scoped to the authenticated user's property.
-const PROPERTY_SCOPED_MODELS = new Set(['shift_roster', 'roster_list', 'rosters', 'content_rooms', 'payment_matrices', 'staah_interfaces', 'staah_reservations', 'staah_ota_company_mappings', 'stop_sells']);
+// Models whose tables carry property_id and are auto-scoped in Laravel
+// (HasProperties global scope). Route params arrive in singular or plural
+// form depending on the caller, so both spellings are matched.
+const PROPERTY_SCOPED_MODELS = new Set([
+  'shift_roster', 'shift_rosters', 'roster_list', 'roster_lists', 'rosters',
+  'content_room', 'content_rooms', 'payment_matrix', 'payment_matrices',
+  'staah_interface', 'staah_interfaces', 'staah_reservation', 'staah_reservations',
+  'staah_ota_company_mapping', 'staah_ota_company_mappings', 'stop_sell', 'stop_sells',
+  // operational masters (HasProperties parity sweep 2026-08-23)
+  'baggage', 'baggages', 'holiday', 'holidays',
+  'lost_and_found', 'lost_and_founds', 'wake_up_call', 'wake_up_calls',
+  'phonebook', 'phonebooks', 'stock', 'stocks',
+  'email_builder', 'email_builders', 'email_group', 'email_groups',
+  'cancelation_rule', 'cancelation_rules', 'cancelation_rule_date', 'cancelation_rule_dates',
+  'day_use_rate', 'day_use_rates', 'car_park', 'car_parks',
+]);
 
 // menuId-based permission per generic model (Laravel hasCrudPermission parity).
 const MODEL_MENU: Record<string, number> = {
@@ -280,7 +295,11 @@ export class GenericController {
         if (['page', 'limit', 'search', 'sort', 'order', 'trash'].includes(k)) continue;
         if (k.endsWith('_id') && String(v)) where[k] = BigInt(String(v));
       };
-      if (PROPERTY_SCOPED_MODELS.has(model) && !where.property_id && req.user?.lastProperty) {
+      const pluralForm = this.toPlural(model);
+      if (
+        (PROPERTY_SCOPED_MODELS.has(model) || PROPERTY_SCOPED_MODELS.has(pluralForm))
+        && !where.property_id && req.user?.lastProperty
+      ) {
         where.property_id = BigInt(req.user.lastProperty);
       }
       if (req.query.group && String(req.query.group)) {

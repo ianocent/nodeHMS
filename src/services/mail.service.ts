@@ -99,3 +99,41 @@ export async function sendBookingConfirmationEmails(
     });
   }
 }
+
+// EmailBuilder template dispatch (Laravel Folio.php:1408-1419 / 1811-1820 parity):
+// look up email_builders by template_name, render body HTML raw (blade view
+// wraps it in a minimal HTML shell), send to the guest. Never throws —
+// Laravel swallows Throwable too.
+export async function sendTemplateEmail(
+  prisma: any,
+  templateName: string,
+  to: string | null | undefined,
+  fallbackSubject = templateName,
+  fallbackBody = ''
+): Promise<boolean> {
+  if (!to || !String(to).trim()) return false;
+  let subject = fallbackSubject;
+  let html = fallbackBody;
+  try {
+    const tpl: any = await prisma.email_builders.findFirst({
+      where: { template_name: templateName, deleted_at: null },
+      select: { subject: true, body: true },
+    });
+    if (tpl) {
+      subject = tpl.subject ?? fallbackSubject;
+      html = tpl.body ?? fallbackBody;
+    } else if (!html) {
+      // Laravel check-in path sends nothing when the template is absent
+      return false;
+    }
+  } catch {
+    // template lookup failed — fall through with fallback content
+  }
+  const wrapped = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${esc(subject)}</title></head><body><div style="font-family: Helvetica,Arial,sans-serif;min-width:1000px;overflow:auto;line-height:2"><div style="padding:20px 0">${html}</div></div></body></html>`;
+  try {
+    return await sendMail({ to, subject, html: wrapped });
+  } catch (err: any) {
+    console.error(`[mail] ${templateName} dispatch failed:`, err?.message);
+    return false;
+  }
+}

@@ -166,6 +166,26 @@ function paggingMetaLocal(total: number, limit: number, page: number) {
   };
 }
 
+// eta/etd arrive as "HH:MM" strings (FE) or Date-parseable values; the column is
+// DateTime — combine a bare time with the night date so it stays on that day.
+function parseTimeLike(value: any, base: Date): Date | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
+  const s = String(value).trim();
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (m) {
+    const d = new Date(base);
+    d.setHours(Number(m[1]), Number(m[2]), Number(m[3] ?? 0), 0);
+    return d;
+  }
+  const parsed = new Date(s);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function dayKeyF(d: Date | string): string {
+  return new Date(d).toISOString().slice(0, 10);
+}
+
 function rateTableColumns(codePostOptions: any[], withStatus: boolean): any[] {
   const cols: any[] = [];
   if (withStatus) {
@@ -1329,9 +1349,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─────────────────────────────────────────────────────────────
   // POST /api/reservations
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─────────────────────────────────────────────────────────────â”€
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -1422,11 +1442,11 @@ success(res, formatted, 'Success', 200, {
       const rateRows = uniqueRateIds.length
         ? await prisma.rates.findMany({
             where: { id: { in: uniqueRateIds.map((r) => BigInt(r)) } },
-            select: { id: true, code_post_id: true, name: true },
+            select: { id: true, code_post_id: true, code_post_extra_bed_id: true, name: true },
           })
         : [];
       const rateByIdPricing = new Map<number, any>(rateRows.map((r) => [Number(r.id), r]));
-      const codePostIds = [...new Set(rateRows.map((r) => r.code_post_id).filter(Boolean))];
+      const codePostIds = [...new Set(rateRows.flatMap((r) => [r.code_post_id, r.code_post_extra_bed_id]).filter(Boolean))] as bigint[];
       const codePostRows = codePostIds.length
         ? await prisma.code_posts.findMany({ where: { id: { in: codePostIds } } })
         : [];
@@ -1558,6 +1578,26 @@ success(res, formatted, 'Success', 200, {
               promos: await promosForNight(item.rate_id ? String(item.rate_id) : null, nightDate, getNight),
             });
 
+            // Extra-bed pricing (Folio.php:2454-2462 + 2490-2497):
+            // RateExtraBedInclusive cost × add_bed, tax via rate.code_post_extra_bed.
+            let ebAmount = 0, ebService = 0, ebPb1 = 0, ebTax3 = 0, ebTotal = 0;
+            const addBedCount = Number(item.add_bed || 0);
+            if (addBedCount > 0 && rateIdBig) {
+              const extraBeds = await prisma.rate_extra_bed_inclusives.findMany({
+                where: { rate_id: rateIdBig, deleted_at: null },
+              });
+              const ebBase = extraBeds.reduce((s, it) => s + Number(it.cost ?? 0) * addBedCount, 0);
+              const ebPostId = rateRows.find((r) => Number(r.id) === Number(rateIdBig))?.code_post_extra_bed_id;
+              const cpEb = ebPostId ? codePostById.get(Number(ebPostId)) : null;
+              if (cpEb) {
+                const calcEb = calculateCodePost(cpEb as any, ebBase, isTax);
+                ebAmount = calcEb.amount; ebService = calcEb.service;
+                ebPb1 = calcEb.pb1; ebTax3 = calcEb.tax3; ebTotal = calcEb.total;
+              } else {
+                ebAmount = ebBase; ebTotal = ebBase;
+              }
+            }
+
             await prisma.reservations.create({
               data: {
                 property_id: propertyId!,
@@ -1568,6 +1608,14 @@ success(res, formatted, 'Success', 200, {
                 adult: item.adult || 1,
                 child: item.child || 0,
                 add_bed: item.add_bed || 0,
+                // Per-item fields persisted by Laravel saveReservation (:2610-2633)
+                eta: parseTimeLike(item.eta, nightDate),
+                etd: parseTimeLike(item.etd, nightDate),
+                is_24_hour: item.is_24_hour === true || Number(item.is_24_hour) === 1 ? 1 : 0,
+                package_id: item.package_id ? BigInt(item.package_id) : null,
+                quantity: Number(item.quantity ?? 1),
+                quantity_extra_day_use: Number(item.quantity_extra_day_use ?? 0),
+                is_extra_day_use: item.is_extra_day_use === true || Number(item.is_extra_day_use) === 1 ? 1 : 0,
                 check_in_date: new Date(item.check_in_date),
                 check_out_date: itemCheckOut,
                 date: nightDate,
@@ -1580,6 +1628,11 @@ success(res, formatted, 'Success', 200, {
                 service_charge: pricing.service_charge,
                 pb1: pricing.pb1,
                 tax3: pricing.tax3,
+                amount_extra_bed: ebAmount,
+                service_charge_extra_bed: ebService,
+                pb1_extra_bed: ebPb1,
+                tax3_extra_bed: ebTax3,
+                total_extra_bed: ebTotal,
                 data: JSON.stringify({
                   rate_price: pricing.rate_price,
                   service: pricing.service_charge,
@@ -2337,49 +2390,153 @@ success(res, formatted, 'Success', 200, {
 
       // Update reservation items if provided
       if (reservation_list && reservation_list.length > 0 && existing.type_reservation !== 'git') {
-        // Delete old reservations
-        await prisma.reservations.updateMany({
-          where: { folio_id: id, deleted_at: null },
-          data: { deleted_at: new Date() },
-        });
+        // Laravel Folio.php:2524-2530 / 2639-2642 / 2656-2664 — nights already
+        // posted by the night audit are NEVER deleted or overwritten; only
+        // unposted nights outside the new range are removed.
+        const property = await prisma.properties.findUnique({ where: { id: existing.property_id }, select: { is_tax: true } });
+        const isTaxUpd = (property as any)?.is_tax === 1;
+        const updRateIds = [...new Set(reservation_list.map((i: any) => String(i.rate_id)).filter((r: string) => r && r !== '0'))] as string[];
+        const updRateRows = updRateIds.length
+          ? await prisma.rates.findMany({
+              where: { id: { in: updRateIds.map((r) => BigInt(r)) } },
+              select: { id: true, code_post_id: true, name: true },
+            })
+          : [];
+        const updCpIds = [...new Set(updRateRows.map((r) => r.code_post_id).filter(Boolean))] as bigint[];
+        const updCpRows = updCpIds.length ? await prisma.code_posts.findMany({ where: { id: { in: updCpIds } } }) : [];
+        const updCpById = new Map<number, any>(updCpRows.map((c) => [Number(c.id), c]));
 
-        // Create new reservations
+        const dayKey = (d: Date) => new Date(d).toISOString().slice(0, 10);
+        const oldRows = await prisma.reservations.findMany({ where: { folio_id: id, deleted_at: null } });
+
         for (const item of reservation_list) {
           const itemCheckIn = new Date(item.check_in_date);
-          const itemCheckOut = new Date(item.check_out_date);
-          const nights = Math.ceil((itemCheckOut.getTime() - itemCheckIn.getTime()) / (1000 * 60 * 60 * 24));
+          let itemCheckOut = new Date(item.check_out_date);
+          let nights = Math.ceil((itemCheckOut.getTime() - itemCheckIn.getTime()) / (1000 * 60 * 60 * 24));
+          const itemIsDayUse = String(existing.type_reservation ?? '').toLowerCase() === 'day-use';
+          if (nights < 1 || itemIsDayUse) {
+            itemCheckOut = new Date(itemCheckIn);
+            itemCheckOut.setDate(itemCheckOut.getDate() + 1);
+            nights = Math.max(nights, 1);
+          }
+          const getNightUpd = itemIsDayUse ? 0 : nights;
+          const rateIdUpd = item.rate_id && String(item.rate_id) !== '0' ? BigInt(item.rate_id) : null;
+          const cpRow = rateIdUpd ? updCpById.get(Number(updRateRows.find((r) => Number(r.id) === Number(rateIdUpd))?.code_post_id ?? -1)) ?? null : null;
 
           for (let i = 0; i < nights; i++) {
             const nightDate = new Date(itemCheckIn);
             nightDate.setDate(nightDate.getDate() + i);
+            const key = dayKey(nightDate);
 
-            await prisma.reservations.create({
-              data: {
-                property_id: existing.property_id,
-                folio_id: id,
-                rate_id: item.rate_id ? BigInt(item.rate_id) : null,
-                room_type_id: item.room_type_id ? BigInt(item.room_type_id) : null,
-                room_id: item.room_id ? BigInt(item.room_id) : null,
-                room_type_id_next: item.room_type_id_next ? BigInt(item.room_type_id_next) : null,
-                room_id_next: item.room_id_next ? BigInt(item.room_id_next) : null,
-                adult: item.adult || 1,
-                child: item.child || 0,
-                add_bed: item.add_bed || 0,
-                check_in_date: itemCheckIn,
-                check_out_date: itemCheckOut,
-                date: nightDate,
-                status_reservation: updateData.status_reservation || existing.status_reservation,
-                status: STATUS_ACTIVE,
-                night: nights,
-                amount: 0,
-                amountt: 0,
-                total: 0,
-                service_charge: 0,
-                pb1: 0,
-                tax3: 0,
-                created_by: userId,
-              },
+            const postedRow = oldRows.find((r) => r.is_posting === 1 && r.date && dayKey(r.date) === key && !r.deleted_at);
+            if (postedRow) continue; // never touch audited nights
+
+            const pricing = await priceNight({
+              prisma,
+              rateId: rateIdUpd,
+              roomTypeId: item.room_type_id ? BigInt(item.room_type_id) : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null),
+              night: nightDate,
+              getNight: getNightUpd,
+              adult: Number(item.adult || 1),
+              child: Number(item.child || 0),
+              quantity: itemIsDayUse ? Number(item.quantity || 1) : 1,
+              isTax: isTaxUpd,
+              rateCodePost: cpRow,
+              promos: [],
             });
+
+            const rowData: any = {
+              rate_id: rateIdUpd,
+              rate_name: rateIdUpd ? updRateRows.find((r) => Number(r.id) === Number(rateIdUpd))?.name ?? null : null,
+              room_type_id: item.room_type_id ? BigInt(item.room_type_id) : null,
+              room_id: item.room_id ? BigInt(item.room_id) : null,
+              room_type_id_next: item.room_type_id_next ? BigInt(item.room_type_id_next) : null,
+              room_id_next: item.room_id_next ? BigInt(item.room_id_next) : null,
+              adult: item.adult || 1,
+              child: item.child || 0,
+              add_bed: item.add_bed || 0,
+              check_in_date: itemCheckIn,
+              check_out_date: itemCheckOut,
+              date: nightDate,
+              status_reservation: updateData.status_reservation || existing.status_reservation,
+              status: STATUS_ACTIVE,
+              night: nights,
+              amount: pricing.amount,
+              amountt: pricing.amount,
+              total: pricing.total,
+              service_charge: pricing.service_charge,
+              pb1: pricing.pb1,
+              tax3: pricing.tax3,
+              eta: parseTimeLike(item.eta, nightDate),
+              etd: parseTimeLike(item.etd, nightDate),
+              is_24_hour: item.is_24_hour === true || Number(item.is_24_hour) === 1 ? 1 : 0,
+              package_id: item.package_id ? BigInt(item.package_id) : null,
+              quantity: Number(item.quantity ?? 1),
+              quantity_extra_day_use: Number(item.quantity_extra_day_use ?? 0),
+              is_extra_day_use: item.is_extra_day_use === true || Number(item.is_extra_day_use) === 1 ? 1 : 0,
+              data: JSON.stringify({
+                rate_price: pricing.rate_price,
+                service: pricing.service_charge,
+                pb1: pricing.pb1,
+                tax3: pricing.tax3,
+                total: pricing.total,
+              }),
+              updated_by: userId,
+              updated_at: new Date(),
+            };
+
+            const existingRow = oldRows.find((r) => (!r.is_posting || r.is_posting === 0) && r.date && dayKey(r.date) === key && !r.deleted_at);
+            if (existingRow) {
+              await prisma.reservations.update({ where: { id: existingRow.id }, data: rowData });
+            } else {
+              await prisma.reservations.create({
+                data: { ...rowData, property_id: existing.property_id, folio_id: id, created_by: userId } as any,
+              });
+            }
+          }
+        }
+
+        // Remove unposted rows that fell outside the new stay window
+        const newNightKeys = new Set<string>();
+        for (const item of reservation_list) {
+          const ciI = new Date(item.check_in_date);
+          const coI = new Date(item.check_out_date);
+          const n = Math.max(1, Math.ceil((coI.getTime() - ciI.getTime()) / 86400000));
+          for (let i = 0; i < n; i++) {
+            const d = new Date(ciI);
+            d.setDate(d.getDate() + i);
+            newNightKeys.add(dayKey(d));
+          }
+        }
+        for (const row of oldRows) {
+          if (row.deleted_at || (row.is_posting ?? 0) === 1) continue;
+          if (row.date && !newNightKeys.has(dayKey(row.date))) {
+            await prisma.reservations.update({
+              where: { id: row.id },
+              data: { deleted_at: new Date(), deleted_by: userId },
+            });
+          }
+        }
+      }
+
+      // Room-status fixup on checked-in folios after dates changed
+      // (Laravel Folio.php:2671-2688): due_out → occupied when extended past
+      // business date; occupied → due_out when checkout lands on business date.
+      if ((updateData.status_reservation ?? existing.status_reservation) === STATUS_RESERVATION.check_in.id) {
+        const lastResv = await prisma.reservations.findFirst({
+          where: { folio_id: id, deleted_at: null },
+          orderBy: { date: 'desc' },
+        });
+        if (lastResv?.room_id) {
+          const room = await prisma.rooms.findUnique({ where: { id: lastResv.room_id } });
+          const bDateStr = await AuthController.getBusinessDate(existing.property_id ?? null);
+          const coStr = existing.check_out_date ? dayKeyF(existing.check_out_date) : null;
+          if (room && bDateStr && coStr) {
+            if (room.room_status === ROOM_STATUSES.due_out.id && coStr > bDateStr) {
+              await prisma.rooms.update({ where: { id: room.id }, data: { room_status: ROOM_STATUSES.occupied.id, updated_at: new Date() } });
+            } else if (room.room_status === ROOM_STATUSES.occupied.id && coStr === bDateStr) {
+              await prisma.rooms.update({ where: { id: room.id }, data: { room_status: ROOM_STATUSES.due_out.id, updated_at: new Date() } });
+            }
           }
         }
       }

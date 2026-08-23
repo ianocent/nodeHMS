@@ -58,6 +58,7 @@
     "firebase-admin": "^14.2.0",
     "multer": "^2.2.0",
     "mysql2": "^3.6.5",
+    "nodemailer": "^9.0.5",
     "pg": "^8.11.3",
     "pg-boss": "^12.27.0",
     "puppeteer-core": "^25.7.0"
@@ -69,6 +70,7 @@
     "@types/jest": "^30.0.0",
     "@types/multer": "^2.2.0",
     "@types/node": "^26.1.1",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.20.0",
     "@types/supertest": "^7.2.1",
     "jest": "^30.4.2",

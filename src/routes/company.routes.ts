@@ -2,6 +2,10 @@ import { Router } from 'express';
 import { CompanyController } from '../controllers/company.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
+import { makeUpload } from '../utils/upload';
+
+// (Laravel CompanyProfileDocumentController: 'required|file|mimes:pdf,jpg,png,doc,docx|max:2048')
+const documentUpload = makeUpload(['pdf', 'jpg', 'png', 'doc', 'docx']);
 
 const router = Router();
 
@@ -56,7 +60,7 @@ router.delete('/profile/company-activity/:id', authMiddleware, CompanyController
 
 // Document
 router.get('/profile/company-document', authMiddleware, CompanyController.documentList);
-router.post('/profile/company-document', authMiddleware, CompanyController.documentStore);
+router.post('/profile/company-document', authMiddleware, documentUpload.single('file'), CompanyController.documentStore);
 router.put('/profile/company-document/:id', authMiddleware, CompanyController.documentUpdate);
 router.delete('/profile/company-document/:id', authMiddleware, CompanyController.documentDestroy);
 

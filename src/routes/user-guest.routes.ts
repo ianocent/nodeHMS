@@ -3,6 +3,11 @@ import { UserController } from '../controllers/user.controller';
 import { GuestController } from '../controllers/guest.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
+import { makeUpload } from '../utils/upload';
+
+// multipart handler for guest document uploads
+// (Laravel: 'required|file|mimes:jpeg,png,jpg,pdf,doc,docx,xls,xlsx,ppt,pptx,txt|max:2048')
+const upload = makeUpload(['jpeg', 'png', 'jpg', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt']);
 
 const router = Router();
 
@@ -54,7 +59,7 @@ router.post('/guests/:id/restore', authMiddleware, requirePermission(82, 'edit')
 
 // Guest Documents
 router.get('/guests/:guestId/documents', authMiddleware, requirePermission(82, 'view'), GuestController.documentList);
-router.post('/guests/:guestId/documents', authMiddleware, requirePermission(82, 'add'), GuestController.documentStore);
+router.post('/guests/:guestId/documents', authMiddleware, requirePermission(82, 'add'), upload.single('file'), GuestController.documentStore);
 router.put('/guests/documents/:id', authMiddleware, requirePermission(82, 'edit'), GuestController.documentUpdate);
 router.patch('/guests/documents/:id/restore', authMiddleware, requirePermission(82, 'edit'), GuestController.documentRestore);
 router.delete('/guests/documents/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.documentDestroy);
@@ -94,7 +99,7 @@ router.put('/guest/:id', authMiddleware, requirePermission(82, 'edit'), GuestCon
 router.delete('/guest/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.destroy);
 router.post('/guest/:id/restore', authMiddleware, requirePermission(82, 'edit'), GuestController.restore);
 router.get('/guest/:guestId/documents', authMiddleware, requirePermission(82, 'view'), GuestController.documentList);
-router.post('/guest/:guestId/documents', authMiddleware, requirePermission(82, 'add'), GuestController.documentStore);
+router.post('/guest/:guestId/documents', authMiddleware, requirePermission(82, 'add'), upload.single('file'), GuestController.documentStore);
 router.get('/guest/:guestId/family', authMiddleware, requirePermission(82, 'view'), GuestController.familyList);
 router.post('/guest/:guestId/family', authMiddleware, requirePermission(82, 'add'), GuestController.familyStore);
 router.get('/guest/:guestId/history', authMiddleware, requirePermission(82, 'view'), GuestController.historyList);

@@ -2,9 +2,12 @@
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
+import * as fs from 'fs';
+import * as path from 'path';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
 import { STATUSES, REGIONS, BILLINGS, TERMS, moneyFormat } from '../utils/cmsConfig';
+import { storageRoot } from '../utils/storage';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -74,7 +77,8 @@ export class CompanyController {
       prisma.properties.findUnique({ where: { id: pid } }),
       prisma.countries.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       prisma.cities.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-      prisma.code_posts.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      // CodePost is HasProperties-scoped in Laravel
+      prisma.code_posts.findMany({ where: { deleted_at: null, ...(req.user?.lastProperty ? { property_id: pid } : {}) }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
     const byGroup = (g: string) =>
       mktSeg.filter((t: any) => t.group === g).map((t: any) => ({ value: Number(t.id), label: t.name }));
@@ -435,8 +439,23 @@ export class CompanyController {
     try { const data = await prisma.company_profile_documents.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async documentStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, file, description } = req.body;
-      const d = await prisma.company_profile_documents.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), file, description, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const { company_profile_id, file, description } = req.body;
+      if (!company_profile_id) { badRequest(res, 'company_profile_id required'); return; }
+      let fileName: string | null = file ?? null;
+      let filePath: string | null = null;
+      // Path A: multipart upload (= Laravel store('company-documents','public'))
+      if ((req as any).file) {
+        const f = (req as any).file as Express.Multer.File;
+        const ext = f.originalname.split('.').pop()?.toLowerCase() || 'dat';
+        fileName = f.originalname;
+        filePath = `guest-documents/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const abs = path.join(storageRoot(), filePath);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, f.buffer);
+      }
+      const d = await prisma.company_profile_documents.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), file: fileName, file_path: filePath, description, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async documentUpdate(req: Request, res: Response): Promise<void> {

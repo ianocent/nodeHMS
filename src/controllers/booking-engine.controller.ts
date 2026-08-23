@@ -5,6 +5,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES } from '../utils/cmsStatus';
+import { redactPayload } from '../middleware/staahSecurity';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -103,7 +104,7 @@ export class BookingEngineController {
 
       const now = fmtDate(new Date());
       const stopSells = await prisma.stop_sells.findMany({
-        where: { type: 'booking_engine', date: { gte: new Date(now) }, deleted_at: null },
+        where: { property_id: pid, type: 'booking_engine', date: { gte: new Date(now) }, deleted_at: null },
       });
       const stopSellRoomTypes = await prisma.room_types.findMany({
         where: { id: { in: stopSells.map((s) => s.room_type_id) } },
@@ -277,8 +278,11 @@ export class BookingEngineController {
 
   // ── POST /booking/storeReservation ──
   static async storeReservation(req: Request, res: Response): Promise<void> {
-    const logText = (text: string) =>
-      prisma.third_party_logs.create({ data: { name: 'save-syn-bo', text } });
+      const logText = (text: string) => {
+        let safe = text;
+        try { safe = JSON.stringify(redactPayload(JSON.parse(text))); } catch { /* keep raw */ }
+        return prisma.third_party_logs.create({ data: { name: 'save-syn-bo', text: safe } });
+      };
 
     try {
       const required = ['client_uid', 'room_type_id', 'check_in_date', 'check_out_date', 'first_name', 'last_name', 'email', 'mobile_phone', 'rate_id', 'child', 'adult', 'uuid'];

@@ -463,13 +463,15 @@ static async eventList(req: Request, res: Response): Promise<void> {
   static async inventoryList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
+      const pidInv = BigInt(req.user?.lastProperty ?? 0);
       const where: any = {};
       if (search) where.description = { contains: search, mode: 'insensitive' };
 
       const [data, total, codePosts] = await Promise.all([
         prisma.event_inventories.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
         prisma.event_inventories.count({ where }),
-        prisma.code_posts.findMany({ where: { deleted_at: null, status: 1, type: 'DEFAULT' }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        // CodePost is HasProperties-scoped in Laravel
+        prisma.code_posts.findMany({ where: { deleted_at: null, status: 1, type: 'DEFAULT', ...(req.user?.lastProperty ? { property_id: pidInv } : {}) }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       ]);
 
       const rows = bigintToNumber(data).map((r: any) => ({
@@ -548,7 +550,8 @@ static async eventList(req: Request, res: Response): Promise<void> {
         prisma.event_management_items.count({ where }),
       ]);
 
-      const codeItems = await prisma.code_items.findMany({ where: { deleted_at: null }, orderBy: { name: 'asc' } });
+      // CodeItem is HasProperties-scoped in Laravel
+      const codeItems = await prisma.code_items.findMany({ where: { deleted_at: null, ...(req.user?.lastProperty ? { property_id: pid } : {}) }, orderBy: { name: 'asc' } });
       const table = [
         {
           label: 'Item', key: 'code_item_id', type: 'select', is_search: false, is_related: true,

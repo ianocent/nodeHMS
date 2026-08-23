@@ -6,7 +6,9 @@ import { success, error, badRequest, notFound, validationError } from '../utils/
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { getStatusLabel } from '../utils/cmsConfig';
 import { dataSearch } from '../utils/search';
-import { saveBase64Image, saveDocumentFromDataUri } from '../utils/storage';
+import { saveBase64Image, saveDocumentFromDataUri, storageRoot } from '../utils/storage';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -922,8 +924,18 @@ export class GuestController {
       const pid = req.user?.lastProperty ?? 0n;
       let { file, description, status, file_path } = req.body;
 
-      // Laravel stores the upload on the public disk and keeps file_path.
-      // FE sends the document as a base64 data-URI in JSON.
+      // Path A: multipart upload (= Laravel store('guest-documents','public'))
+      if ((req as any).file) {
+        const f = (req as any).file as Express.Multer.File;
+        const ext = path.extname(f.originalname).slice(1).toLowerCase() || 'dat';
+        file = f.originalname;
+        file_path = `guest-documents/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const abs = path.join(storageRoot(), file_path);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, f.buffer);
+      }
+
+      // Path B: base64 data-URI in JSON
       if (typeof file === 'string' && file.startsWith('data:')) {
         const saved = saveDocumentFromDataUri(file);
         if (!saved) {
@@ -932,6 +944,11 @@ export class GuestController {
         }
         file = saved.originalName; // display name (= client original name slot)
         file_path = saved.filePath;
+      }
+
+      if (!file && !file_path) {
+        badRequest(res, 'The file field is required.');
+        return;
       }
 
       const data = await prisma.guest_profile_documents.create({

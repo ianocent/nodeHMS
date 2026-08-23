@@ -506,9 +506,12 @@ export class ContentController {
 
   static async emailSendMaster(req: Request, res: Response): Promise<void> {
     try {
+      // EmailBuilder/EmailGroup are HasProperties-scoped in Laravel
+      const pidSend = req.user?.lastProperty ? BigInt(req.user.lastProperty) : undefined;
+      const scope = pidSend ? { property_id: pidSend } : {};
       const [groups, templates] = await Promise.all([
-        prisma.email_groups.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }),
-        prisma.email_builders.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }),
+        prisma.email_groups.findMany({ where: { deleted_at: null, ...scope }, orderBy: { id: 'desc' } }),
+        prisma.email_builders.findMany({ where: { deleted_at: null, ...scope }, orderBy: { id: 'desc' } }),
       ]);
       const allGroups = bigintToNumber(groups).map((g: any) => ({ value: g.id, label: g.group_name, list: g.group_list }));
       const allTemplate = bigintToNumber(templates).map((t: any) => ({ value: t.id, label: t.template_name, subject: t.subject, body: t.body }));
