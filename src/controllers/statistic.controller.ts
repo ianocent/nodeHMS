@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -255,7 +255,7 @@ export class StatisticController {
       const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
 
       const [totalRooms, availableRooms, checkIns, checkOuts, occupancy, inHouse] = await Promise.all([
-        prisma.rooms.count({ where: { property_id: pid, deleted_at: null } }),
+        prisma.rooms.count({ where: { property_id: Number(pid) } }),
         prisma.rooms.count({ where: { property_id: pid, deleted_at: null, status: 0 } }),
         prisma.folios.count({ where: { property_id: pid, status_reservation: 2, check_in_date: { gte: today, lt: tomorrow }, deleted_at: null } }),
         prisma.folios.count({ where: { property_id: pid, status_reservation: 3, check_out_date: { gte: today, lt: tomorrow }, deleted_at: null } }),
@@ -656,19 +656,19 @@ export class StatisticController {
 
       // â”€â”€ Data sources â”€â”€
       const [roomTypes, messages, rateCodes, overbookingRows, availRows, workOrderRows, reservationRows] = await Promise.all([
-        prisma.room_types.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { sort: 'asc' } }),
+        prisma.room_types.findMany({ where: { property_id: Number(pid) }, orderBy: { sort: 'asc' } }),
         prisma.statistic_messages.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
         prisma.statistic_rate_codes.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
         prisma.overbookings.findMany({ where: { property_id: pid, deleted_at: null, date: { gte: start, lte: end } } }),
         prisma.room_availabilities.findMany({ where: { property_id: Number(pid), deleted_at: null, date: { gte: start, lte: end } } }),
-        prisma.work_orders.findMany({ where: { property_id: pid, deleted_at: null } }),
+        prisma.work_orders.findMany({ where: { property_id: Number(pid) } }),
         prisma.reservations.findMany({
           where: { property_id: pid, deleted_at: null, date: { gte: start, lte: end }, room_id: { not: null } },
           select: { id: true, date: true, room_id: true, room_type_id: true, status_reservation: true },
         }),
       ]);
 
-      const rooms = await prisma.rooms.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, room_type_id: true } });
+      const rooms = await prisma.rooms.findMany({ where: { property_id: Number(pid) }, select: { id: true, room_type_id: true } });
 
       const fmt = (d: Date) => d.toISOString().split('T')[0];
       const msgByDate = new Map(messages.map((m: any) => [fmt(m.date), m.text]));
@@ -772,14 +772,22 @@ export class StatisticController {
 
   static async messages(req: Request, res: Response): Promise<void> {
     try {
-      const data = await prisma.statistic_messages.findMany({ orderBy: { id: 'desc' } });
+      const pid = req.user?.lastProperty ?? 0n;
+      const data = await prisma.statistic_messages.findMany({
+        where: { property_id: Number(pid) },
+        orderBy: { id: 'desc' },
+      });
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to load statistic messages', 500); }
   }
 
   static async rateCodes(req: Request, res: Response): Promise<void> {
     try {
-      const data = await prisma.statistic_rate_codes.findMany({ orderBy: { id: 'desc' } });
+      const pid = req.user?.lastProperty ?? 0n;
+      const data = await prisma.statistic_rate_codes.findMany({
+        where: { property_id: Number(pid) },
+        orderBy: { id: 'desc' },
+      });
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to load statistic rate codes', 500); }
   }

@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -337,12 +337,15 @@ export class RoomController {
 
       const start = new Date(startDate);
       const end = new Date(endDate);
+      // HasProperties global scope parity — every lookup property-scoped
+      const pidScope = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
       const [blockedByAvailability, blockedByWorkOrder, busyReservations, rooms] = await Promise.all([
-        prisma.room_availabilities.findMany({ where: { date: { gte: start, lt: end } }, select: { room_id: true } }),
-        prisma.work_orders.findMany({ where: { date: { lte: start }, deleted_at: null, OR: [{ end_date: { gt: end } }, { end_date: null }] }, select: { room_id: true } }),
+        prisma.room_availabilities.findMany({ where: { date: { gte: start, lt: end }, ...(pidScope ? { property_id: Number(pidScope) } : {}) }, select: { room_id: true } }),
+        prisma.work_orders.findMany({ where: { date: { lte: start }, deleted_at: null, ...(pidScope ? { property_id: Number(pidScope) } : {}), OR: [{ end_date: { gt: end } }, { end_date: null }] }, select: { room_id: true } }),
         prisma.reservations.findMany({
           where: {
             date: { gte: start, lt: end },
+            ...(pidScope ? { property_id: Number(pidScope) } : {}),
             OR: [{ room_type_id: id }, { room_type_id_next: id }],
             folios: { status_reservation: { in: [0, 3] }, deleted_at: null, ...(folioId ? { id: { not: folioId } } : {}) },
             room_id: { gt: 0 },
@@ -350,7 +353,7 @@ export class RoomController {
           select: { room_id: true },
         }),
         prisma.rooms.findMany({
-          where: { room_type_id: id, status: 1, deleted_at: null, room_status: { not: 4 } },
+          where: { room_type_id: id, status: 1, deleted_at: null, room_status: { not: 4 }, ...(pidScope ? { property_id: Number(pidScope) } : {}) },
           orderBy: [{ room_status: 'asc' }, { sort: 'asc' }],
         }),
       ]);
