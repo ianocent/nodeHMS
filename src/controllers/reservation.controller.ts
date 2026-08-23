@@ -2591,6 +2591,146 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
+  // ── Laravel ReservationItemController::updateVR (:705-782) ──
+  // Update VR folio dates/guest + repricing via saveReservation engine.
+  static async updateVR(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const { check_in_date, check_out_date, guest_profile_id } = req.body;
+      if (!check_in_date || !check_out_date || !guest_profile_id) {
+        badRequest(res, 'check_in_date, check_out_date and guest_profile_id are required');
+        return;
+      }
+
+      const folio: any = await prisma.folios.findUnique({ where: { id } });
+      if (!folio || folio.deleted_at) { notFound(res, 'Folio not found'); return; }
+
+      const bussinesDate = await AuthController.getBusinessDate(folio.property_id ?? null);
+      await prisma.folios.update({
+        where: { id },
+        data: {
+          check_in_date: new Date(check_in_date),
+          check_out_date: new Date(check_out_date),
+          guest_profile_id: BigInt(guest_profile_id),
+          updated_at: new Date(),
+          updated_by: req.user?.id,
+        },
+      });
+
+      // Reprice all reservation nights using the pricing engine.
+      const resvs = await prisma.reservations.findMany({ where: { folio_id: id, deleted_at: null }, orderBy: { date: 'asc' } });
+      if (resvs.length > 0) {
+        const firstResv = resvs[0];
+        const getNight = Math.max(1, Math.ceil((new Date(check_out_date).getTime() - new Date(check_in_date).getTime()) / 86400000));
+        let cpRow: any = null;
+        if (firstResv.rate_id) {
+          const rate: any = await prisma.rates.findUnique({ where: { id: firstResv.rate_id }, select: { code_post_id: true } });
+          if (rate?.code_post_id) cpRow = await prisma.code_posts.findUnique({ where: { id: BigInt(rate.code_post_id) } });
+        }
+        const property: any = await prisma.properties.findUnique({ where: { id: folio.property_id }, select: { is_tax: true } });
+
+        // Delete old rows
+        await prisma.reservations.deleteMany({ where: { folio_id: id, deleted_at: null } });
+
+        for (let i = 0; i < getNight; i++) {
+          const nightDate = new Date(`${bussinesDate || check_in_date}T00:00:00`);
+          nightDate.setDate(nightDate.getDate() + i);
+          const pricing = await priceNight({
+            prisma,
+            rateId: firstResv.rate_id,
+            roomTypeId: firstResv.room_type_id,
+            night: nightDate,
+            getNight,
+            adult: Number(firstResv.adult ?? 1),
+            child: Number(firstResv.child ?? 0),
+            quantity: 1,
+            isTax: property?.is_tax === 1,
+            rateCodePost: cpRow,
+            promos: [],
+          });
+          await prisma.reservations.create({
+            data: {
+              property_id: folio.property_id,
+              folio_id: id,
+              rate_id: firstResv.rate_id,
+              room_type_id: firstResv.room_type_id,
+              room_id: firstResv.room_id,
+              adult: Number(firstResv.adult ?? 1),
+              child: Number(firstResv.child ?? 0),
+              add_bed: firstResv.add_bed ?? 0,
+              check_in_date: new Date(check_in_date),
+              check_out_date: new Date(check_out_date),
+              date: nightDate,
+              night: getNight,
+              amount: pricing.amount,
+              total: pricing.total,
+              service_charge: pricing.service_charge,
+              pb1: pricing.pb1,
+              tax3: pricing.tax3,
+              status_reservation: STATUS_RESERVATION.reservation.id,
+              status: 1,
+              created_by: req.user?.id,
+            },
+          });
+        }
+      }
+
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+      success(res, bigintToNumber(folio), 'Success');
+    } catch (err: any) { console.error('updateVR error:', err); error(res, 'Failed to update VR', 500); }
+  }
+
+  // ── Laravel ReservationItemController::moveReservation (:880-1009) ──
+  // Shift reservation item dates by a delta (from_date → to_date).
+  static async moveReservationItems(req: Request, res: Response): Promise<void> {
+    try {
+      const id = BigInt(String(req.params.id));
+      const { from_date, to_date } = req.body;
+      if (!from_date || !to_date) { badRequest(res, 'from_date and to_date are required'); return; }
+
+      const fromDate = new Date(`${from_date}T00:00:00Z`);
+      const toDate = new Date(`${to_date}T00:00:00Z`);
+      const shiftDays = Math.round((toDate.getTime() - fromDate.getTime()) / 86400000);
+      if (shiftDays === 0) { success(res, null, 'No shift needed'); return; }
+
+      const reservation = await prisma.reservations.findUnique({ where: { id }, include: { folios: true } });
+      if (!reservation) { notFound(res, 'Reservation not found'); return; }
+
+      const folio = reservation.folios as any;
+      if (String(folio?.type_reservation ?? '').toLowerCase() === 'git' && Number(folio?.parent) === 0) {
+        badRequest(res, 'Action not allowed'); return;
+      }
+
+      // Move ALL non-posted items for this folio+room_type from the from-date onward
+      const itemsToMove = await prisma.reservations.findMany({
+        where: {
+          folio_id: BigInt(folio.id),
+          room_type_id: reservation.room_type_id,
+          is_posting: 0,
+          deleted_at: null,
+          date: { gte: fromDate },
+        },
+      });
+      for (const item of itemsToMove) {
+        await prisma.reservations.update({
+          where: { id: item.id },
+          data: {
+            date: new Date(item.date!.getTime() + shiftDays * 86400000),
+            check_in_date: item.check_in_date ? new Date(item.check_in_date.getTime() + shiftDays * 86400000) : null,
+            check_out_date: item.check_out_date ? new Date(item.check_out_date.getTime() + shiftDays * 86400000) : null,
+            updated_at: new Date(),
+            updated_by: req.user?.id,
+          },
+        });
+      }
+      // Also shift folio dates
+      if (folio.check_in_date) await prisma.folios.update({ where: { id: BigInt(folio.id) }, data: { check_in_date: new Date(new Date(folio.check_in_date).getTime() + shiftDays * 86400000), check_out_date: folio.check_out_date ? new Date(new Date(folio.check_out_date).getTime() + shiftDays * 86400000) : null, updated_at: new Date() } });
+
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+      success(res, { moved: itemsToMove.length }, 'Success');
+    } catch (err: any) { console.error('moveReservation error:', err); error(res, 'Failed to move reservation', 500); }
+  }
+
   private static bn(val: any): any {
     if (typeof val === 'bigint') return Number(val);
     if (Array.isArray(val)) return val.map((v) => reservationBn(v));

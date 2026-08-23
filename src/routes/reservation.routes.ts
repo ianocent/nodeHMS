@@ -77,6 +77,10 @@ router.post('/reservation/charge', authMiddleware, requirePermission(60, 'view')
 router.get('/reservation/available-room', authMiddleware, requirePermission(60, 'view'), ReservationController.availableRoomType);
 router.get('/reservation/room-git', authMiddleware, requirePermission(60, 'view'), ReservationController.roomGit);
 router.put('/reservation/update-room-parent-git', authMiddleware, requirePermission(60, 'edit'), ReservationController.updateRoomParentGIT);
+// Laravel ReservationItemController::updateVR (cms.php:1028 resource update)
+router.post('/reservation/:id/update-vr', authMiddleware, requirePermission(60, 'edit'), ReservationController.updateVR);
+// Laravel ReservationItemController::moveReservation
+router.post('/reservation-item/:id/move', authMiddleware, requirePermission(60, 'edit'), ReservationController.moveReservationItems);
 
 // ── Singular param routes ──
 router.get('/reservation/:id', authMiddleware, requirePermission(60, 'view'), ReservationController.show);
