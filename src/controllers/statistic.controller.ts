@@ -54,6 +54,200 @@ function bigintToNumber(val: any): any {
 
 export class StatisticController {
 
+  // Laravel StatisticController@index (:29-227) — 7-section widget payload
+  // (Total Room / Departure FIT / Arrival FIT / Arrival & Departure GIT /
+  //  Total Arrival GIT & FIT / Forecast / Housekeeping).
+  static async index(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = req.user?.lastProperty ?? 0n;
+      const businessDate = (req.user as any)?.bussinesDate || new Date().toISOString().split('T')[0];
+      const bd = new Date(businessDate + 'T00:00:00.000Z');
+      const bdNext = new Date(bd.getTime() + 86400000);
+
+      const rooms = await prisma.rooms.findMany({
+        where: { property_id: pid, deleted_at: null, status: 1 },
+        select: { id: true, room_status: true, maid_status: true, room_type_id: true },
+      });
+      const availHolds = await prisma.room_availabilities.findMany({
+        where: { property_id: Number(pid), deleted_at: null, date: { gte: bd, lt: bdNext } },
+        select: { room_id: true },
+      });
+      const heldRoomIds = new Set(availHolds.map((a) => Number(a.room_id)));
+
+      const MAIDS: Array<[number, string]> = [[0, 'Clean'], [1, 'Dirty'], [2, 'Maid in Room'], [3, 'Inspection Required']];
+      const STATUS_ALIAS: Record<number, string> = { 0: 'Vacant', 1: 'Occupied', 2: 'Due Out', 3: 'Blocked', 4: 'Out of Order' };
+
+      // ── Room::getListAndMaidStatusRoom (:206-271) ──
+      const countBy = (pred: (r: any) => boolean) => rooms.filter(pred).length;
+      const dataRoom: any[] = [
+        { name: 'Total Rooms', data: rooms.length },
+        { name: 'OOO', data: countBy((r) => r.room_status === 4) },
+        { name: 'Blocked Rooms', data: rooms.filter((r) => heldRoomIds.has(Number(r.id))).length },
+        { name: 'Saleable Room', data: countBy((r) => [0, 1, 2].includes(r.room_status)) },
+      ];
+      const dataRoomMaid: any[] = [];
+      for (const sid of Object.keys(STATUS_ALIAS).map(Number)) {
+        dataRoomMaid.push({ name: `-> ${STATUS_ALIAS[sid]}`, data: countBy((r) => r.room_status === sid) });
+        for (const [mid, alias] of MAIDS) {
+          dataRoomMaid.push({ name: alias, data: countBy((r) => r.room_status === sid && r.maid_status === mid) });
+        }
+      }
+      const dataRoomMaidAll: any[] = MAIDS.map(([mid, alias]) => ({ name: alias, data: countBy((r) => r.maid_status === mid) }));
+
+      // ── Folio::getArrival (:3917-3977) / getDeparture (:3979-4041) ──
+      const arrivalFolios = await prisma.folios.findMany({
+        where: { property_id: pid, deleted_at: null, status_reservation: { in: [0, 3] }, check_in_date: { gte: bd, lt: bdNext } },
+        select: { type_reservation: true, status_reservation: true, parent: true },
+      });
+      const departureFolios = await prisma.folios.findMany({
+        where: { property_id: pid, deleted_at: null, status_reservation: { in: [0, 1] }, check_out_date: { gte: bd, lt: bdNext } },
+        select: { type_reservation: true, status_reservation: true, parent: true },
+      });
+      const isFit = (f: any) => String(f.type_reservation ?? '').toLowerCase() === 'fit';
+      const isGitSub = (f: any) => String(f.type_reservation ?? '').toLowerCase() === 'git' && Number(f.parent ?? 0) !== 0;
+
+      const arrivalStats = (rows: any[], actualStatus: number) => {
+        const fitExp = rows.filter(isFit).length;
+        const fitAct = rows.filter((f) => f.status_reservation === actualStatus && isFit(f)).length;
+        const gitRows = rows.filter(isGitSub);
+        const gitExp = gitRows.length;
+        const gitAct = rows.filter((f) => f.status_reservation === actualStatus && isGitSub(f)).length;
+        return {
+          fit: { expected: fitExp, actual: fitAct, due: fitExp - fitAct },
+          git: {
+            total_git: new Set(gitRows.map((f) => String(f.parent))).size,
+            expected: gitExp,
+            actual: gitAct,
+            due: gitExp - gitAct,
+          },
+        };
+      };
+      const arrS = arrivalStats(arrivalFolios, 0);
+      const depS = arrivalStats(departureFolios, 1);
+
+      const dataDeparture = [
+        { name: 'Expected', data: depS.fit.expected },
+        { name: 'Actual', data: depS.fit.actual },
+        { name: 'Due to Depart', data: depS.fit.due },
+      ];
+      const dataArrivalFIT = [
+        { name: 'Expected', data: arrS.fit.expected },
+        { name: 'Actual', data: arrS.fit.actual },
+        { name: 'Due to Arrival', data: arrS.fit.due },
+      ];
+      const dataArrivalGitFinal = [
+        { name: 'Total Room group', data: depS.git.total_git },
+        { name: '-> Departure', data: '' },
+        { name: 'Expected', data: depS.git.expected },
+        { name: 'Actual', data: depS.git.actual },
+        { name: 'Due to Departure', data: depS.git.due },
+        { name: '-> Arrival', data: '' },
+        { name: 'Expected', data: arrS.git.expected },
+        { name: 'Actual', data: arrS.git.actual },
+        { name: 'Due to Arrival', data: arrS.git.due },
+      ];
+      const dataArrivalGitandFIT = [
+        { name: 'Expected', data: arrS.fit.expected + arrS.git.expected },
+        { name: 'Actual', data: arrS.fit.actual + arrS.git.actual },
+        { name: 'Due to Arrival', data: arrS.fit.due + arrS.git.due },
+      ];
+
+      // ── Reservation::getForecast (:1068-1211) ──
+      const forecastResvs = await prisma.reservations.findMany({
+        where: { property_id: pid, deleted_at: null, date: { gte: bd, lt: bdNext }, folios: { is: { status_reservation: { notIn: [2] } } } },
+        select: {
+          adult: true, child: true, amount: true,
+          folios: { select: { status_reservation: true, check_in_date: true, guest_profile_id: true } },
+        },
+      });
+      const folioOf = (r: any) => r.folios ?? {};
+      const sameDay = (d: Date | string | null | undefined) => d != null && fmtDay(d as any) === businessDate;
+      function fmtDay(d: Date | string): string {
+        const dt = typeof d === 'string' ? new Date(d.length <= 10 ? d + 'T00:00:00.000Z' : d) : d;
+        return dt.toISOString().slice(0, 10);
+      }
+
+      const roomBooked = forecastResvs.filter((r) => folioOf(r).status_reservation === 3 && sameDay(folioOf(r).check_in_date)).length;
+      const roomInHouse = forecastResvs.filter((r) => folioOf(r).status_reservation === 0 && sameDay(folioOf(r).check_in_date)).length;
+      const pendingResv = forecastResvs.filter((r) => folioOf(r).status_reservation === 5 && sameDay(folioOf(r).check_in_date)).length;
+
+      // Available: active rooms with NO availability hold ever and no qualifying reservation tonight
+      const soldResvTonight = await prisma.reservations.findMany({
+        where: {
+          property_id: pid, deleted_at: null, date: { gte: bd, lt: bdNext }, room_id: { not: null },
+          folios: { is: { status_reservation: { notIn: [1, 2, 5] } } },
+        },
+        select: { room_id: true },
+      });
+      const occupiedRoomIds = new Set(soldResvTonight.map((s) => Number(s.room_id)));
+      const allHoldRoomIds = new Set(
+        (await prisma.room_availabilities.findMany({ where: { deleted_at: null, property_id: Number(pid) }, select: { room_id: true } })).map((a) => Number(a.room_id))
+      );
+      const roomAvailable = rooms.filter((r) => !allHoldRoomIds.has(Number(r.id)) && !occupiedRoomIds.has(Number(r.id))).length;
+
+      const roomSold = countBy((r) => [1, 2].includes(r.room_status));
+      const denom = roomAvailable <= 0 ? 1 : roomAvailable;
+      const pct = (v: number) => `${(Math.round(v * 10000) / 10000 * 100).toFixed(2)}%`;
+      const occAdult = forecastResvs.reduce((s, r) => s + (Number(r.adult) || 0), 0);
+      const occChild = forecastResvs.reduce((s, r) => s + (Number(r.child) || 0), 0);
+
+      // Guest-status tiers via model_has_types (guest-status group)
+      const guestIds = [...new Set(forecastResvs.map((r) => folioOf(r).guest_profile_id).filter((g) => g != null))] as bigint[];
+      const tierCount: Record<string, number> = { VIP: 0, VVIP: 0, VVVIP: 0 };
+      if (guestIds.length) {
+        const links = await prisma.model_has_types.findMany({
+          where: { model_type: 'App\\Models\\GuestProfile', model_id: { in: guestIds } },
+          select: { model_id: true, types: { select: { name: true } } },
+        });
+        const inHouseGuestIds = new Set(
+          forecastResvs
+            .filter((r) => [0, 3, 4].includes(folioOf(r).status_reservation))
+            .map((r) => String(folioOf(r).guest_profile_id)),
+        );
+        for (const l of links) {
+          const nm = String(l.types?.name ?? '').toUpperCase();
+          if (tierCount[nm] !== undefined && inHouseGuestIds.has(String(l.model_id))) tierCount[nm] += 1;
+        }
+      }
+
+      const roomRevenueSum = forecastResvs.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+      const revenueDenom = forecastResvs.length > 0 ? forecastResvs.length : 1;
+      const moneyFormatLocal = (n: number) =>
+        'Rp ' + n.toLocaleString('id-ID', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+      const dataForecast = [
+        { name: 'Booked Rev.', data: roomBooked },
+        { name: 'Room In House', data: roomInHouse },
+        { name: 'Room Available', data: roomAvailable },
+        { name: 'Pending Rev.', data: pendingResv },
+        { name: 'Occ % include Pending', data: pct((roomSold + roomBooked) / denom) },
+        { name: 'Occ % exclude Pending', data: pct((roomSold + pendingResv) / denom) },
+        { name: 'Occ (Adult/Child)', data: `${occAdult}/${occChild}` },
+        { name: 'VIP', data: tierCount.VIP },
+        { name: 'VVIP', data: tierCount.VVIP },
+        { name: 'VVVIP', data: tierCount.VVVIP },
+        { name: 'Room Revenue', data: moneyFormatLocal(roomRevenueSum) },
+        { name: 'Average Room Rate (ARR)', data: moneyFormatLocal(roomRevenueSum / revenueDenom) },
+      ];
+
+      const data = [
+        { label: 'Total Room', sub_label: 'This information is about the room in the hotel', list: dataRoom },
+        { label: 'Departure FIT', sub_label: 'This information is about the departure in the hotel', list: dataDeparture },
+        { label: 'Arrival FIT', sub_label: 'This information is about the arrival FIT in the hotel', list: dataArrivalFIT },
+        { label: 'Arrival & Departure GIT', sub_label: 'This information is about the arrival GIT in the hotel', list: dataArrivalGitFinal },
+        { label: 'Total Arrival GIT & FIT', sub_label: 'This information is about the total arrival GIT & FIT in the hotel', list: dataArrivalGitandFIT },
+        { label: 'Forecast', sub_label: 'This information is about the forecast in the hotel', list: dataForecast },
+        { label: 'Housekeeping', sub_label: 'This information is about the housekeeping in the hotel', list: dataRoomMaid },
+      ];
+
+      const property = await prisma.properties.findUnique({ where: { id: pid } });
+      success(res, bigintToNumber(data), 'Data has been loaded', 200, { property: bigintToNumber(property) } as any);
+    } catch (err: any) {
+      console.error('Statistic index error:', err);
+      error(res, 'Failed to load statistic index', 500);
+    }
+  }
+
   static async dashboard(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;

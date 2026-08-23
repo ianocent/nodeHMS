@@ -21,6 +21,7 @@ router.post('/statistic/statistic-room-type/add-message', authMiddleware, Statis
 router.post('/statistic/statistic-room-type/add-rate-code', authMiddleware, StatisticController.statisticsRoomTypeAddRateCode);
 router.get('/statistic/messages', authMiddleware, StatisticController.messages);
 router.get('/statistic/rate-codes', authMiddleware, StatisticController.rateCodes);
-router.get('/statistic', authMiddleware, StatisticController.roomStatisticGrid);
+router.get('/statistic', authMiddleware, StatisticController.index); // Laravel StatisticController@index — 7-section widgets
+router.get('/statistic/room-grid', authMiddleware, StatisticController.roomStatisticGrid); // node-extra: previous grid view
 
 export default router;

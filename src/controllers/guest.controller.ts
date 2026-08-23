@@ -6,6 +6,7 @@ import { success, error, badRequest, notFound, validationError } from '../utils/
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { getStatusLabel } from '../utils/cmsConfig';
 import { dataSearch } from '../utils/search';
+import { saveBase64Image, saveDocumentFromDataUri } from '../utils/storage';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
@@ -372,7 +373,13 @@ export class GuestController {
 
       let imagePath = null;
       if (image) {
-        imagePath = `guestProfile/image_${Date.now()}.jpg`;
+        if (typeof image === 'string' && image.startsWith('data:image')) {
+          const saved = saveBase64Image(image, 'guestProfile');
+          imagePath = saved ? saved.filePath : null;
+        } else if (typeof image === 'string') {
+          // Legacy passthrough: already a stored relative path
+          imagePath = image;
+        }
       }
 
       const data: any = {
@@ -557,7 +564,12 @@ export class GuestController {
 
       let imagePath = guest.image;
       if (image) {
-        imagePath = `guestProfile/image_${Date.now()}.jpg`;
+        if (typeof image === 'string' && image.startsWith('data:image')) {
+          const saved = saveBase64Image(image, 'guestProfile');
+          imagePath = saved ? saved.filePath : imagePath;
+        } else if (typeof image === 'string') {
+          imagePath = image; // already a stored relative path
+        }
       }
 
       const data: any = {
@@ -908,9 +920,22 @@ export class GuestController {
     try {
       const guestId = idParamBig(req.params.guestId);
       const pid = req.user?.lastProperty ?? 0n;
-      const { file, description, status } = req.body;
+      let { file, description, status, file_path } = req.body;
+
+      // Laravel stores the upload on the public disk and keeps file_path.
+      // FE sends the document as a base64 data-URI in JSON.
+      if (typeof file === 'string' && file.startsWith('data:')) {
+        const saved = saveDocumentFromDataUri(file);
+        if (!saved) {
+          badRequest(res, 'Validation failed: file must be jpeg/png/jpg/pdf/doc/docx/xls/xlsx/ppt/pptx/txt');
+          return;
+        }
+        file = saved.originalName; // display name (= client original name slot)
+        file_path = saved.filePath;
+      }
+
       const data = await prisma.guest_profile_documents.create({
-        data: { property_id: pid, guest_profile_id: guestId, file, description, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, guest_profile_id: guestId, file, description, file_path: file_path ?? null, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Document created', 201);
     } catch (err: any) { console.error('Document store error:', err); error(res, 'Failed to create document', 500); }

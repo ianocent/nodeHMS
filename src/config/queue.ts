@@ -47,7 +47,8 @@ export async function initQueue() {
       'sync-check-status-booking-engine',
       'sync-staah-availability',
       'sync-staah-room-type',
-      'create-staah-booking'
+      'create-staah-booking',
+      'check-request-status'
     ];
     for (const q of queues) {
       try { await bossInstance.createQueue(q); } catch {}
@@ -105,6 +106,12 @@ export async function initQueue() {
       await processCreateStaahBooking(job);
     });
 
+    // Batch report queue consumer (Laravel Kernel :44-59 'check.request.status')
+    await bossInstance.work('check-request-status', async (job: any) => {
+      const { processBatchReportRequest } = await import('../queue/jobs/batchReportRequest');
+      await processBatchReportRequest(job);
+    });
+
     // Dispatcher for per-property availability sync
     await bossInstance.work('dispatch-staah-availability', async (job: any) => {
       const { PrismaClient } = await import('@prisma/client');
@@ -127,6 +134,7 @@ export async function initQueue() {
   }
   await bossInstance.schedule('check-expired-request-bookings', '0 * * * *'); // hourly
   await bossInstance.schedule('night-audit-post', '0 2 * * *'); // daily at 2 AM - night audit
+  await bossInstance.schedule('check-request-status', '*/30 * * * * *'); // Laravel :58 everyThirtySeconds — queued batch reports
     // Laravel Kernel :30/:40 — booking engine price + payment status checks, every minute.
     await bossInstance.schedule('sync-price-booking-engine', '* * * * *');
     await bossInstance.schedule('sync-check-status-booking-engine', '* * * * *');
