@@ -1,4 +1,4 @@
-<p align="center"><a href="https://nodejs.org" target="_blank"><img src="https://raw.githubusercontent.com/nodejs/nodejs.org/main/public/static/images/logo-hexagon-card.svg" width="120" alt="Node.js Logo"></a></p>
+<p align="center"><a href="https://nodejs.org" target="_blank"><img src="https://nodejs.org/static/images/logo.svg" width="120" alt="Node.js Logo"></a></p>
 
 ## About Node.js
 
