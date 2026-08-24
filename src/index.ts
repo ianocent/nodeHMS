@@ -33,6 +33,7 @@ import genericRoutes from './routes/generic.routes';
 import extraRoutes from './routes/extra.routes';
 import contentRoutes from './routes/content.routes';
 import { firebaseRoutes } from './controllers/firebase.controller';
+import pgAdminRoutes from './routes/pg-admin.routes';
 import { bookingRoutes } from './routes/booking.routes';
 import { posRoutes } from './routes/pos.routes';
 import { initQueue } from './config/queue';
@@ -192,6 +193,9 @@ mountLegacyCmsAlias(contentRoutes);
 app.use('/api', firebaseRoutes);
 app.use('/cms', firebaseRoutes);
 mountLegacyCmsAlias(firebaseRoutes);
+
+// pg-admin — database UI (dev only, protect with PG_ADMIN_TOKEN in prod)
+app.use('/pg-admin', pgAdminRoutes);
 
 // Mobile booking engine (Laravel web.php parity, public)
 app.use('/booking', bookingRoutes);
