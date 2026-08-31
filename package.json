@@ -15,7 +15,9 @@
     "phase1:tables": "prisma migrate dev --name init",
     "phase1:data": "node dist/src/scripts/migrate-data.js",
     "phase1:verify": "node dist/src/scripts/verify-data.js",
-    "test": "jest --detectOpenHandles"
+    "test": "jest --detectOpenHandles",
+    "e2e": "node e2e/run-tests.js",
+    "e2e:list": "node -e \"require('./e2e/parser').parseAll(require('./e2e/config').TC_DIR,'','').then(cs=>cs.forEach(c=>console.log(c.file+' | '+c.sheet+' | '+c.id+' | '+(c.description||'')+' | steps='+c.steps.length)))\""
   },
   "jest": {
     "preset": "ts-jest",
@@ -61,7 +63,8 @@
     "nodemailer": "^9.0.5",
     "pg": "^8.11.3",
     "pg-boss": "^12.27.0",
-    "puppeteer-core": "^25.7.0"
+    "puppeteer-core": "^25.7.0",
+    "selenium-webdriver": "^4.47.0"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
