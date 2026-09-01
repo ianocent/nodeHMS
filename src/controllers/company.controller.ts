@@ -27,20 +27,100 @@ export class CompanyController {
   // â”€â”€ Company Profile â”€â”€
   static async list(req: Request, res: Response): Promise<void> {
     try {
-      const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
+      const page = parseInt(req.query.page as string) || 1;
+      const isReservation = !!req.query.reservation;
+      const lim = isReservation ? parseInt(req.query.limit as string) || 20 : parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
+      const searchField = req.query.search_field as string;
+      const searchValue = req.query.search_value as string;
       const trash = req.query.trash === '1' || req.query.trash === 'true';
+      const guestId = req.query.guest_id as string;
+      const rateId = req.query.rate_id as string;
+
       const where: any = { deleted_at: trash ? { not: null } : null };
-      if (s) where.OR = [{ name: { contains: s, mode: 'insensitive' } }, { email: { contains: s, mode: 'insensitive' } }];
+
+      if (isReservation) {
+        where.deleted_at = null;
+        where.status = 1;
+      }
+
+      if (s) {
+        where.OR = ['account', 'type_company', 'short_code', 'name', 'status_company', 'billing_country', 'telp', 'mobile_phone', 'email'].map((f) => ({ [f]: { contains: s, mode: 'insensitive' } }));
+      }
+
+      if (searchField && searchValue) {
+        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+      }
+
+      const orderBy: any = isReservation ? { account: 'asc' } : { id: 'desc' };
+
       const [data, total] = await Promise.all([
-        prisma.company_profiles.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),
+        prisma.company_profiles.findMany({ where, orderBy, skip: (page - 1) * lim, take: lim }),
         prisma.company_profiles.count({ where }),
       ]);
-      const rows = bn(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * lim + i + 1 }));
+
+      let rows = bn(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * lim + i + 1 }));
+
+      if (guestId) {
+        try {
+          const guestProfile = await prisma.guest_profiles.findUnique({ where: { id: BigInt(guestId) } });
+          if (guestProfile) {
+            const recentFolios = await prisma.folios.findMany({
+              where: { guest_profile_id: BigInt(guestId), deleted_at: null },
+              orderBy: { id: 'desc' },
+              take: 3,
+              select: { company_profile_id: true },
+            });
+            const guestCompanyIds = recentFolios.map((f) => f.company_profile_id).filter(Boolean);
+            if (guestCompanyIds.length > 0) {
+              const guestCompanies = await prisma.company_profiles.findMany({
+                where: { id: { in: guestCompanyIds as any } },
+              });
+              const guestRows = bn(guestCompanies).map((c: any) => ({ ...c, no: 0 }));
+              const seen = new Set(guestRows.map((r: any) => r.id));
+              const rest = rows.filter((r: any) => !seen.has(r.id));
+              rows = [...guestRows, ...rest];
+            }
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      if (rateId) {
+        try {
+          const rateCompanyLinks = await prisma.model_has_company_profiles.findMany({
+            where: { model_type: 'rate', model_id: BigInt(rateId) },
+            select: { company_profile_id: true },
+          });
+          const rateCompanyIds = rateCompanyLinks.map((r) => r.company_profile_id).filter(Boolean);
+          if (rateCompanyIds.length > 0) {
+            const rateCompaniesData = await prisma.company_profiles.findMany({
+              where: { id: { in: rateCompanyIds as any } },
+            });
+            const rateRows = bn(rateCompaniesData).map((c: any) => ({ ...c, no: 0 }));
+            const seen = new Set(rateRows.map((r: any) => r.id));
+            const rest = rows.filter((r: any) => !seen.has(r.id));
+            rows = [...rateRows, ...rest];
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      const table = isReservation ? [
+        { label: 'Account', key: 'account', type: 'text', is_search: true },
+        { label: 'Type', key: 'type_company', type: 'text', is_search: true },
+        { label: 'Short Code', key: 'short_code', type: 'text', is_search: true },
+        { label: 'Name', key: 'name', type: 'text', is_search: true },
+        { label: 'Status', key: 'status_company', type: 'text', is_search: true },
+        { label: 'Billing Country', key: 'billing_country', type: 'text', is_search: true },
+        { label: 'Telephone', key: 'telp', type: 'text', is_search: true },
+        { label: 'Mobile Phone', key: 'mobile_phone', type: 'text', is_search: true },
+      ] : TABLES.company;
+
       success(res, rows, 'Success', 200, {
-        table: TABLES.company,
+        table,
         pagination: laravelPaging(total, lim, page),
-        permission: listPermission(req, { add: true, edit: true, delete: true }),
+        permission: isReservation
+          ? { view: true, add: false, edit: false, delete: false }
+          : listPermission(req, { add: true, edit: true, delete: true }),
       });
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
   }

@@ -351,7 +351,7 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
       const [folios, typePayments] = await Promise.all([
         prisma.folios.findMany({ where: { deleted_at: null, status: 1 }, select: { id: true, folio_number: true }, orderBy: { id: 'desc' }, take: 50 }),
         // TypePayment is HasProperties-scoped in Laravel
-        prisma.type_payments.findMany({ where: { deleted_at: null, status: 1, ...(req.user?.lastProperty ? { property_id: req.user.lastProperty } : {}) }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.type_payments.findMany({ where: { deleted_at: null, status: 1, property_id: req.user?.lastProperty ?? BigInt(0) }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       ]);
       success(res, { status: 1, type_accounting: String(req.params.type), date: new Date() }, 'Success', 200, {
         master: {

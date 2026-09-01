@@ -4,12 +4,13 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { randomUUID } from 'crypto';
 import { success, error, badRequest, notFound } from '../utils/response';
-import { decrypt } from '../utils/encryption';
+import { decrypt, encrypt } from '../utils/encryption';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { dataSearch, applySearchField } from '../utils/search';
 import { AuthController } from './auth.controller';
+import { TokenService } from '../services/token.service';
 import { enqueueJob } from '../config/queue';
 import { sendTemplateEmail } from '../services/mail.service';
 
@@ -2407,18 +2408,57 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
       const userId = req.user?.id ?? 0n;
-      // Laravel keys shifts to the BUSINESS date, not local today (:1903 parity fix).
       const bussinesDate = await AuthController.getBusinessDate(pid);
-      const day = new Date(`${bussinesDate}T00:00:00`);
-      const next = new Date(day.getTime() + 86400000);
 
-      const existing = await prisma.shifts.findFirst({ where: { user_id: userId, property_id: pid, date: { gte: day, lt: next }, deleted_at: null } });
-      if (existing) { badRequest(res, 'Shift already started for today'); return; }
+      // PHP stores date as DATE column ('2026-08-22'), not DATETIME.
+      // Use raw SQL to avoid timezone issues with JS Date objects.
+      const existing = await prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
+        `SELECT COUNT(*)::int AS cnt FROM shifts
+         WHERE user_id = $1 AND property_id = $2
+           AND date::date = $3::date AND "end" IS NULL AND deleted_at IS NULL`,
+        userId, pid, bussinesDate,
+      );
+      if (Number(existing?.[0]?.cnt ?? 0) > 0) { badRequest(res, 'Shift already started for today'); return; }
 
-      const data = await prisma.shifts.create({
+      // Create shift record — store date as UTC midnight to match date::date comparison
+      const day = new Date(bussinesDate + 'T00:00:00Z');
+      await prisma.shifts.create({
         data: { property_id: pid, user_id: userId, start: new Date(), date: day, status: 0, created_at: new Date(), created_by: userId },
       });
-      success(res, bigintToNumber(data), 'Shift started', 201);
+
+      // PHP parity: return full login data with new token + is_shift: true
+      const user = await prisma.users.findUnique({ where: { id: userId } });
+      if (!user) { error(res, 'User not found', 404); return; }
+
+      const modelRoles = await prisma.model_has_roles.findMany({
+        where: { model_id: userId, model_type: 'App\\Models\\User' },
+        include: { roles: true },
+      });
+      const roleNames = modelRoles.map((mr: any) => mr.roles.name);
+      const roleIds = modelRoles.map((mr: any) => mr.roles.id);
+
+      // Generate new token (PHP: $user->createToken(...))
+      const { plainTextToken, createdAt } = await TokenService.createToken(userId, user.email);
+
+      const loginData = await AuthController.buildLoginData(user, roleIds, roleNames, plainTextToken, createdAt, pid);
+
+      // PHP ShiftController::start() returns { code, message, name, image, data }
+      // where name/image are PROPERTY name/image at top level
+      const property = await prisma.properties.findUnique({ where: { id: pid } });
+      const propertyName = (property as any)?.name ?? '';
+      const propertyImage = (property as any)?.logo ? `${process.env.APP_URL || ''}/storage/${(property as any).logo}` : null;
+
+      const payload = {
+        code: 200,
+        message: 'Success',
+        name: propertyName,
+        image: propertyImage,
+        data: loginData,
+      };
+
+      const body = JSON.stringify(payload);
+      const encrypted = encrypt(body);
+      res.status(200).type('text/plain').send(encrypted);
     } catch (err: any) { console.error('Shift start error:', err); error(res, 'Failed to start shift', 500); }
   }
 
@@ -2427,15 +2467,19 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
       const pid = req.user?.lastProperty ?? 0n;
       const userId = req.user?.id;
       const bussinesDate = await AuthController.getBusinessDate(pid);
-      const day = new Date(`${bussinesDate}T00:00:00`);
-      const next = new Date(day.getTime() + 86400000);
 
-      const shift = await prisma.shifts.findFirst({ where: { user_id: userId, property_id: pid, date: { gte: day, lt: next }, deleted_at: null } });
-      if (!shift) { badRequest(res, 'No active shift found'); return; }
+      const rows = await prisma.$queryRawUnsafe<{ id: bigint }[]>(
+        `SELECT id FROM shifts
+         WHERE user_id = $1 AND property_id = $2
+           AND date::date = $3::date AND "end" IS NULL AND deleted_at IS NULL
+         LIMIT 1`,
+        userId, pid, bussinesDate,
+      );
+      if (!rows?.length) { badRequest(res, 'No active shift found'); return; }
 
       // Laravel sets ONLY `end` here (:452-456) — writing is_posting=true would
       // weaken the night-audit close guard.
-      await prisma.shifts.update({ where: { id: shift.id }, data: { end: new Date(), updated_at: new Date(), updated_by: userId } });
+      await prisma.shifts.update({ where: { id: rows[0].id }, data: { end: new Date(), updated_at: new Date(), updated_by: userId } });
       success(res, null, 'Shift ended');
     } catch (err: any) { console.error('Shift end error:', err); error(res, 'Failed to end shift', 500); }
   }

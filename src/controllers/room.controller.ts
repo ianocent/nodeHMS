@@ -353,7 +353,7 @@ export class RoomController {
           select: { room_id: true },
         }),
         prisma.rooms.findMany({
-          where: { room_type_id: id, status: 1, deleted_at: null, room_status: { not: 4 }, ...(pidScope ? { property_id: Number(pidScope) } : {}) },
+          where: { room_type_id: id, status: 1, deleted_at: null, is_physical: true, room_status: { not: 4 }, ...(pidScope ? { property_id: Number(pidScope) } : {}) },
           orderBy: [{ room_status: 'asc' }, { sort: 'asc' }],
         }),
       ]);
@@ -453,7 +453,7 @@ export class RoomController {
           select: { room_id: true },
         }),
         prisma.rooms.findMany({
-          where: { room_type_id: id, status: 1, deleted_at: null, room_status: { not: 4 } },
+          where: { room_type_id: id, status: 1, deleted_at: null, is_physical: true, room_status: { not: 4 } },
           orderBy: [{ room_status: 'asc' }, { sort: 'asc' }],
         }),
       ]);
@@ -847,7 +847,7 @@ export class RoomController {
       const floorIds = prefixIds('floors_');
 
       // Build room filter
-      const roomWhere: any = { deleted_at: null, status: STATUS_ACTIVE };
+      const roomWhere: any = { deleted_at: null, status: STATUS_ACTIVE, is_physical: true };
       if (propertyId) roomWhere.property_id = propertyId;
       if (roomTypeIds && roomTypeIds.length > 0) {
         roomWhere.room_type_id = { in: roomTypeIds };

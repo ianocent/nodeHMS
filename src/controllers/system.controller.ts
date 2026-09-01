@@ -855,31 +855,122 @@ export class SystemController {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const propertyId = req.user?.lastProperty ?? 0n;
+      const isOpen = req.query.is_open === '1' || req.query.is_open === 'true';
 
-      const where: any = { property_id: propertyId, deleted_at: null };
+      // PHP: ShiftConfirmationController@index (:35-58)
+      // Resolve user_id — can be "trx-<shiftId>" or a shift ID
+      const rawUserId = req.query.user_id as string | undefined;
+      let targetUserId: bigint | null = null;
+      if (rawUserId && rawUserId !== 'null' && rawUserId !== 'undefined') {
+        if (rawUserId.includes('trx')) {
+          targetUserId = BigInt(rawUserId.split('-')[1]);
+        } else if (/^\d+$/.test(rawUserId)) {
+          const shift = await getPrisma().shifts.findUnique({ where: { id: BigInt(rawUserId) }, select: { user_id: true } });
+          if (shift) targetUserId = shift.user_id;
+        }
+      }
+      if (!targetUserId) targetUserId = req.user?.id ?? 0n;
 
-      const [data, total] = await Promise.all([
-        getPrisma().shift_postings.findMany({
-          where,
-          include: {
-            room_types: { select: { id: true, name: true } },
-            users: { select: { id: true, name: true } },
-          },
-          orderBy: { id: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
-        getPrisma().shift_postings.count({ where }),
-      ]);
+      // Get business date
+      const logAudit = await getPrisma().log_audits.findFirst({
+        where: { deleted_at: null, property_id: Number(propertyId) },
+        orderBy: { date: 'desc' },
+      });
+      let businessDate: Date;
+      if (logAudit) {
+        const [y, m, d] = logAudit.date.toISOString().substring(0, 10).split('-').map(Number);
+        businessDate = new Date(Date.UTC(y, m - 1, d + 1));
+      } else {
+        businessDate = new Date(Date.now() + 7 * 60 * 60 * 1000);
+        businessDate.setUTCHours(0, 0, 0, 0);
+      }
 
-      success(res, bigintToNumber(data), 'Success', 200, {
-        pagination: {
+      // PHP: Transaction::where('is_posting', 0)->where('created_by', $userID)->where('date', $logAudit)->onlyActive()
+      const transactions = await getPrisma().transactions.findMany({
+        where: {
+          property_id: propertyId,
+          is_posting: 0,
+          created_by: targetUserId,
+          date: businessDate,
+          deleted_at: null,
+          status: 1,
+        },
+      });
+
+      // PHP: CodePost::where('type', 'DEFAULT')->onlyActive()
+      const codePosts = await getPrisma().code_posts.findMany({
+        where: { type: 'DEFAULT', deleted_at: null, status: 1 },
+      });
+
+      // PHP: TypePayment::onlyActive()
+      const typePayments = await getPrisma().type_payments.findMany({
+        where: { deleted_at: null, status: 1 },
+      });
+
+      // PHP: TypePayment->map (:63-78) — balance per type_payment
+      const paymentRows = typePayments.map((tp) => {
+        const tpTrx = transactions.filter((t) => Number(t.type_payment_id) === Number(tp.id));
+        const sumPlus = tpTrx.filter((t) => t.type_amount === 'PLUS').reduce((s, t) => s + Number(t.total), 0);
+        const sumMinus = tpTrx.filter((t) => t.type_amount === 'MINUS').reduce((s, t) => s + Number(t.total), 0);
+        const sum = sumPlus - sumMinus;
+        const hasUnposted = tpTrx.some((t) => t.is_endshift === 0);
+        const closing = hasUnposted ? 0 : sum;
+        return {
+          id: `${tp.id}-payment`,
+          description: tp.name,
+          balance: isOpen ? moneyFormat(Math.round(sum * 100) / 100) : '***',
+          closingFormat: moneyFormat(Math.round(closing * 100) / 100),
+          sort: 0,
+        };
+      });
+
+      // PHP: CodePost->map (:80-95) — balance per code_post
+      const codeRows = codePosts.map((cp) => {
+        const cpTrx = transactions.filter((t) => String(t.code) === String(cp.id));
+        const sumPlus = cpTrx.filter((t) => t.type_amount === 'PLUS').reduce((s, t) => s + Number(t.total), 0);
+        const sumMinus = cpTrx.filter((t) => t.type_amount === 'MINUS').reduce((s, t) => s + Number(t.total), 0);
+        const sum = sumPlus - sumMinus;
+        const hasUnposted = cpTrx.some((t) => t.is_endshift === 0);
+        const closing = hasUnposted ? 0 : sum;
+        return {
+          id: `${cp.id}-code`,
+          description: cp.name,
+          balance: isOpen ? moneyFormat(Math.round(sum * 100) / 100) : '***',
+          closingFormat: moneyFormat(Math.round(closing * 100) / 100),
+          sort: 1,
+        };
+      });
+
+      // PHP: $data->merge($TypePayment)->sortBy('sort')
+      const merged = [...codeRows, ...paymentRows].sort((a, b) => a.sort - b.sort);
+      const totalData = merged.length;
+
+      // Paginate
+      const paginated = merged.slice((page - 1) * limit, page * limit);
+
+      const table = [
+        { label: 'type', key: 'description', type: 'none', is_search: false },
+        { label: 'Balance', key: 'balance', type: 'no', is_search: false },
+        { label: 'Closing', key: 'closingFormat', type: 'number', is_search: false },
+      ];
+
+      success(res, paginated, 'Success', 200, {
+        table,
+        pagging: {
+          limit_data: limit,
+          total_data: totalData,
+          start_paging: 1,
+          end_paging: Math.ceil(totalData / limit),
+          prev_jump: 0,
+          prev: 0,
+          next: 0,
+          next_jump: 0,
           current_page: page,
-          last_page: Math.ceil(total / limit),
+          last_page: Math.ceil(totalData / limit),
           per_page: limit,
-          total,
+          total: totalData,
           from: (page - 1) * limit + 1,
-          to: Math.min(page * limit, total),
+          to: Math.min(page * limit, totalData),
         },
       });
     } catch (err: any) {

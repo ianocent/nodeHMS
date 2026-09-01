@@ -327,12 +327,30 @@ export class UserController {
         return;
       }
 
-      const modelRoles = await prisma.model_has_roles.findMany({
-        where: { model_id: id, model_type: 'App\\Models\\User' },
-        include: { roles: true }
-      });
+      const [modelRoles, userProps, userCompanies] = await Promise.all([
+        prisma.model_has_roles.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\User' },
+          include: { roles: true }
+        }),
+        prisma.model_has_properties.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\User' },
+          include: { properties: { select: { id: true, name: true } } }
+        }),
+        prisma.model_has_companies.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\User' },
+          include: { companies: { select: { id: true, name: true } } }
+        })
+      ]);
 
-      success(res, bigintToNumber({ ...user, id: Number(user.id), roles: modelRoles.map((mr: any) => mr.roles) }), 'Success');
+      const props = userProps.map((p: any) => ({ value: Number(p.properties.id), label: p.properties.name }));
+      const comps = userCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name }));
+
+      const data: any = bigintToNumber({ ...user, id: Number(user.id) });
+      data.roles = modelRoles.map((mr: any) => mr.roles);
+      data.properties = props;
+      data.companies = comps;
+
+      success(res, data, 'Success');
     } catch (err: any) {
       console.error('User show error:', err);
       error(res, 'Failed to fetch user', 500);

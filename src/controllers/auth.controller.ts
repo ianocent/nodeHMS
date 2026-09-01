@@ -519,19 +519,23 @@ export class AuthController {
     propertyId: bigint | null,
     businessDate: string
   ): Promise<boolean> {
-    const start = new Date(businessDate + 'T00:00:00Z');
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-
-    const count = await prisma.shifts.count({
-      where: {
-        user_id: userId,
-        ...(propertyId ? { property_id: propertyId } : {}),
-        date: { gte: start, lt: end },
-        end: null,
-        deleted_at: null,
-      },
-    });
-    return count > 0;
+    // Use date string comparison to avoid timezone issues.
+    // PHP compares: where('date', '2026-08-22') — date column stores the
+    // business date as-is.  Node stores full timestamps from `new Date(...)` so
+    // we match any shift whose DATE portion equals the business date.
+    const count = await prisma.$queryRawUnsafe<{ cnt: bigint }[]>(
+      `SELECT COUNT(*)::int AS cnt
+       FROM shifts
+       WHERE user_id = $1
+         AND ($2::bigint IS NULL OR property_id = $2)
+         AND date::date = $3::date
+         AND "end" IS NULL
+         AND deleted_at IS NULL`,
+      userId,
+      propertyId,
+      businessDate,
+    );
+    return Number(count?.[0]?.cnt ?? 0) > 0;
   }
 
   /**

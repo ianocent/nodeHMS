@@ -352,9 +352,9 @@ export class ContentController {
   static async emailBuilderList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : undefined;
-      const where: any = { deleted_at: null };
-      if (pid) where.property_id = pid;
+      const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
+      if (!pid) { success(res, [], 'Success', 200, { table: [], permission: perm(req), pagination: { current_page: page, last_page: 0, per_page: limit, total: 0, from: 0, to: 0 } }); return; }
+      const where: any = { deleted_at: null, property_id: pid };
       if (search) where.template_name = { contains: search, mode: 'insensitive' };
       const [data, total] = await Promise.all([
         prisma.email_builders.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
@@ -426,9 +426,9 @@ export class ContentController {
   static async emailGroupList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : undefined;
-      const where: any = { deleted_at: null };
-      if (pid) where.property_id = pid;
+      const pid = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
+      if (!pid) { success(res, [], 'Success', 200, { table: [], permission: perm(req), pagination: { current_page: page, last_page: 0, per_page: limit, total: 0, from: 0, to: 0 } }); return; }
+      const where: any = { deleted_at: null, property_id: pid };
       if (search) where.group_name = { contains: search, mode: 'insensitive' };
       const [data, total] = await Promise.all([
         prisma.email_groups.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),

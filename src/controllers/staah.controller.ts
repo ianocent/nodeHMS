@@ -71,7 +71,7 @@ async function buildAriPayload(interface_: any, dateFrom: string, dateTo: string
   // Room stock = active physical rooms per room type (Laravel `roomstosell`)
   const roomCountByType = new Map<number, number>();
   for (const rm of roomMappings) {
-    const cnt = await prisma.rooms.count({ where: { room_type_id: rm.room_type_id, status: 1, deleted_at: null } });
+    const cnt = await prisma.rooms.count({ where: { room_type_id: rm.room_type_id, property_id: interface_.property_id, status: 1, deleted_at: null } });
     roomCountByType.set(Number(rm.room_type_id), cnt);
   }
 
@@ -301,8 +301,9 @@ export class StaahController {
   static async interfaceShow(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const result = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!result) { notFound(res, 'Interface not found'); return; }
+      if (!result || result.property_id !== pid) { notFound(res, 'Interface not found'); return; }
       success(res, bigintToNumber(result), 'Success');
     } catch (err: any) {
       error(res, 'Failed to load interface', 500);
@@ -312,8 +313,9 @@ export class StaahController {
   static async interfaceEdit(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const result = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!result) { notFound(res, 'Interface not found'); return; }
+      if (!result || result.property_id !== pid) { notFound(res, 'Interface not found'); return; }
       success(res, bigintToNumber(result), 'Success');
     } catch (err: any) {
       error(res, 'Failed to load interface', 500);
@@ -323,10 +325,11 @@ export class StaahController {
   static async interfaceUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const { hotel_type, time_zone, language_code, currency_code, hotel_info, hotel_description, status } = req.body;
 
       const existing = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'Interface not found'); return; }
+      if (!existing || existing.property_id !== pid) { notFound(res, 'Interface not found'); return; }
 
       const data: any = { updated_at: new Date() };
       if (hotel_type !== undefined) data.hotel_type = hotel_type;
@@ -347,8 +350,9 @@ export class StaahController {
   static async interfaceDestroy(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const existing = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'Interface not found'); return; }
+      if (!existing || existing.property_id !== pid) { notFound(res, 'Interface not found'); return; }
       await prisma.staah_interfaces.update({ where: { id }, data: { deleted_at: new Date(), status: 'inactive' } });
       success(res, null, 'Interface deleted');
     } catch (err: any) {
@@ -371,12 +375,22 @@ export class StaahController {
 
   static async roomMappingList(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const interfaceId = req.params.hotel_id ? idParam(req.params.hotel_id) : null;
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
-      const where: any = { deleted_at: null };
-      if (interfaceId) where.staah_interface_id = interfaceId;
+      const interfaces = await prisma.staah_interfaces.findMany({
+        where: { property_id: pid, deleted_at: null },
+        select: { id: true },
+      });
+      const interfaceIds = interfaces.map(i => i.id);
+
+      const where: any = { deleted_at: null, staah_interface_id: { in: interfaceIds } };
+      if (interfaceId) {
+        if (!interfaceIds.some(iid => iid === interfaceId)) { notFound(res, 'Interface not found for this property'); return; }
+        where.staah_interface_id = interfaceId;
+      }
 
       const [data, total] = await Promise.all([
         prisma.staah_room_mappings.findMany({
@@ -398,11 +412,12 @@ export class StaahController {
   static async roomMappingEdit(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const result = await prisma.staah_room_mappings.findUnique({
         where: { id },
-        include: { room_types: { select: { id: true, name: true } }, staah_interfaces: { select: { id: true, hotel_id: true } } },
+        include: { room_types: { select: { id: true, name: true } }, staah_interfaces: { select: { id: true, hotel_id: true, property_id: true } } },
       });
-      if (!result) { notFound(res, 'Room mapping not found'); return; }
+      if (!result || (result as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Room mapping not found'); return; }
       success(res, bigintToNumber(result), 'Success');
     } catch (err: any) {
       error(res, 'Failed to load room mapping', 500);
@@ -412,10 +427,14 @@ export class StaahController {
   static async roomMappingUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const { room_type_id, max_occupancy, max_child_occupancy, quantity, staah_room_id, status } = req.body;
 
-      const existing = await prisma.staah_room_mappings.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'Room mapping not found'); return; }
+      const existing = await prisma.staah_room_mappings.findUnique({
+        where: { id },
+        include: { staah_interfaces: { select: { property_id: true } } },
+      });
+      if (!existing || (existing as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Room mapping not found'); return; }
 
       const data: any = { updated_at: new Date() };
       if (room_type_id !== undefined) data.room_type_id = BigInt(room_type_id);
@@ -438,12 +457,22 @@ export class StaahController {
 
   static async rateMappingList(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const interfaceId = req.params.hotel_id ? idParam(req.params.hotel_id) : null;
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
-      const where: any = { deleted_at: null };
-      if (interfaceId) where.staah_interface_id = interfaceId;
+      const interfaces = await prisma.staah_interfaces.findMany({
+        where: { property_id: pid, deleted_at: null },
+        select: { id: true },
+      });
+      const interfaceIds = interfaces.map(i => i.id);
+
+      const where: any = { deleted_at: null, staah_interface_id: { in: interfaceIds } };
+      if (interfaceId) {
+        if (!interfaceIds.some(iid => iid === interfaceId)) { notFound(res, 'Interface not found for this property'); return; }
+        where.staah_interface_id = interfaceId;
+      }
 
       const [data, total] = await Promise.all([
         prisma.staah_rate_mappings.findMany({
@@ -465,11 +494,12 @@ export class StaahController {
   static async rateMappingEdit(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const result = await prisma.staah_rate_mappings.findUnique({
         where: { id },
-        include: { rates: { select: { id: true, name: true } }, staah_interfaces: { select: { id: true, hotel_id: true } } },
+        include: { rates: { select: { id: true, name: true } }, staah_interfaces: { select: { id: true, hotel_id: true, property_id: true } } },
       });
-      if (!result) { notFound(res, 'Rate mapping not found'); return; }
+      if (!result || (result as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Rate mapping not found'); return; }
       success(res, bigintToNumber(result), 'Success');
     } catch (err: any) {
       error(res, 'Failed to load rate mapping', 500);
@@ -479,10 +509,14 @@ export class StaahController {
   static async rateMappingUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const { rate_id, staah_rate_plan_id, meal_plan_id, status } = req.body;
 
-      const existing = await prisma.staah_rate_mappings.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'Rate mapping not found'); return; }
+      const existing = await prisma.staah_rate_mappings.findUnique({
+        where: { id },
+        include: { staah_interfaces: { select: { property_id: true } } },
+      });
+      if (!existing || (existing as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Rate mapping not found'); return; }
 
       const data: any = { updated_at: new Date() };
       if (rate_id !== undefined) data.rate_id = BigInt(rate_id);
@@ -503,11 +537,18 @@ export class StaahController {
 
   static async reservationList(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const status = req.query.status as string;
 
-      const where: any = {};
+      const interfaces = await prisma.staah_interfaces.findMany({
+        where: { property_id: pid, deleted_at: null },
+        select: { id: true },
+      });
+      const interfaceIds = interfaces.map(i => i.id);
+
+      const where: any = { staah_interface_id: { in: interfaceIds } };
       if (status) where.status = status;
 
       const [data, total] = await Promise.all([
@@ -533,8 +574,12 @@ export class StaahController {
   static async reservationConfirm(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const staahRes = await prisma.staah_reservations.findUnique({ where: { id } });
-      if (!staahRes) { notFound(res, 'Reservation not found'); return; }
+      const pid = req.user?.lastProperty ?? 0n;
+      const staahRes = await prisma.staah_reservations.findUnique({
+        where: { id },
+        include: { staah_interfaces: { select: { property_id: true } } },
+      });
+      if (!staahRes || (staahRes as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Reservation not found'); return; }
 
       await prisma.staah_reservations.update({
         where: { id },
@@ -550,8 +595,12 @@ export class StaahController {
   static async reservationCancel(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const staahRes = await prisma.staah_reservations.findUnique({ where: { id } });
-      if (!staahRes) { notFound(res, 'Reservation not found'); return; }
+      const pid = req.user?.lastProperty ?? 0n;
+      const staahRes = await prisma.staah_reservations.findUnique({
+        where: { id },
+        include: { staah_interfaces: { select: { property_id: true } } },
+      });
+      if (!staahRes || (staahRes as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Reservation not found'); return; }
 
       await prisma.staah_reservations.update({
         where: { id },
@@ -567,8 +616,12 @@ export class StaahController {
   static async reservationPending(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const staahRes = await prisma.staah_reservations.findUnique({ where: { id } });
-      if (!staahRes) { notFound(res, 'Reservation not found'); return; }
+      const pid = req.user?.lastProperty ?? 0n;
+      const staahRes = await prisma.staah_reservations.findUnique({
+        where: { id },
+        include: { staah_interfaces: { select: { property_id: true } } },
+      });
+      if (!staahRes || (staahRes as any).staah_interfaces?.property_id !== pid) { notFound(res, 'Reservation not found'); return; }
 
       await prisma.staah_reservations.update({
         where: { id },
@@ -587,12 +640,22 @@ export class StaahController {
 
   static async syncLogList(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const interfaceId = req.params.hotel_id ? idParam(req.params.hotel_id) : null;
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
-      const where: any = {};
-      if (interfaceId) where.staah_interface_id = interfaceId;
+      const interfaces = await prisma.staah_interfaces.findMany({
+        where: { property_id: pid, deleted_at: null },
+        select: { id: true },
+      });
+      const interfaceIds = interfaces.map(i => i.id);
+
+      const where: any = { staah_interface_id: { in: interfaceIds } };
+      if (interfaceId) {
+        if (!interfaceIds.some(iid => iid === interfaceId)) { notFound(res, 'Interface not found for this property'); return; }
+        where.staah_interface_id = interfaceId;
+      }
 
       const [data, total] = await Promise.all([
         prisma.staah_sync_logs.findMany({
@@ -613,11 +676,12 @@ export class StaahController {
   static async syncLogRetry(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const log = await prisma.staah_sync_logs.findUnique({ where: { id } });
       if (!log) { notFound(res, 'Sync log not found'); return; }
 
       const interface_ = await prisma.staah_interfaces.findUnique({ where: { id: log.staah_interface_id ? BigInt(log.staah_interface_id) : 0n } });
-      if (!interface_) { error(res, 'Interface not found', 404); return; }
+      if (!interface_ || interface_.property_id !== pid) { error(res, 'Interface not found', 404); return; }
 
       const payload = log.payload ? JSON.parse(log.payload as string) : {};
       let result: any;
@@ -761,10 +825,11 @@ export class StaahController {
   static async otaMappingUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const { company_profile_id, status } = req.body;
 
       const existing = await prisma.staah_ota_company_mappings.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'OTA mapping not found'); return; }
+      if (!existing || existing.property_id !== pid) { notFound(res, 'OTA mapping not found'); return; }
 
       const data: any = { updated_at: new Date() };
       if (company_profile_id !== undefined) data.company_profile_id = BigInt(company_profile_id);
@@ -780,8 +845,9 @@ export class StaahController {
   static async otaMappingDestroy(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const existing = await prisma.staah_ota_company_mappings.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'OTA mapping not found'); return; }
+      if (!existing || existing.property_id !== pid) { notFound(res, 'OTA mapping not found'); return; }
       await prisma.staah_ota_company_mappings.delete({ where: { id } });
       success(res, null, 'OTA mapping deleted');
     } catch (err: any) {
@@ -848,10 +914,11 @@ export class StaahController {
   static async contentBreakdownUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const { description, adult, child, status } = req.body;
 
       const existing = await prisma.staah_room_content_breakdowns.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'Content breakdown not found'); return; }
+      if (!existing || existing.property_id !== pid) { notFound(res, 'Content breakdown not found'); return; }
 
       const data: any = { updated_at: new Date() };
       if (description !== undefined) data.description = description;
@@ -869,8 +936,9 @@ export class StaahController {
   static async contentBreakdownDestroy(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const existing = await prisma.staah_room_content_breakdowns.findUnique({ where: { id } });
-      if (!existing) { notFound(res, 'Content breakdown not found'); return; }
+      if (!existing || existing.property_id !== pid) { notFound(res, 'Content breakdown not found'); return; }
       await prisma.staah_room_content_breakdowns.update({
         where: { id },
         data: { deleted_at: new Date() },
@@ -888,8 +956,9 @@ export class StaahController {
   static async syncAvailability(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const interface_ = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!interface_) { notFound(res, 'Interface not found'); return; }
+      if (!interface_ || interface_.property_id !== pid) { notFound(res, 'Interface not found'); return; }
 
       const result = await staahService.listingProperty();
       success(res, result, 'Availability synced');
@@ -901,8 +970,9 @@ export class StaahController {
   static async pullFromStaah(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      const pid = req.user?.lastProperty ?? 0n;
       const interface_ = await prisma.staah_interfaces.findUnique({ where: { id } });
-      if (!interface_) { notFound(res, 'Interface not found'); return; }
+      if (!interface_ || interface_.property_id !== pid) { notFound(res, 'Interface not found'); return; }
 
       const rooms = await staahService.listingRoomType(interface_.hotel_id);
       const rates = await staahService.listingRatePlan(interface_.hotel_id);
@@ -915,8 +985,9 @@ export class StaahController {
 
   static async pushRoom(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const interface_ = await prisma.staah_interfaces.findUnique({ where: { id: idParam(req.params.id) } });
-      if (!interface_) { notFound(res, 'Interface not found'); return; }
+      if (!interface_ || interface_.property_id !== pid) { notFound(res, 'Interface not found'); return; }
 
       const mappings = await prisma.staah_room_mappings.findMany({
         where: { staah_interface_id: interface_.id, deleted_at: null },
@@ -941,8 +1012,9 @@ export class StaahController {
 
   static async pushRate(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const interface_ = await prisma.staah_interfaces.findUnique({ where: { id: idParam(req.params.id) } });
-      if (!interface_) { notFound(res, 'Interface not found'); return; }
+      if (!interface_ || interface_.property_id !== pid) { notFound(res, 'Interface not found'); return; }
 
       const mappings = await prisma.staah_rate_mappings.findMany({
         where: { staah_interface_id: interface_.id, deleted_at: null },
@@ -1104,6 +1176,7 @@ export class StaahController {
 static async ariPush(req: Request, res: Response): Promise<void> {
   try {
     const id = idParam(req.params.id);
+    const pid = req.user?.lastProperty ?? 0n;
     const { date_from, date_to } = req.body;
     if (!date_from || !date_to) {
       error(res, 'date_from and date_to are required', 400);
@@ -1111,7 +1184,7 @@ static async ariPush(req: Request, res: Response): Promise<void> {
     }
 
     const interface_ = await prisma.staah_interfaces.findUnique({ where: { id } });
-    if (!interface_) { notFound(res, 'Interface not found'); return; }
+    if (!interface_ || interface_.property_id !== pid) { notFound(res, 'Interface not found'); return; }
 
     const rooms = await buildAriPayload(interface_, date_from, date_to);
     if (!rooms.length) {
@@ -1146,8 +1219,9 @@ static async ariPush(req: Request, res: Response): Promise<void> {
 
 static async syncPriceStaah(req: Request, res: Response): Promise<void> {
   try {
+    const pid = req.user?.lastProperty ?? 0n;
     const rate = await prisma.rates.findFirst({
-      where: { staah: true, sync_staah: false, deleted_at: null },
+      where: { property_id: pid, staah: true, sync_staah: false, deleted_at: null },
       orderBy: { id: 'asc' },
     });
     if (!rate) { success(res, null, 'No rate found'); return; }

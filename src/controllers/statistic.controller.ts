@@ -363,11 +363,12 @@ export class StatisticController {
 
       const [roomAvailabilities, reservations, workOrders] = await Promise.all([
         prisma.room_availabilities.findMany({
-          where: { date: { gte: startDate, lt: endDate } },
+          where: { property_id: Number(pid), date: { gte: startDate, lt: endDate } },
           orderBy: { date: 'asc' },
         }),
         prisma.reservations.findMany({
           where: {
+            property_id: pid,
             room_id: { in: roomIds, not: null },
             date: { gte: startDate, lt: endDate },
             deleted_at: null,
@@ -378,7 +379,7 @@ export class StatisticController {
           },
         }),
         prisma.work_orders.findMany({
-          where: { room_id: { in: roomIds, not: null }, end_date: null, deleted_at: null },
+          where: { property_id: pid, room_id: { in: roomIds, not: null }, end_date: null, deleted_at: null },
           orderBy: { date: 'asc' },
         }),
       ]);
@@ -1280,14 +1281,15 @@ success(res, null, 'Success', 200, meta);
   // Laravel: StatisticController@getFolioDetail (cms.php route statistic/room-availability/folio/{folioNumber})
   static async getFolioDetail(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const folioNumber = String(req.params.folioNumber ?? '').trim();
       const folio = await prisma.folios.findFirst({
-        where: { folio_number: folioNumber, deleted_at: null },
+        where: { property_id: pid, folio_number: folioNumber, deleted_at: null },
       });
       if (!folio) { error(res, 'Folio tidak ditemukan: ' + folioNumber, 404); return; }
 
       const reservation = await prisma.reservations.findFirst({
-        where: { folio_id: folio.id, deleted_at: null },
+        where: { property_id: pid, folio_id: folio.id, deleted_at: null },
         orderBy: { check_in_date: 'desc' },
       });
       if (!reservation) { error(res, 'Reservation tidak ditemukan untuk folio: ' + folioNumber, 404); return; }
@@ -1477,18 +1479,19 @@ success(res, null, 'Success', 200, meta);
 
   static async previewDragRoomAvailability(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const folioIdInput = String(req.body?.folioId ?? '').trim();
       const folioNumber = /^\d+$/.test(folioIdInput) ? `F${folioIdInput}` : folioIdInput;
 
-      const folio: any = await prisma.folios.findFirst({ where: { folio_number: folioNumber, deleted_at: null } });
+      const folio: any = await prisma.folios.findFirst({ where: { property_id: pid, folio_number: folioNumber, deleted_at: null } });
       if (!folio) { res.status(404).json({ code: 404, message: `Folio not found: ${folioNumber}` }); return; }
 
       const toRoomName = String(req.body?.toRoom ?? '').trim();
-      const targetRoom = await prisma.rooms.findFirst({ where: { name: toRoomName, deleted_at: null } });
+      const targetRoom = await prisma.rooms.findFirst({ where: { property_id: pid, name: toRoomName, deleted_at: null } });
       if (!targetRoom) { res.status(400).json({ code: 400, message: `Target room not found: ${req.body?.toRoom}` }); return; }
 
       const reservation: any = await prisma.reservations.findFirst({
-        where: { folio_id: folio.id, deleted_at: null },
+        where: { property_id: pid, folio_id: folio.id, deleted_at: null },
         orderBy: { check_in_date: 'asc' },
       });
       if (!reservation) { res.status(404).json({ code: 404, message: 'Reservation not found' }); return; }
@@ -1530,6 +1533,7 @@ success(res, null, 'Success', 200, meta);
 
       const conflict = await prisma.reservations.findFirst({
         where: {
+          property_id: pid,
           room_id: targetRoom.id,
           deleted_at: null,
           folio_id: { not: folio.id },
@@ -1570,6 +1574,7 @@ success(res, null, 'Success', 200, meta);
 
   static async dragRoomAvailability(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const { toRoom, folioId, checkInDate, checkOutDate } = req.body || {};
       if (!toRoom || !folioId || !checkInDate || !checkOutDate) {
         res.status(400).json({ code: 400, message: 'toRoom, toDate, folioId, checkInDate and checkOutDate are required' });
@@ -1578,12 +1583,12 @@ success(res, null, 'Success', 200, meta);
       const folioIdInput = String(folioId).trim();
       const folioNumber = /^\d+$/.test(folioIdInput) ? `F${folioIdInput}` : folioIdInput;
 
-      const folio: any = await prisma.folios.findFirst({ where: { folio_number: folioNumber, deleted_at: null } });
+      const folio: any = await prisma.folios.findFirst({ where: { property_id: pid, folio_number: folioNumber, deleted_at: null } });
       if (!folio) { res.status(404).json({ code: 404, message: `Folio tidak ditemukan: ${folioNumber}` }); return; }
 
       // Status guard — only pure Reservation/Pending may move (Laravel :903-917)
       const activeReservation: any = await prisma.reservations.findFirst({
-        where: { folio_id: folio.id, deleted_at: null },
+        where: { property_id: pid, folio_id: folio.id, deleted_at: null },
         orderBy: { id: 'desc' },
       });
       const st = activeReservation?.status_reservation;
@@ -1595,7 +1600,7 @@ success(res, null, 'Success', 200, meta);
         return;
       }
 
-      const targetRoom = await prisma.rooms.findFirst({ where: { name: String(toRoom).trim(), deleted_at: null } });
+      const targetRoom = await prisma.rooms.findFirst({ where: { property_id: pid, name: String(toRoom).trim(), deleted_at: null } });
       if (!targetRoom) { res.status(404).json({ code: 404, message: `Room tujuan tidak ditemukan: ${toRoom}` }); return; }
 
       const newCheckIn = StatisticController.safeParseDate(checkInDate);
@@ -1606,6 +1611,7 @@ success(res, null, 'Success', 200, meta);
 
       const conflict = await prisma.reservations.findFirst({
         where: {
+          property_id: pid,
           room_id: targetRoom.id,
           deleted_at: null,
           folio_id: { not: folio.id },
@@ -1617,7 +1623,7 @@ success(res, null, 'Success', 200, meta);
       if (conflict) { res.status(409).json({ code: 409, message: 'Room sudah terisi pada rentang tanggal tersebut' }); return; }
 
       const latestReservation: any = await prisma.reservations.findFirst({
-        where: { folio_id: folio.id, deleted_at: null },
+        where: { property_id: pid, folio_id: folio.id, deleted_at: null },
         orderBy: { id: 'desc' },
       });
       if (!latestReservation) { res.status(404).json({ code: 404, message: 'Tidak ada reservation di folio' }); return; }

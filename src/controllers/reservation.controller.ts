@@ -1274,20 +1274,20 @@ success(res, formatted, 'Success', 200, {
     try {
       const propertyId = req.user?.lastProperty;
 
-      const [statuses, roomTypes, companies, types] = await Promise.all([
+      const [statuses, roomTypes, companies, types, walkInCompany, houseUseCompany, property, logAudit] = await Promise.all([
         prisma.folios.findMany({
           where: { deleted_at: null, property_id: propertyId! },
           select: { status_reservation: true },
           distinct: ['status_reservation'],
         }),
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, property_id: propertyId! },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
         prisma.company_profiles.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE },
-          select: { id: true, name: true },
+          select: { id: true, name: true, type_company: true, sync_mkt_segment_1: true, sync_mkt_segment_2: true, sync_mkt_segment_3: true, sync_mkt_segment_4: true, source: true },
           orderBy: { name: 'asc' },
         }),
         prisma.types.findMany({
@@ -1297,6 +1297,20 @@ success(res, formatted, 'Success', 200, {
             group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status', 'cancellation-reservation'] },
           },
           select: { id: true, name: true, group: true },
+        }),
+        prisma.company_profiles.findFirst({
+          where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'Walk In' },
+        }),
+        prisma.company_profiles.findFirst({
+          where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'House Use' },
+        }),
+        prisma.properties.findUnique({
+          where: { id: propertyId! },
+          select: { market_segment_1: true, market_segment_2: true, market_segment_3: true, market_segment_4: true, source: true, name: true, image: true, logo: true },
+        }),
+        prisma.log_audits.findFirst({
+          where: { deleted_at: null, property_id: Number(propertyId) },
+          orderBy: { date: 'desc' },
         }),
       ]);
 
@@ -1308,7 +1322,41 @@ success(res, formatted, 'Success', 200, {
 
       const grouped = groupBy(types, 'group');
 
-      const master = {
+      // Sort guest-status: "Normal" first (PHP: GuestProfileController)
+      const statusGuests = (grouped['guest-status'] || []).map((t: any) => ({ value: Number(t.id), label: t.name }));
+      const normalGuest = statusGuests.filter((s: any) => /normal/i.test(s.label));
+      const otherGuest = statusGuests.filter((s: any) => !/normal/i.test(s.label));
+      const sortedStatusGuests = [...normalGuest, ...otherGuest];
+
+      // Business date from log_audits
+      let businessDate: string;
+      if (logAudit) {
+        const [y, m, d] = logAudit.date.toISOString().substring(0, 10).split('-').map(Number);
+        businessDate = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().substring(0, 10);
+      } else {
+        businessDate = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().substring(0, 10);
+      }
+
+      // Room data if room_id query param (PHP: ReservationController@create :239-263)
+      let dataRoom: any = null;
+      const roomId = req.query.room_id as string;
+      if (roomId) {
+        const room = await prisma.rooms.findUnique({ where: { id: BigInt(roomId) } });
+        if (room) {
+          const roomType = room.room_type_id ? await prisma.room_types.findUnique({ where: { id: room.room_type_id } }) : null;
+          const rateWalkIn = await prisma.rates.findFirst({
+            where: { deleted_at: null, status: STATUS_ACTIVE, name: { contains: 'Walk In', mode: 'insensitive' } },
+            orderBy: { module: 'desc' },
+          });
+          dataRoom = {
+            room: { id: Number(room.id), name: room.name },
+            room_type: { id: Number(room.room_type_id), name: roomType?.name ?? '' },
+            rate: rateWalkIn ? { id: Number(rateWalkIn.id), name: rateWalkIn.name } : null,
+          };
+        }
+      }
+
+      const master: any = {
         statuses: [
           { value: STATUS_ACTIVE, label: 'Active' },
           { value: 0, label: 'Inactive' },
@@ -1327,20 +1375,35 @@ success(res, formatted, 'Success', 200, {
         market_segment_3: (grouped['market-segment-3'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
         market_segment_4: (grouped['market-segment-4'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
         source: (grouped['source'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
-        status_guests: (grouped['guest-status'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
+        status_guests: sortedStatusGuests,
         reason_cancels: (grouped['cancellation-reservation'] || []).map((t: any) => ({ value: t.name, label: t.name })),
         typemulti: [
-          { label: 'FIT', value: 'fit' },
-          { label: 'GIT', value: 'git' },
-          { label: 'VR', value: 'vr' },
-          { label: 'Day Use', value: 'day-use' },
+          { label: 'Normal', value: 'normal' },
+          { label: 'Walk In', value: 'is_walk_in' },
+          { label: 'House Use', value: 'is_house_use' },
+          { label: 'Complimentary', value: 'complimentary' },
         ],
         legend: [
           { label: 'BAR', color: 'bg-secondary text-white rounded-md font-semibold' },
           { label: 'COMPANY APPLICABLE', color: 'bg-success text-white rounded-md font-semibold' },
           { label: 'APPLICABLE FOR ALL', color: 'bg-primary text-white rounded-md font-semibold' },
         ],
+        // PHP ReservationController@create :218-293
+        business_date: businessDate,
+        is_walk_in: walkInCompany ? { id: Number(walkInCompany.id), name: walkInCompany.name, market_segment_1: walkInCompany.sync_mkt_segment_1, market_segment_2: walkInCompany.sync_mkt_segment_2, market_segment_3: walkInCompany.sync_mkt_segment_3, market_segment_4: walkInCompany.sync_mkt_segment_4, source: walkInCompany.source } : null,
+        is_house_use: houseUseCompany ? { id: Number(houseUseCompany.id), name: houseUseCompany.name, market_segment_1: houseUseCompany.sync_mkt_segment_1, market_segment_2: houseUseCompany.sync_mkt_segment_2, market_segment_3: houseUseCompany.sync_mkt_segment_3, market_segment_4: houseUseCompany.sync_mkt_segment_4, source: houseUseCompany.source } : null,
+        markets: property ? {
+          is_market_segment_1: property.market_segment_1,
+          is_market_segment_2: property.market_segment_2,
+          is_market_segment_3: property.market_segment_3,
+          is_market_segment_4: property.market_segment_4,
+          is_source: property.source,
+        } : null,
       };
+
+      if (dataRoom) {
+        master.data_room = dataRoom;
+      }
 
       success(res, [], 'Success', 200, { master });
     } catch (err: any) {
@@ -1356,6 +1419,18 @@ success(res, formatted, 'Success', 200, {
     try {
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
+
+      // PHP: ReservationController@store :315-324 — merge checkbokmulti/typemulti into body
+      const body = req.body;
+      if (Array.isArray(body.checkbokmulti) && body.checkbokmulti.length > 0) {
+        for (const key of body.checkbokmulti) {
+          body[key] = true;
+        }
+      }
+      if (body.typemulti && typeof body.typemulti === 'object' && body.typemulti.value) {
+        body[body.typemulti.value] = true;
+      }
+
       const {
         type_reservation = 'fit',
         guest_profile_id,
@@ -1381,7 +1456,7 @@ success(res, formatted, 'Success', 200, {
         room_reservation_list = [],
         promo_code,
         dept_branch,
-      } = req.body;
+      } = body;
 
       // Validation
       const errors: Record<string, string[]> = {};
@@ -1757,8 +1832,8 @@ success(res, formatted, 'Success', 200, {
       });
       success(res, result, message, 200);
     } catch (err: any) {
-      console.error('Reservation store error:', err);
-      error(res, 'Failed to create reservation', 500);
+      console.error('Reservation store error:', err?.message, err?.stack?.substring(0, 500));
+      error(res, `Failed to create reservation: ${err?.message || 'unknown'}`, 500);
     }
   }
 

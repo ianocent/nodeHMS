@@ -19,6 +19,12 @@ router.post('/front-desk/shift/start', authMiddleware, FrontDeskController.shift
 router.post('/front-desk/shift/end', authMiddleware, FrontDeskController.shiftEnd);
 router.get('/front-desk/shift-roster', authMiddleware, FrontDeskController.shiftRosterList);
 
+// Laravel parity: /cms/shift/start (without front-desk prefix)
+router.get('/shift', authMiddleware, FrontDeskController.shiftList);
+router.post('/shift/start', authMiddleware, FrontDeskController.shiftStart);
+router.post('/shift/end', authMiddleware, FrontDeskController.shiftEnd);
+router.get('/shift-roster', authMiddleware, FrontDeskController.shiftRosterList);
+
 // Front desk routes (menuId: 63 from Laravel)
 router.get('/front-desk', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
 router.get('/front-desk/:id', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);

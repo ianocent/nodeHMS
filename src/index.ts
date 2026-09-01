@@ -60,6 +60,9 @@ app.use(express.text({ limit: '10mb', type: 'text/plain' }));
 // 2b. Static files — Laravel storage/app/public parity (/storage/{path})
 app.use('/storage', express.static(path.join(process.cwd(), 'storage')));
 
+// 2c. Theme static files — SVG icons, images (/theme/cms/images/...)
+app.use('/theme', express.static(path.join(process.cwd(), 'theme')));
+
 // 3. Request logger
 app.use(requestLogger);
 

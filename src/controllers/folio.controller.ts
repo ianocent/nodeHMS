@@ -376,10 +376,10 @@ export class FolioController {
         status_guests: (grouped['guest-status'] || []).map((t: any) => ({ value: Number(t.id), label: t.name })),
         reason_cancels: (grouped['cancellation-reservation'] || []).map((t: any) => ({ value: t.name, label: t.name })),
         typemulti: [
-          { label: 'FIT', value: 'fit' },
-          { label: 'GIT', value: 'git' },
-          { label: 'VR', value: 'vr' },
-          { label: 'Day Use', value: 'day-use' },
+          { label: 'Normal', value: 'normal' },
+          { label: 'Walk In', value: 'is_walk_in' },
+          { label: 'House Use', value: 'is_house_use' },
+          { label: 'Complimentary', value: 'complimentary' },
         ],
       };
 
