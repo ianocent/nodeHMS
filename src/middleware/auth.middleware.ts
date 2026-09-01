@@ -67,6 +67,11 @@ export async function authMiddleware(
     }
   }
 
+  // Fallback to ?token= query param (for SSE/EventSource which can't set headers)
+  if (!tokenHeader && req.query.token) {
+    tokenHeader = req.query.token as string;
+  }
+
   if (!tokenHeader) {
     unauthorized(res, 'Token not provided');
     return;

@@ -1997,14 +1997,14 @@ success(res, formatted, 'Success', 200, {
       };
 
       const [companies, roomTypes, types, property, contacts] = await Promise.all([
-        prisma.company_profiles.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-        prisma.room_types.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.company_profiles.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE, property_id: pid }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.room_types.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE, property_id: pid }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
         prisma.types.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE, group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status'] } },
           select: { id: true, name: true, group: true },
         }),
         prisma.properties.findUnique({ where: { id: pid }, include: { cities: true } }),
-        prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+        prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null, property_id: pid }, select: { id: true, name: true } }),
       ]);
 
       const uidCols = [

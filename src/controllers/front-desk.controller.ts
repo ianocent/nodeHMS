@@ -1372,7 +1372,7 @@ room: roomName,
 
       const modelIds = filtered.filter((t: any) => t.model_id).map((t: any) => t.model_id);
       const [companies, guests] = await Promise.all([
-        prisma.company_profiles.findMany({ where: { id: { in: modelIds } }, select: { id: true, name: true } }).catch(() => []),
+        prisma.company_profiles.findMany({ where: { id: { in: modelIds }, property_id: pid }, select: { id: true, name: true } }).catch(() => []),
         prisma.guest_profiles.findMany({ where: { id: { in: modelIds } }, select: { id: true, first_name: true, last_name: true } }).catch(() => []),
       ]);
       const modelMap = new Map<string, string>();

@@ -325,12 +325,12 @@ export class FolioController {
 
       const [roomTypes, companies, types, codeBillings] = await Promise.all([
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: 1 },
+          where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
         prisma.company_profiles.findMany({
-          where: { deleted_at: null, status_company: '1' },
+          where: { deleted_at: null, status_company: '1', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -343,7 +343,7 @@ export class FolioController {
           select: { id: true, name: true, group: true },
         }),
         prisma.code_billings.findMany({
-          where: { deleted_at: null, status: 1 },
+          where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),

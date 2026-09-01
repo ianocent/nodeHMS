@@ -280,7 +280,7 @@ export class RateController {
       }
 
 const allCodePosts = await prisma.code_posts.findMany({
-        where: { deleted_at: null, status: STATUS_ACTIVE },
+        where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });
@@ -478,7 +478,7 @@ const allCodePosts = await prisma.code_posts.findMany({
           orderBy: { name: 'asc' },
         }),
         prisma.code_posts.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -661,7 +661,7 @@ prisma.room_types.findMany({
           orderBy: { name: 'asc' },
         }),
         prisma.code_posts.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),

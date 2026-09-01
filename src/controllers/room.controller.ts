@@ -1180,12 +1180,12 @@ export class RoomController {
           { value: 0, label: 'Inactive' },
         ]),
         prisma.rooms.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -1368,6 +1368,7 @@ export class RoomController {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
+      const propertyId = req.user?.lastProperty;
 
       const [room, activeRooms, roomTypes, roomConfigs, inRoomEquipments, floors, buildings] = await Promise.all([
         prisma.rooms.findUnique({
@@ -1378,12 +1379,12 @@ export class RoomController {
           },
         }),
         prisma.rooms.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
+          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),

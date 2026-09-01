@@ -10,6 +10,7 @@ import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { TABLES } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
 import { firebaseService } from '../services/firebase.service';
+import { notificationService } from '../services/notification.service';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -1695,6 +1696,18 @@ success(res, bigintToNumber(data), 'Success', 200, {
                 room_id: String(Number(roomId)),
                 date: dateObj.toISOString().slice(0, 10),
               },
+            });
+          }
+          // Also push SSE to web users with perform_inspection permission
+          if (userIds.length > 0) {
+            const roomName = room.name ?? `Room #${room.id}`;
+            notificationService.pushToMany(userIds.map(id => BigInt(id)), 'housekeeping-notification', {
+              type: 'inspection_required',
+              message: `Kamar ${roomName} sudah selesai dibersihkan, silakan lakukan inspeksi.`,
+              room_id: String(Number(roomId)),
+              room_number: room.name,
+              date: dateObj.toISOString().slice(0, 10),
+              time: new Date().toISOString(),
             });
           }
         } catch (fcmErr: any) {

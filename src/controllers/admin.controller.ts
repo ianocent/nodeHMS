@@ -8,6 +8,7 @@ import { TABLES, laravelPaging } from '../utils/tableMeta';
 import { STATUSES, REGIONS, SUBSCRIBE_TYPES, IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS } from '../utils/cmsConfig';
 import { AuthController } from './auth.controller';
 import { TokenService } from '../services/token.service';
+import { notificationService } from '../services/notification.service';
 
 const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adminAdapter = new PrismaPg(adminPool);
@@ -756,6 +757,17 @@ export class AdminController {
           priority: priority || 'Medium', created_on: new Date(), created_at: new Date(), updated_at: new Date(),
         },
       });
+      // Push SSE notification to target user
+      if (to_user_id) {
+        notificationService.push(BigInt(to_user_id), 'task-created', {
+          id: Number(task.id),
+          type: 'task',
+          message: task.message || 'New task assigned',
+          room_number: task.room_number,
+          priority: task.priority,
+          time: task.created_at?.toISOString() || new Date().toISOString(),
+        });
+      }
       success(res, bigintToNumber(task), 'Task created');
     } catch (err: any) { error(res, 'Failed to create task', 500); }
   }
@@ -820,6 +832,17 @@ export class AdminController {
         where: { id: BigInt(raw) },
         data: { status: status as any, updated_at: new Date() },
       });
+      // Push SSE notification to task owner
+      if (task.to_user_id) {
+        notificationService.push(task.to_user_id, 'task-updated', {
+          id: Number(task.id),
+          type: 'task',
+          status: task.status,
+          message: `Task status changed to ${task.status}`,
+          room_number: task.room_number,
+          time: new Date().toISOString(),
+        });
+      }
       res.json({ code: 200, message: 'Task status updated successfully', data: bigintToNumber(task) });
     } catch (err: any) { console.error('Task update error:', err); error(res, 'Failed to update task', 500); }
   }
@@ -848,6 +871,17 @@ export class AdminController {
           updated_at: new Date(),
         },
       });
+      // Push SSE notification to task creator (parent task owner)
+      if (parent.created_by) {
+        notificationService.push(parent.created_by, 'task-reply', {
+          id: Number(reply.id),
+          parent_id: Number(parent.id),
+          type: 'task',
+          message: reply.message || 'New reply',
+          room_number: reply.room_number,
+          time: reply.created_at?.toISOString() || new Date().toISOString(),
+        });
+      }
       res.json({ code: 200, message: 'Reply sent successfully', data: bigintToNumber(reply) });
     } catch (err: any) { console.error('Task reply error:', err); error(res, 'Failed to send reply', 500); }
   }
@@ -949,7 +983,8 @@ export class AdminController {
   static async userList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const where: any = { deleted_at: null };
+      const pid = req.user?.lastProperty ?? 0n;
+      const where: any = { property_id: pid, deleted_at: null };
       if (search) {
         where.OR = [
           { name: { contains: search, mode: 'insensitive' } },
@@ -960,8 +995,8 @@ export class AdminController {
       const client = getPrisma();
       console.log('[DEBUG] userList client created');
       const [users, total] = await Promise.all([
-        client.users.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
-        client.users.count({ where: { deleted_at: null } }),
+        client.users.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
+        client.users.count({ where: { property_id: pid, deleted_at: null } }),
       ]);
       console.log('[DEBUG] userList found', users.length, 'users');
       const userIds = users.map(u => u.id);
@@ -1322,8 +1357,9 @@ export class AdminController {
   // ================================================================
   static async userListAll(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const users = await getPrisma().users.findMany({
-        where: { status: 1 },
+        where: { property_id: pid, status: 1 },
         select: { id: true, name: true, username: true, email: true },
         orderBy: { name: 'asc' },
       });
@@ -1339,8 +1375,9 @@ export class AdminController {
   // ================================================================
   static async roleListAll(req: Request, res: Response): Promise<void> {
     try {
+      const pid = req.user?.lastProperty ?? 0n;
       const roles = await getPrisma().roles.findMany({
-        where: { deleted_at: null },
+        where: { property_id: pid, deleted_at: null },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });

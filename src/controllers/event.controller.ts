@@ -48,7 +48,8 @@ export class EventController {
   static async venueList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const where: any = {};
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       const [data, total] = await Promise.all([
@@ -104,9 +105,10 @@ export class EventController {
 
   static async venueMaster(req: Request, res: Response): Promise<void> {
     try {
+      const pid = Number(req.user?.lastProperty ?? 0);
       const [venues, layouts] = await Promise.all([
-        prisma.event_venues.findMany({ where: { status: true }, orderBy: { name: 'asc' } }),
-        prisma.event_layouts.findMany({ where: { status: true }, orderBy: { name: 'asc' } }),
+        prisma.event_venues.findMany({ where: { status: true, property_id: pid }, orderBy: { name: 'asc' } }),
+        prisma.event_layouts.findMany({ where: { status: true, property_id: pid }, orderBy: { name: 'asc' } }),
       ]);
       success(res, { venues: bigintToNumber(venues), layouts: bigintToNumber(layouts) }, 'Success');
     } catch (err: any) { error(res, 'Failed to load master data', 500); }
@@ -115,7 +117,8 @@ export class EventController {
   static async capacityList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const where: any = {};
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid };
       if (search) where.description = { contains: search, mode: 'insensitive' };
 
       const [data, total, venues, layouts] = await Promise.all([
@@ -191,7 +194,8 @@ export class EventController {
   static async layoutList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const where: any = {};
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       const [data, total] = await Promise.all([
@@ -223,7 +227,7 @@ export class EventController {
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const data = await prisma.event_layouts.create({
-        data: { name, description, status: status ?? true, created_at: new Date() },
+        data: { property_id: Number(req.user?.lastProperty ?? 0), name, description, status: status ?? true, created_at: new Date() },
       });
       success(res, bigintToNumber(data), 'Layout created', 201);
     } catch (err: any) { console.error('Layout store error:', err); error(res, 'Failed to create layout', 500); }
@@ -393,7 +397,8 @@ static async eventList(req: Request, res: Response): Promise<void> {
   static async packageList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const where: any = { deleted_at: null };
+      const pid = Number(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, deleted_at: null };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       const [data, total] = await Promise.all([
@@ -463,8 +468,8 @@ static async eventList(req: Request, res: Response): Promise<void> {
   static async inventoryList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
-      const pidInv = BigInt(req.user?.lastProperty ?? 0);
-      const where: any = {};
+      const pidInv = Number(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pidInv };
       if (search) where.description = { contains: search, mode: 'insensitive' };
 
       const [data, total, codePosts] = await Promise.all([
@@ -498,11 +503,12 @@ static async eventList(req: Request, res: Response): Promise<void> {
 
   static async inventoryStore(req: Request, res: Response): Promise<void> {
     try {
+      const pid = Number(req.user?.lastProperty ?? 0);
       const { code_post_id, description, sales, quantity } = req.body;
       if (!description) { badRequest(res, 'description is required'); return; }
 
       const data = await prisma.event_inventories.create({
-        data: { code_post_id: parseInt(code_post_id), description, sales: sales || 0, quantity: quantity || 0, created_at: new Date() },
+        data: { property_id: pid, code_post_id: parseInt(code_post_id), description, sales: sales || 0, quantity: quantity || 0, created_at: new Date() },
       });
       success(res, bigintToNumber(data), 'Inventory created', 201);
     } catch (err: any) { console.error('Inventory store error:', err); error(res, 'Failed to create inventory', 500); }

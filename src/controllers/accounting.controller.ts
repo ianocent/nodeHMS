@@ -608,8 +608,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
+      const pid = req.user?.lastProperty ?? 0n;
 
-      const where: any = { deleted_at: null };
+      const where: any = { deleted_at: null, property_id: pid };
 
       const [records, total] = await Promise.all([
         prisma.allocation_accountings.findMany({
@@ -698,8 +699,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     try {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
+      const pid = req.user?.lastProperty ?? 0n;
 
-      const where: any = { deleted_at: null };
+      const where: any = { deleted_at: null, property_id: pid };
 
       const [records, total] = await Promise.all([
         prisma.allocation_accountings.findMany({

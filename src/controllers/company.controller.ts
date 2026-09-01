@@ -37,7 +37,9 @@ export class CompanyController {
       const guestId = req.query.guest_id as string;
       const rateId = req.query.rate_id as string;
 
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { deleted_at: trash ? { not: null } : null };
+      if (pid) where.property_id = pid;
 
       if (isReservation) {
         where.deleted_at = null;
@@ -128,7 +130,9 @@ export class CompanyController {
   static async autocomplete(req: Request, res: Response): Promise<void> {
     try {
       const s = req.query.search as string;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { deleted_at: null };
+      if (pid) where.property_id = pid;
       if (s) where.name = { contains: s, mode: 'insensitive' };
       const data = await prisma.company_profiles.findMany({ where, select: { id: true, name: true }, orderBy: { name: 'asc' }, take: 20 });
       success(res, bn(data), 'Success');
@@ -444,7 +448,7 @@ export class CompanyController {
 
   // â”€â”€ Contact Person â”€â”€
   static async contactList(req: Request, res: Response): Promise<void> {
-    try { const data = await prisma.company_profile_contact_persons.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const where: any = { deleted_at: null }; if (pid) where.property_id = pid; const data = await prisma.company_profile_contact_persons.findMany({ where, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async contactStore(req: Request, res: Response): Promise<void> {
     try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, name, position, email, tel, mobile_phone, is_default } = req.body;
@@ -477,7 +481,7 @@ export class CompanyController {
 
   // â”€â”€ Department â”€â”€
   static async deptList(req: Request, res: Response): Promise<void> {
-    try { const data = await prisma.company_profile_departments.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const where: any = { deleted_at: null }; if (pid) where.property_id = pid; const data = await prisma.company_profile_departments.findMany({ where, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async deptStore(req: Request, res: Response): Promise<void> {
     try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, department, country_id, city_id, address, postal_code } = req.body;
@@ -497,7 +501,7 @@ export class CompanyController {
 
   // â”€â”€ Activity â”€â”€
   static async activityList(req: Request, res: Response): Promise<void> {
-    try { const data = await prisma.company_profile_activities.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const where: any = { deleted_at: null }; if (pid) where.property_id = pid; const data = await prisma.company_profile_activities.findMany({ where, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async activityStore(req: Request, res: Response): Promise<void> {
     try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, date, subject, objective, notes } = req.body;
@@ -516,7 +520,7 @@ export class CompanyController {
 
   // â”€â”€ Document â”€â”€
   static async documentList(req: Request, res: Response): Promise<void> {
-    try { const data = await prisma.company_profile_documents.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const where: any = { deleted_at: null }; if (pid) where.property_id = pid; const data = await prisma.company_profile_documents.findMany({ where, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async documentStore(req: Request, res: Response): Promise<void> {
     try {
@@ -550,7 +554,7 @@ export class CompanyController {
 
   // â”€â”€ Guest â”€â”€
   static async guestList(req: Request, res: Response): Promise<void> {
-    try { const data = await prisma.company_guests.findMany({ where: { deleted_at: null }, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const where: any = { deleted_at: null }; if (pid) where.property_id = pid; const data = await prisma.company_guests.findMany({ where, orderBy: { id: 'desc' } }); success(res, bn(data), 'Success'); } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async guestStore(req: Request, res: Response): Promise<void> {
     try {
@@ -579,7 +583,10 @@ export class CompanyController {
   // â”€â”€ Statistic â”€â”€
   static async statisticIndex(req: Request, res: Response): Promise<void> {
     try {
-      const data = await prisma.company_profile_statistics.findMany({ orderBy: { id: 'desc' }, take: 10 });
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = {};
+      if (pid) where.property_id = pid;
+      const data = await prisma.company_profile_statistics.findMany({ where, orderBy: { id: 'desc' }, take: 10 });
       success(res, bn(data), 'Success');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -704,7 +711,9 @@ export class CompanyController {
     try {
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { deleted_at: null };
+      if (pid) where.property_id = pid;
       if (s) where.OR = [{ billing: { contains: s, mode: 'insensitive' } }, { company_profiles: { is: { name: { contains: s, mode: 'insensitive' } } } }];
       const [data, total] = await Promise.all([
         prisma.company_profile_billing_setups.findMany({ where, include: { company_profiles: { select: { id: true, name: true } }, code_billings: { select: { id: true, name: true } } }, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),

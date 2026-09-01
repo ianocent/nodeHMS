@@ -8,6 +8,7 @@ import { DayUseRateController, ReportPermissionController } from '../controllers
 import { GenericController } from '../controllers/generic.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
+import { notificationService } from '../services/notification.service';
 
 const router = Router();
 const generic = new GenericController();
@@ -208,6 +209,10 @@ router.get('/hotel-competitor-dashboard', authMiddleware, SystemController.hotel
 
 // Helper endpoints
 router.get('/helper/task-notification', authMiddleware, SystemController.helperTaskNotification);
+// SSE push notifications — replaces polling
+router.get('/helper/notification-stream', authMiddleware, (req: any, res: any) => {
+  notificationService.subscribe(req.user.id, res);
+});
 router.get('/notification', authMiddleware, requirePermission(1152, 'view'), SystemController.notificationList);
 router.get('/helper/total-cancel-booking-engine', authMiddleware, SystemController.helperTotalCancelBookingEngine);
 router.post('/helper/release-last-user-folio', authMiddleware, SystemController.helperReleaseLastUserFolio);
