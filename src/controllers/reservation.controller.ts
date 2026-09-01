@@ -1273,23 +1273,34 @@ success(res, formatted, 'Success', 200, {
   static async create(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
+      if (!propertyId) {
+        error(res, 'No property selected', 400);
+        return;
+      }
 
-      const [statuses, roomTypes, companies, types, walkInCompany, houseUseCompany, property, logAudit] = await Promise.all([
-        prisma.folios.findMany({
-          where: { deleted_at: null, property_id: propertyId! },
-          select: { status_reservation: true },
-          distinct: ['status_reservation'],
-        }),
+      // Run queries individually — one failure shouldn't kill everything
+      let roomTypes: any[] = [];
+      let companies: any[] = [];
+      let types: any[] = [];
+      let walkInCompany: any = null;
+      let houseUseCompany: any = null;
+      let property: any = null;
+      let logAudit: any = null;
+
+      const results = await Promise.allSettled([
+        // 0: room_types (property-scoped)
         prisma.room_types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, property_id: propertyId! },
+          where: { deleted_at: null, status: STATUS_ACTIVE, property_id: propertyId },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
+        // 1: companies (all properties — PHP doesn't scope this)
         prisma.company_profiles.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE },
           select: { id: true, name: true, type_company: true, sync_mkt_segment_1: true, sync_mkt_segment_2: true, sync_mkt_segment_3: true, sync_mkt_segment_4: true, source: true },
           orderBy: { name: 'asc' },
         }),
+        // 2: types for market segments, source, guest-status, cancellation
         prisma.types.findMany({
           where: {
             deleted_at: null,
@@ -1298,21 +1309,44 @@ success(res, formatted, 'Success', 200, {
           },
           select: { id: true, name: true, group: true },
         }),
+        // 3: walk-in company
         prisma.company_profiles.findFirst({
           where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'Walk In' },
+          select: { id: true, name: true, sync_mkt_segment_1: true, sync_mkt_segment_2: true, sync_mkt_segment_3: true, sync_mkt_segment_4: true, source: true },
         }),
+        // 4: house-use company
         prisma.company_profiles.findFirst({
           where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'House Use' },
+          select: { id: true, name: true, sync_mkt_segment_1: true, sync_mkt_segment_2: true, sync_mkt_segment_3: true, sync_mkt_segment_4: true, source: true },
         }),
+        // 5: property config
         prisma.properties.findUnique({
-          where: { id: propertyId! },
+          where: { id: propertyId },
           select: { market_segment_1: true, market_segment_2: true, market_segment_3: true, market_segment_4: true, source: true, name: true, image: true, logo: true },
         }),
+        // 6: business date from log_audits
         prisma.log_audits.findFirst({
           where: { deleted_at: null, property_id: Number(propertyId) },
           orderBy: { date: 'desc' },
+          select: { date: true },
         }),
       ]);
+
+      // Unpack settled results — log failures but continue with defaults
+      const labels = ['room_types', 'companies', 'types', 'walkIn', 'houseUse', 'property', 'logAudit'];
+      results.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          console.error(`Reservation create - ${labels[i]} query failed:`, r.reason?.message || r.reason);
+        }
+      });
+
+      if (results[0].status === 'fulfilled') roomTypes = results[0].value;
+      if (results[1].status === 'fulfilled') companies = results[1].value;
+      if (results[2].status === 'fulfilled') types = results[2].value;
+      if (results[3].status === 'fulfilled') walkInCompany = results[3].value;
+      if (results[4].status === 'fulfilled') houseUseCompany = results[4].value;
+      if (results[5].status === 'fulfilled') property = results[5].value;
+      if (results[6].status === 'fulfilled') logAudit = results[6].value;
 
       const groupBy = (arr: any[], key: string) =>
         arr.reduce((acc, item) => {
@@ -1322,7 +1356,6 @@ success(res, formatted, 'Success', 200, {
 
       const grouped = groupBy(types, 'group');
 
-      // Sort guest-status: "Normal" first (PHP: GuestProfileController)
       const statusGuests = (grouped['guest-status'] || []).map((t: any) => ({ value: Number(t.id), label: t.name }));
       const normalGuest = statusGuests.filter((s: any) => /normal/i.test(s.label));
       const otherGuest = statusGuests.filter((s: any) => !/normal/i.test(s.label));
@@ -1330,29 +1363,35 @@ success(res, formatted, 'Success', 200, {
 
       // Business date from log_audits
       let businessDate: string;
-      if (logAudit) {
-        const [y, m, d] = logAudit.date.toISOString().substring(0, 10).split('-').map(Number);
-        businessDate = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().substring(0, 10);
+      if (logAudit?.date) {
+        const d = new Date(logAudit.date);
+        businessDate = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString().substring(0, 10);
       } else {
-        businessDate = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().substring(0, 10);
+        // Fallback: today + 7h (WIB)
+        const now = new Date(Date.now() + 7 * 60 * 60 * 1000);
+        businessDate = now.toISOString().substring(0, 10);
       }
 
       // Room data if room_id query param (PHP: ReservationController@create :239-263)
       let dataRoom: any = null;
       const roomId = req.query.room_id as string;
-      if (roomId) {
-        const room = await prisma.rooms.findUnique({ where: { id: BigInt(roomId) } });
-        if (room) {
-          const roomType = room.room_type_id ? await prisma.room_types.findUnique({ where: { id: room.room_type_id } }) : null;
-          const rateWalkIn = await prisma.rates.findFirst({
-            where: { deleted_at: null, status: STATUS_ACTIVE, name: { contains: 'Walk In', mode: 'insensitive' } },
-            orderBy: { module: 'desc' },
-          });
-          dataRoom = {
-            room: { id: Number(room.id), name: room.name },
-            room_type: { id: Number(room.room_type_id), name: roomType?.name ?? '' },
-            rate: rateWalkIn ? { id: Number(rateWalkIn.id), name: rateWalkIn.name } : null,
-          };
+      if (roomId && roomId !== 'null' && roomId !== 'undefined' && /^\d+$/.test(roomId)) {
+        try {
+          const room = await prisma.rooms.findUnique({ where: { id: BigInt(roomId) } });
+          if (room) {
+            const roomType = room.room_type_id ? await prisma.room_types.findUnique({ where: { id: room.room_type_id } }) : null;
+            const rateWalkIn = await prisma.rates.findFirst({
+              where: { deleted_at: null, status: STATUS_ACTIVE, name: { contains: 'Walk In', mode: 'insensitive' } },
+              orderBy: { module: 'desc' },
+            });
+            dataRoom = {
+              room: { id: Number(room.id), name: room.name },
+              room_type: { id: Number(room.room_type_id), name: roomType?.name ?? '' },
+              rate: rateWalkIn ? { id: Number(rateWalkIn.id), name: rateWalkIn.name } : null,
+            };
+          }
+        } catch (roomErr: any) {
+          console.error('Reservation create - room lookup failed:', roomErr.message);
         }
       }
 
@@ -1388,7 +1427,6 @@ success(res, formatted, 'Success', 200, {
           { label: 'COMPANY APPLICABLE', color: 'bg-success text-white rounded-md font-semibold' },
           { label: 'APPLICABLE FOR ALL', color: 'bg-primary text-white rounded-md font-semibold' },
         ],
-        // PHP ReservationController@create :218-293
         business_date: businessDate,
         is_walk_in: walkInCompany ? { id: Number(walkInCompany.id), name: walkInCompany.name, market_segment_1: walkInCompany.sync_mkt_segment_1, market_segment_2: walkInCompany.sync_mkt_segment_2, market_segment_3: walkInCompany.sync_mkt_segment_3, market_segment_4: walkInCompany.sync_mkt_segment_4, source: walkInCompany.source } : null,
         is_house_use: houseUseCompany ? { id: Number(houseUseCompany.id), name: houseUseCompany.name, market_segment_1: houseUseCompany.sync_mkt_segment_1, market_segment_2: houseUseCompany.sync_mkt_segment_2, market_segment_3: houseUseCompany.sync_mkt_segment_3, market_segment_4: houseUseCompany.sync_mkt_segment_4, source: houseUseCompany.source } : null,
@@ -1407,8 +1445,8 @@ success(res, formatted, 'Success', 200, {
 
       success(res, [], 'Success', 200, { master });
     } catch (err: any) {
-      console.error('Reservation create form error:', err);
-      error(res, 'Failed to load form data', 500);
+      console.error('Reservation create form error:', err?.message || err);
+      error(res, 'Failed to load form data: ' + (err?.message || 'unknown'), 500);
     }
   }
 
