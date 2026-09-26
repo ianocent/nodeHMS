@@ -4,6 +4,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { STATUSES } from '../utils/cmsConfig';
+import { TABLES } from '../utils/tableMeta';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { AuthController } from './auth.controller';
 
@@ -22,6 +23,13 @@ function parseJsonField(val: any, fallback: any): any {
 }
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -39,6 +47,28 @@ function idParam(val: any): bigint | null {
   const s = String(val);
   if (!/^\d+$/.test(s)) return null;
   return BigInt(s);
+}
+
+function parseCompanyGuest(v: any): { model_type: string | null; model_id: bigint | null } {
+  if (typeof v !== 'string') return { model_type: null, model_id: null };
+  const m = v.match(/^(\d+)-(CompanyProfile|GuestProfile)$/);
+  if (!m) return { model_type: null, model_id: null };
+  return { model_type: `App\\Models\\${m[2]}`, model_id: BigInt(m[1]) };
+}
+
+function allotmentBody(data: any): any {
+  const out: any = {};
+  for (const k of ['start_date', 'end_date', 'description', 'status', 'release_allotment']) {
+    if (k in data && data[k] !== undefined) out[k] = data[k];
+  }
+  if (typeof out.release_allotment === 'string') out.release_allotment = parseInt(out.release_allotment) || 0;
+  if (typeof out.status === 'string') out.status = parseInt(out.status) || 0;
+  const parsed = parseCompanyGuest(data.company_guest);
+  if (parsed.model_type) {
+    out.model_type = parsed.model_type;
+    out.model_id = parsed.model_id;
+  }
+  return out;
 }
 
 const AUDIT_KEYS = ['id', 'created_at', 'updated_at', 'deleted_at', 'created_by', 'updated_by', 'deleted_by', 'undefined'];
@@ -136,6 +166,7 @@ const PROPERTY_SCOPED_MODELS = new Set([
   'email_builder', 'email_builders', 'email_group', 'email_groups',
   'cancelation_rule', 'cancelation_rules', 'cancelation_rule_date', 'cancelation_rule_dates',
   'day_use_rate', 'day_use_rates', 'car_park', 'car_parks',
+  'hotel_competitor', 'hotel_competitors', 'master_hotel_competitor', 'master_hotel_competitors',
 ]);
 
 // menuId-based permission per generic model (Laravel hasCrudPermission parity).
@@ -144,6 +175,8 @@ const MODEL_MENU: Record<string, number> = {
   staah_interfaces: 1185,
   staah_ota_company_mappings: 1186,
   rates: 109,
+  yields: 1102,
+  holidays: 89,
 };
 
 const TIME_FIELDS = ['time_start', 'time_end', 'overtime_start', 'overtime_end'];
@@ -154,9 +187,8 @@ function formatTimeFields(row: any): any {
   const out: any = { ...row };
   for (const key of TIME_FIELDS) {
     const v = row[key];
-    if (v instanceof Date && !isNaN(v.getTime())) {
-      out[key] = v.toISOString().slice(11, 16);
-    }
+    if (v instanceof Date && !isNaN(v.getTime())) out[key] = v.toISOString().slice(11, 16);
+    else if (typeof v === 'string' && /^\d{1,2}:\d{2}(:\d{2})?$/.test(v)) out[key] = v.slice(0, 5);
   }
   return out;
 }
@@ -183,6 +215,22 @@ export class GenericController {
     return getPermissionFlags(req.user as any, menuId);
   }
 
+  private async listTable(model: string, propertyId: bigint | null): Promise<any[] | null> {
+    const plural = this.toPlural(model);
+    const cfg = TABLES[model] || TABLES[plural];
+    if (!cfg) return null;
+    const table = cfg.map((c: any) => ({ ...c }));
+    if (plural === 'yields') {
+      const roomTypes = await getPrisma().room_types.findMany({
+        where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      if (table[3] && table[3].key === 'room_type_id') table[3].options = roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name }));
+    }
+    return table;
+  }
+
   private getPrismaModel(modelName: string): any {
     const client = getPrisma();
     const model = (client as any)[this.toPlural(modelName)];
@@ -195,6 +243,8 @@ export class GenericController {
     // Protect against names like "payment_matrices" or "stocks" which
     // are already the Prisma delegate keys.
     if (!name) return name;
+    // Snake-case singular route models whose Prisma delegates are plural
+    if (name === 'hotel_competitor' || name === 'master_hotel_competitor') return name + 's';
     if (name.includes('_') || name.endsWith('s')) return name;
 
     const kebabOverrides: Record<string, string> = {
@@ -326,15 +376,18 @@ export class GenericController {
       ]);
 
       // Build default table config from first record's keys
-      const firstRecord = data[0] || {};
-      const table = Object.keys(firstRecord).slice(0, 6).map((key) => ({
-        label: key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-        key,
-        type: key === 'id' || key.endsWith('_id') || key.endsWith('_by') ? 'none' : 'string',
-        is_search: key === 'name' || key === 'code' || key === 'description',
-      }));
-      if (table.length > 0) table.push({ label: 'Action', key: 'action', type: 'action', is_search: false });
-
+      // (Laravel formatTable parity override when TABLES defines the model)
+      let table = await this.listTable(model, req.user?.lastProperty ?? null);
+      if (!table) {
+        const firstRecord = data[0] || {};
+        table = Object.keys(firstRecord).slice(0, 6).map((key) => ({
+          label: key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+          key,
+          type: key === 'id' || key.endsWith('_id') || key.endsWith('_by') ? 'none' : 'string',
+          is_search: key === 'name' || key === 'code' || key === 'description',
+        }));
+        if (table.length > 0) table.push({ label: 'Action', key: 'action', type: 'action', is_search: false });
+      }
       const permission = this.getPermission(req, model);
 
       success(res, formatTimeRows(bigintToNumber(data)), 'Success', 200, {
@@ -372,6 +425,45 @@ export class GenericController {
     }
   }
 
+  // Laravel AllotmentController@getGuestAndCompany parity
+  async getGuestAndCompany(req: Request, res: Response): Promise<void> {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 5;
+      const search = req.query.search ? String(req.query.search) : '';
+      const prisma = getPrisma();
+      const companyWhere: any = { deleted_at: null, status: 1 };
+      if (search) companyWhere.name = { contains: search, mode: 'insensitive' };
+      const guestWhere: any = { deleted_at: null, status: 1 };
+      if (search) {
+        guestWhere.OR = [
+          { first_name: { contains: search, mode: 'insensitive' } },
+          { last_name: { contains: search, mode: 'insensitive' } },
+        ];
+      }
+
+      const [companies, guests] = await Promise.all([
+        prisma.company_profiles.findMany({ where: companyWhere, skip: (page - 1) * limit, take: limit, orderBy: { id: 'asc' } }),
+        prisma.guest_profiles.findMany({ where: guestWhere, skip: (page - 1) * limit, take: limit, orderBy: { id: 'asc' } }),
+      ]);
+
+      const companyRows = companies.map((c: any) => ({ id: `${Number(c.id)}-CompanyProfile`, name: `${c.name}(Company Profile)` }));
+      const guestRows = guests.map((g: any) => ({ id: `${Number(g.id)}-GuestProfile`, name: `${g.first_name}(Guest Profile)` }));
+      const merge = [...companyRows, ...guestRows];
+
+      success(res, merge, 'Success', 200, {
+        table: [
+          { label: 'Name', key: 'name', type: 'none', is_search: false },
+        ],
+        search_data: [],
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(merge.length / limit)), per_page: limit, total: merge.length, from: merge.length ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, merge.length) },
+      });
+    } catch (err: any) {
+      console.error('Generic get guest and company error:', err);
+      error(res, 'Failed to load data', 500);
+    }
+  }
+
   private async buildMaster(model: string, propertyId: bigint | null): Promise<{ [key: string]: any }> {
     const prisma = getPrisma();
     const base: { [key: string]: any } = { statuses: STATUSES };
@@ -389,7 +481,7 @@ export class GenericController {
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         });
-        base.company_guest = companies.map((c: any) => ({ value: Number(c.id), label: c.name }));
+        base.company_guest = companies.map((c: any) => ({ value: `${Number(c.id)}-CompanyProfile`, label: c.name }));
       }
       return base;
     } catch (err: any) {
@@ -423,7 +515,26 @@ export class GenericController {
       if (!record) { notFound(res, 'Record not found'); return; }
       const permission = this.getPermission(req, model);
       const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
-      success(res, formatTimeRows(bigintToNumber(record)), 'Success', 200, { table: [], master, search_data: [], permission });
+      let out = record;
+      if (model === 'allotment') {
+        // Laravel Allotment global field parity: company_guest "id-ModelName", name, profiles
+        let name: string | null = null;
+        if (record.model_type && record.model_id) {
+          const cls = String(record.model_type).split('\\').pop();
+          const table = cls === 'CompanyProfile' ? 'company_profiles' : cls === 'GuestProfile' ? 'guest_profiles' : null;
+          if (table) {
+            const target: any = await (getPrisma() as any)[table].findUnique({ where: { id: record.model_id } });
+            if (target) name = cls === 'CompanyProfile' ? target.name : `${target.first_name} ${target.last_name ?? ''}`.trim();
+          }
+        }
+        out = {
+          ...record,
+          company_guest: record.model_id ? `${Number(record.model_id)}-${String(record.model_type).includes('GuestProfile') ? 'GuestProfile' : 'CompanyProfile'}` : null,
+          name,
+          profiles: [],
+        };
+      }
+      success(res, formatTimeRows(bigintToNumber(out)), 'Success', 200, { table: [], master, search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic edit form error:', err); error(res, 'Failed to load', 500); }
@@ -445,7 +556,7 @@ export class GenericController {
         if (rangeError) { badRequest(res, rangeError); return; }
       }
 
-      const data = sanitizeBody(req.body);
+      const data = model === 'allotment' ? allotmentBody(sanitizeBody(req.body)) : sanitizeBody(req.body);
       if (!data.property_id && req.user?.lastProperty) data.property_id = BigInt(req.user.lastProperty);
       data.created_at = new Date();
       data.updated_at = new Date();
@@ -461,7 +572,7 @@ export class GenericController {
         }
       }
       const permission = this.getPermission(req, model);
-      success(res, bigintToNumber(record), 'Created', 201, { table: [], search_data: [], permission });
+      success(res, bigintToNumber(record), 'Created', 200, { table: [], search_data: [], permission });
     } catch (err: any) {
       console.error('Generic create error:', err);
       if (err.code === 'P2002') badRequest(res, 'Duplicate entry');
@@ -489,7 +600,7 @@ async update(req: Request, res: Response): Promise<void> {
         if (rangeError) { badRequest(res, rangeError); return; }
       }
 
-      const data = sanitizeBody(req.body);
+      const data = model === 'allotment' ? allotmentBody(sanitizeBody(req.body)) : sanitizeBody(req.body);
       data.updated_at = new Date();
       const record = await modelDelegate.update({ where: { id: parsedId }, data });
       success(res, bigintToNumber(record), 'Updated');

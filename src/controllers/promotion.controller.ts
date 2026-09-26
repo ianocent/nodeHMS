@@ -25,6 +25,13 @@ function generatePromotionCode(): string {
 }
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -36,6 +43,27 @@ function bigintToNumber(val: any): any {
     return out;
   }
   return val;
+}
+
+function toInt(v: any, fallback = 0): number {
+  if (v === undefined || v === null || v === '') return fallback;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  const n = Number(v);
+  return Number.isNaN(n) ? fallback : Math.trunc(n);
+}
+
+function toBool(v: any, fallback = false): boolean {
+  if (v === undefined || v === null || v === '') return fallback;
+  if (typeof v === 'boolean') return v;
+  if (v === 1 || v === '1' || v === 'true' || v === 'on' || v === 'yes') return true;
+  if (v === 0 || v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return fallback;
+}
+
+function toDate(v: any): Date | null {
+  if (!v) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 export class PromotionController {
@@ -285,22 +313,22 @@ export class PromotionController {
 
       const promotion = await prisma.promotions.create({
         data: {
-          property_id: req.user?.lastProperty ? BigInt(req.user.lastProperty) : null,
+property_id: req.user?.lastProperty ? BigInt(req.user.lastProperty) : null,
           promotion_type,
           promotion_code,
           description,
-          from_stay_date: from_stay_date ? new Date(from_stay_date) : null,
-          to_stay_date: to_stay_date ? new Date(to_stay_date) : null,
-          from_validity_date: from_validity_date ? new Date(from_validity_date) : null,
-          to_validity_date: to_validity_date ? new Date(to_validity_date) : null,
-          no_of_night_discount: no_of_night_discount || 0,
-          discount_percentage: discount_percentage || 0,
-          discount_flat: discount_flat || 0,
-          min_night: min_night || 0,
-          apply_to_every_min_night: apply_to_every_min_night || false,
+          from_stay_date: toDate(from_stay_date),
+          to_stay_date: toDate(to_stay_date),
+          from_validity_date: toDate(from_validity_date),
+          to_validity_date: toDate(to_validity_date),
+          no_of_night_discount: toInt(no_of_night_discount),
+          discount_percentage: toInt(discount_percentage),
+          discount_flat: toInt(discount_flat),
+          min_night: toInt(min_night),
+          apply_to_every_min_night: toBool(apply_to_every_min_night),
           rules,
-          sort: sort || 0,
-          status: status ?? 1,
+          sort: toInt(sort),
+          status: toInt(status, 1),
           created_at: new Date(),
           updated_at: new Date()
         }
@@ -419,21 +447,21 @@ export class PromotionController {
       await prisma.promotions.update({
         where: { id },
         data: {
-          promotion_type,
+promotion_type,
           promotion_code,
           description,
-          from_stay_date: from_stay_date ? new Date(from_stay_date) : null,
-          to_stay_date: to_stay_date ? new Date(to_stay_date) : null,
-          from_validity_date: from_validity_date ? new Date(from_validity_date) : null,
-          to_validity_date: to_validity_date ? new Date(to_validity_date) : null,
-          no_of_night_discount: no_of_night_discount || 0,
-          discount_percentage: discount_percentage || 0,
-          discount_flat: discount_flat || 0,
-          min_night: min_night || 0,
-          apply_to_every_min_night: apply_to_every_min_night || false,
+          from_stay_date: toDate(from_stay_date),
+          to_stay_date: toDate(to_stay_date),
+          from_validity_date: toDate(from_validity_date),
+          to_validity_date: toDate(to_validity_date),
+          no_of_night_discount: toInt(no_of_night_discount),
+          discount_percentage: toInt(discount_percentage),
+          discount_flat: toInt(discount_flat),
+          min_night: toInt(min_night),
+          apply_to_every_min_night: toBool(apply_to_every_min_night),
           rules,
-          sort: sort || 0,
-          status: status ?? promotion.status,
+          sort: toInt(sort),
+          status: toInt(status, promotion.status ?? 1),
           updated_at: new Date()
         }
       });

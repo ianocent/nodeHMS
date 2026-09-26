@@ -5,6 +5,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, badRequest, unauthorized, validationError } from '../utils/response';
+import { storedImageUrl } from '../utils/storage';
 import { TokenService } from '../services/token.service';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -350,7 +351,7 @@ export class AuthController {
         is_need_shift: isNeedShift,
         bussinesDate: businessDate,
         property_name: property?.name ?? '',
-        property_image: property?.logo ? `/storage/${property.logo}` : null,
+        property_image: storedImageUrl(property?.logo),
       }, 'Success');
     } catch (err: any) {
       console.error('Change password error:', err);

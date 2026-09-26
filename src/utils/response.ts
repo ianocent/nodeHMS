@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import { encrypt } from './encryption';
+import { normalizeJson } from './json';
 
 export interface ApiMeta {
   permission?: Record<string, boolean>;
@@ -26,7 +27,9 @@ export interface ApiMeta {
 }
 
 function sendEncrypted(res: Response, statusCode: number, payload: Record<string, any>): Response {
-  const body = JSON.stringify(payload);
+  // Central normalization: Dates -> `Y-m-d H:i:s`, bigint -> number.
+  // Keeps every endpoint on Laravel's date format instead of ISO-8601.
+  const body = JSON.stringify(normalizeJson(payload));
   const encrypted = encrypt(body);
   return res.status(statusCode).type('text/plain').send(encrypted);
 }

@@ -36,6 +36,7 @@ router.put('/role/templates/:id', authMiddleware, requirePermission(1117, 'edit'
 router.get('/permissions', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionList);
 router.post('/permissions', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionStore);
 router.get('/permissions/:id', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionShow);
+router.get('/permissions/:id/update', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionEdit);
 router.put('/permissions/:id', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionUpdate);
 router.delete('/permissions/:id', authMiddleware, requirePermission(1118, 'delete'), AdminController.permissionDestroy);
 router.post('/permissions/:id/restore', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionRestore);
@@ -71,6 +72,8 @@ router.post('/user/fcm-token', authMiddleware, AdminController.saveFcmToken);
 // Property routes (choose-property page)
 router.get('/property', authMiddleware, AdminController.propertyList);
 router.get('/property/auth/:id', authMiddleware, AdminController.propertyAuth);
+// Serves property image as binary (not encrypted) — used as <img src> URL
+router.get('/property/:id/image', AdminController.propertyImage);
 router.get('/property/create', authMiddleware, AdminController.propertyCreate);
 router.post('/property', authMiddleware, AdminController.propertyStore);
 router.get('/property/:id/update', authMiddleware, AdminController.propertyEdit);
@@ -82,6 +85,7 @@ router.get('/permission', authMiddleware, requirePermission(1118, 'view'), Admin
 router.post('/permission', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionStore);
 router.get('/permission/create', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionCreate);
 router.get('/permission/:id', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionShow);
+router.get('/permission/:id/update', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionEdit);
 router.put('/permission/:id', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionUpdate);
 router.delete('/permission/:id', authMiddleware, requirePermission(1118, 'delete'), AdminController.permissionDestroy);
 router.post('/permission/:id/restore', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionRestore);

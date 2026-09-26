@@ -9,6 +9,7 @@ import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { dataSearch, applySearchField } from '../utils/search';
+import { storedImageUrl } from '../utils/storage';
 import { AuthController } from './auth.controller';
 import { TokenService } from '../services/token.service';
 import { enqueueJob } from '../config/queue';
@@ -645,6 +646,13 @@ const TABLE_COLUMNS = [
 ];
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -786,10 +794,49 @@ const [folios, total] = await Promise.all([
         prisma.folios.count({ where }),
       ]);
 
-      const formatted = await Promise.all(folios.map(async (f: any) => {
+      const folioIds = folios.map((f: any) => f.id);
+      const [batchTransactions, batchGuests, gitChildren] = await Promise.all([
+        prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, type_amount: true, total: true, model_type: true } }),
+        prisma.guest_profiles.findMany({
+          where: { id: { in: folios.filter((f: any) => !((f.first_name || '').trim()) && f.guest_profile_id).map((f: any) => f.guest_profile_id) } },
+          select: { id: true, first_name: true, last_name: true },
+        }),
+        prisma.folios.findMany({
+          where: { parent: { in: folioIds }, deleted_at: null, status_reservation: { not: 2 } },
+          select: { id: true, parent: true, transactions: { where: { model_type: 'App\\Models\\CompanyProfile' }, select: { type_amount: true, total: true } } },
+        }),
+      ]);
+      const txnByFolio = new Map<string, { type_amount: string | null; total: any; model_type: string | null }[]>();
+      for (const t of batchTransactions) {
+        const key = String(t.folio_id);
+        if (!txnByFolio.has(key)) txnByFolio.set(key, []);
+        txnByFolio.get(key)!.push(t);
+      }
+      const guestByProfileId = new Map(batchGuests.map((g: any) => [String(g.id), g]));
+      const childTxnByParent = new Map<string, { type_amount: string | null; total: any }[]>();
+      for (const c of gitChildren) {
+        const key = String(c.parent);
+        if (!childTxnByParent.has(key)) childTxnByParent.set(key, []);
+        for (const t of c.transactions) childTxnByParent.get(key)!.push(t);
+      }
+      const sumNet = (rows: { type_amount: string | null; total: any }[]) =>
+        rows.reduce((s, t) => s + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)), 0);
+      const balanceFor = (f: any): number => {
+        const isGit = String(f.type_reservation ?? '').toLowerCase() === 'git';
+        const parentNum = Number(f.parent ?? 0);
+        if (isGit && parentNum === 0) {
+          return sumNet(childTxnByParent.get(String(f.id)) || []) + sumNet(txnByFolio.get(String(f.id)) || []);
+        }
+        if (isGit && parentNum !== 0) {
+          return sumNet((txnByFolio.get(String(f.id)) || []).filter(t => t.model_type === 'App\\Models\\GuestProfile'));
+        }
+        return sumNet(txnByFolio.get(String(f.id)) || []);
+      };
+
+      const formatted = folios.map((f: any) => {
         let guestName = `${f.first_name || ''} ${f.last_name || ''}`.trim();
         if (!guestName && f.guest_profile_id) {
-          const gp = await prisma.guest_profiles.findUnique({ where: { id: f.guest_profile_id } });
+          const gp = guestByProfileId.get(String(f.guest_profile_id));
           if (gp) guestName = `${gp.first_name || ''} ${gp.last_name || ''}`.trim();
         }
 
@@ -797,8 +844,8 @@ const lastReservation = f.reservations?.[f.reservations.length - 1];
         const roomName = lastReservation?.rooms?.name || lastReservation?.room_name || '';
         const roomTypeName = lastReservation?.room_types?.name || lastReservation?.room_type_name || '';
 
-        // Laravel Folio@getBalance parity: MINUS subtracts, GIT parent/sub variants
-        const balance = await folioBalanceDisplay(f);
+        // Laravel Folio@getBalance parity: MINUS subtracts, GIT parent/sub variants (batched)
+        const balance = balanceFor(f);
 
         return {
           id: Number(f.id),
@@ -832,7 +879,7 @@ room: roomName,
           cc: lastReservation?.child || 0,
           actions: [],
         };
-      }));
+      });
 
       // Table columns (filtered for batch-check-out)
       let table = [...TABLE_COLUMNS];
@@ -944,6 +991,17 @@ room: roomName,
       for (const resv of folio.reservations) {
         const targetRoomId = resv.room_id_next ?? resv.room_id;
         if (targetRoomId != null) roomIds.push(targetRoomId);
+      }
+
+      // Laravel parity (Folio.php:1279-1284): non-virtual check-in requires a
+      // room on every reservation. getRoomAvailability() = false when any
+      // reservation has an empty room_id -> block with "Room not found".
+      if (!folio.is_virtual) {
+        const missingRoom = folio.reservations.some((r) => (r.room_id_next ?? r.room_id) == null);
+        if (missingRoom) {
+          badRequest(res, 'Room not found');
+          return;
+        }
       }
 
       if (!folio.is_virtual && roomIds.length > 0) {
@@ -2312,7 +2370,7 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
         });
         created.push(data);
       }
-      success(res, bigintToNumber(created), 'Batch posting created', 201);
+      success(res, bigintToNumber(created), 'Batch posting created', 200);
     } catch (err: any) { console.error('Batch posting error:', err); error(res, 'Failed to create batch posting', 500); }
   }
 
@@ -2446,7 +2504,13 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
       // where name/image are PROPERTY name/image at top level
       const property = await prisma.properties.findUnique({ where: { id: pid } });
       const propertyName = (property as any)?.name ?? '';
-      const propertyImage = (property as any)?.logo ? `${process.env.APP_URL || ''}/storage/${(property as any).logo}` : null;
+      const storedLogo = storedImageUrl((property as any)?.logo);
+      // storedImageUrl() -> null for legacy base64 columns, so this no longer
+      // emits APP_URL + '/storage' + <base64>. Swap in the id-based fallback so
+      // the shift-start payload still carries a usable image.
+      const propertyImage = storedLogo
+        ? `${process.env.APP_URL || ''}${storedLogo}`
+        : `${process.env.APP_URL || ''}/cms/property/${pid}/image`;
 
       const payload = {
         code: 200,

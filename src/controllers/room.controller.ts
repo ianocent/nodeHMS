@@ -14,6 +14,21 @@ function num(v: any, fallback = 0): number {
   const n = Number(v);
   return isNaN(n) ? fallback : n;
 }
+
+// Laravel base stores cleaning_time as raw TIME ("HH:MM") from <input type=time>.
+// Prisma models it as DateTime, so a bare time string would be Invalid Date and
+// crash create/update. Anchor to the UTC epoch: the column must only EVER carry a
+// time-of-day. Full datetimes (e.g. "2026-08-22T10:00") are stripped to their clock
+// part so a DATE never lands in the TIME column; pass timezone-fixed datetimes
+// through their clock value only.
+function parseCleaningTime(v: any): Date {
+  if (v === undefined || v === null || v === '') return new Date(Date.UTC(1970, 0, 1, 0, 0, 0));
+  const str = String(v).trim();
+  const m = str.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) return new Date(Date.UTC(1970, 0, 1, Number(m[1]), Number(m[2]), m[3] ? Number(m[3]) : 0));
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? new Date(Date.UTC(1970, 0, 1, 0, 0, 0)) : new Date(Date.UTC(1970, 0, 1, d.getHours(), d.getMinutes(), d.getSeconds()));
+}
 import {
   ROOM_STATUSES,
   MAID_STATUSES,
@@ -37,6 +52,13 @@ const STATUS_ACTIVE = 1;
 const MENU_ID = 1120;
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -1285,7 +1307,7 @@ export class RoomController {
           total_bed: Number(total_bed) || 0,
           with_tv: with_tv !== undefined ? Number(with_tv) : 0,
           with_shower: with_shower !== undefined ? Number(with_shower) : 0,
-          cleaning_time: cleaning_time ? new Date(cleaning_time) : new Date('1970-01-01T00:00:00'),
+          cleaning_time: cleaning_time !== undefined ? parseCleaningTime(cleaning_time) : new Date('1970-01-01T00:00:00'),
           linen_days: linen_days !== undefined ? Number(linen_days) : 0,
           remark: remark || null,
           room_status: room_status !== undefined ? Number(room_status) : 0,
@@ -1435,7 +1457,7 @@ export class RoomController {
         total_bed: room.total_bed,
         with_tv: Number(room.with_tv) || 0,
         with_shower: Number(room.with_shower) || 0,
-        cleaning_time: room.cleaning_time,
+        cleaning_time: room.cleaning_time ? room.cleaning_time.toISOString().slice(11, 16) : '00:00',
         linen_days: room.linen_days,
         sort: room.sort,
         address_code: room.address_code,
@@ -1509,25 +1531,31 @@ export class RoomController {
       const updateData: any = { updated_at: new Date(), updated_by: userId };
       // FE sends select values as {value,label} — unwrap before BigInt/Number casts
       const unwrap = (v: any): any => (v !== null && typeof v === 'object' ? v.value : v);
+      const intOf = (v: any): number | undefined => {
+        const raw = unwrap(v);
+        if (raw === undefined || raw === null || raw === '') return undefined;
+        const n = Number(raw);
+        return isNaN(n) ? undefined : n;
+      };
       if (room_type_id !== undefined) updateData.room_type_id = room_type_id ? BigInt(unwrap(room_type_id)) : null;
-      if (room_id !== undefined) updateData.room_id = room_id ? BigInt(unwrap(room_id)) : null;
+      if (room_id !== undefined) updateData.room_id = room_id && unwrap(room_id) ? BigInt(unwrap(room_id)) : null;
       if (name !== undefined) updateData.name = name;
       if (description !== undefined) updateData.description = description;
-      if (is_physical !== undefined) updateData.is_physical = Boolean(is_physical);
+      if (is_physical !== undefined) updateData.is_physical = Boolean(unwrap(is_physical));
       if (phone_ext !== undefined) updateData.phone_ext = phone_ext;
       if (map_id !== undefined) updateData.map_id = map_id;
-      if (max_pax !== undefined) updateData.max_pax = Number(max_pax);
-      if (total_bed !== undefined) updateData.total_bed = Number(total_bed);
-      if (with_tv !== undefined) updateData.with_tv = Number(with_tv);
-      if (with_shower !== undefined) updateData.with_shower = Number(with_shower);
-      if (cleaning_time !== undefined) updateData.cleaning_time = new Date(cleaning_time);
-      if (linen_days !== undefined) updateData.linen_days = Number(linen_days);
+      if (max_pax !== undefined) updateData.max_pax = intOf(max_pax) ?? 0;
+      if (total_bed !== undefined) updateData.total_bed = intOf(total_bed) ?? 0;
+      if (with_tv !== undefined) updateData.with_tv = intOf(with_tv) ?? 0;
+      if (with_shower !== undefined) updateData.with_shower = intOf(with_shower) ?? 0;
+      if (cleaning_time !== undefined) updateData.cleaning_time = parseCleaningTime(unwrap(cleaning_time));
+      if (linen_days !== undefined) updateData.linen_days = intOf(linen_days) ?? 0;
       if (remark !== undefined) updateData.remark = remark;
-      if (room_status !== undefined) updateData.room_status = Number(room_status);
-      if (maid_status !== undefined) updateData.maid_status = Number(maid_status);
+      if (room_status !== undefined) updateData.room_status = intOf(room_status) ?? 0;
+      if (maid_status !== undefined) updateData.maid_status = maid_status !== null && typeof maid_status === 'object' && maid_status.value !== undefined ? intOf(maid_status) ?? 0 : Number(maid_status ?? 0);
       if (address_code !== undefined) updateData.address_code = address_code;
-      if (sort !== undefined) updateData.sort = Number(sort);
-      if (status !== undefined) updateData.status = Number(status);
+      if (sort !== undefined) updateData.sort = intOf(sort) ?? 0;
+      if (status !== undefined) updateData.status = intOf(status) ?? 1;
 
       await prisma.rooms.update({ where: { id }, data: updateData });
 
@@ -1791,7 +1819,7 @@ export class RoomController {
         },
       });
 
-      success(res, bigintToNumber(record), 'Success', 201);
+      success(res, bigintToNumber(record), 'Success', 200);
     } catch (err: any) {
       console.error('Room type image store error:', err);
       error(res, 'Failed to store image', 500);
@@ -1984,7 +2012,7 @@ export class RoomController {
         },
       });
 
-      success(res, bigintToNumber(inventory), 'Success', 201);
+      success(res, bigintToNumber(inventory), 'Success', 200);
     } catch (err: any) {
       console.error('Room inventory store error:', err);
       error(res, 'Failed to create inventory item', 500);

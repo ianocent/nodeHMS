@@ -138,7 +138,7 @@ export class ReportController {
         },
       });
 
-      success(res, bigintToNumber(record), 'Batch report saved successfully', 201);
+      success(res, bigintToNumber(record), 'Batch report saved successfully', 200);
     } catch (err: any) {
       console.error('Report batchSave error:', err);
       error(res, 'Failed to save batch report', 500);

@@ -675,6 +675,13 @@ function round2(v: number) { return Math.round(v * 100) / 100; }
 function round4(v: number) { return Math.round(v * 10000) / 10000; }
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (val === null || val === undefined) return val;
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);

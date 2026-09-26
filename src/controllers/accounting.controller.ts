@@ -80,6 +80,13 @@ const TYPE_MAP: Record<string, string> = {
 };
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -260,8 +267,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
       const searchField = req.query.search_field as string;
       const searchValue = req.query.search_value as string;
 
-      // Laravel: SoftDeletes + HasStatus::onlyActive() macro -> status=1
-      const where: any = { deleted_at: null, status: 1 };
+      // Laravel: SoftDeletes + HasStatus::onlyActive() macro -> status=1; HasProperties -> property scope
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, deleted_at: null, status: 1 };
       if (search) {
         where.OR = [
           { account: { contains: search, mode: 'insensitive' } },
@@ -348,10 +356,11 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   static async createForm(req: Request, res: Response): Promise<void> {
     try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
       const [folios, typePayments] = await Promise.all([
-        prisma.folios.findMany({ where: { deleted_at: null, status: 1 }, select: { id: true, folio_number: true }, orderBy: { id: 'desc' }, take: 50 }),
+        prisma.folios.findMany({ where: { property_id: pid, deleted_at: null, status: 1 }, select: { id: true, folio_number: true }, orderBy: { id: 'desc' }, take: 50 }),
         // TypePayment is HasProperties-scoped in Laravel
-        prisma.type_payments.findMany({ where: { deleted_at: null, status: 1, property_id: req.user?.lastProperty ?? BigInt(0) }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        prisma.type_payments.findMany({ where: { property_id: pid, deleted_at: null, status: 1 }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       ]);
       success(res, { status: 1, type_accounting: String(req.params.type), date: new Date() }, 'Success', 200, {
         master: {
@@ -594,7 +603,7 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
         },
       });
 
-      success(res, bigintToNumber(created), 'Accounting record created successfully', 201);
+      success(res, bigintToNumber(created), 'Accounting record created successfully', 200);
     } catch (err: any) {
       console.error('Accounting store error:', err);
       error(res, 'Failed to create accounting record', 500);
@@ -676,7 +685,7 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
 
       const record = await prisma.allocation_accountings.create({ data });
 
-      success(res, bigintToNumber(record), 'Allocation created successfully', 201);
+      success(res, bigintToNumber(record), 'Allocation created successfully', 200);
     } catch (err: any) {
       console.error('Allocation store error:', err);
       error(res, 'Failed to create allocation', 500);

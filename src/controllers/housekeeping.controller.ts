@@ -44,7 +44,27 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
+// rooms.cleaning_time is a raw TIME ("HH:MM") column in PostgreSQL modelled as
+// DateTime; ANCHOR TO THE UTC EPOCH so the column only ever carries a time-of-day
+// (parity Laravel <input type=time>). Full datetimes (e.g. "2026-08-22T10:00") are
+// stripped to their clock part — a DATE must never land in a TIME column.
+function parseCleaningTimeInput(v: any): Date {
+  if (v === undefined || v === null || v === '') return new Date(Date.UTC(1970, 0, 1, 0, 0, 0));
+  const str = String(v).trim();
+  const m = str.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) return new Date(Date.UTC(1970, 0, 1, Number(m[1]), Number(m[2]), m[3] ? Number(m[3]) : 0));
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? new Date(Date.UTC(1970, 0, 1, 0, 0, 0)) : new Date(Date.UTC(1970, 0, 1, d.getHours(), d.getMinutes(), d.getSeconds()));
+}
+
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -189,7 +209,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
         });
       }
 
-      success(res, bigintToNumber(data), 'Setup created', 201);
+      success(res, bigintToNumber(data), 'Setup created', 200);
     } catch (err: any) { console.error('Setup store error:', err); error(res, 'Failed to create setup', 500); }
   }
 
@@ -384,6 +404,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
         };
         return {
           id: Number(room.id),
+          property_id: room.property_id ? Number(room.property_id) : null,
           name: room.name,
           description: room.description,
           phone_ext: room.phone_ext,
@@ -462,7 +483,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
           { label: 'Room type', key: 'room_type_id', type: 'none', is_search: false, options: [] },
           { label: 'Guest Name', key: 'guest', type: 'none', is_search: false },
           { label: 'DND', key: 'is_do_not_disturb', type: 'none', is_search: false },
-          { label: 'Cleaning time', key: 'cleaning_time', type: 'date', is_search: false },
+          { label: 'Cleaning time', key: 'cleaning_time', type: 'text', is_search: false },
           { label: 'Linen days', key: 'linen_days', type: 'none', is_search: false },
           { label: 'Bed', key: 'total_bed', type: 'none', is_search: false },
           { label: 'Phone Ext', key: 'phone_ext', type: 'none', is_search: false },
@@ -756,7 +777,7 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
         }
       }
 
-      success(res, bigintToNumber(data), 'Work order created', 201);
+      success(res, bigintToNumber(data), 'Work order created', 200);
     } catch (err: any) { console.error('Work order store error:', err); error(res, 'Failed to create work order', 500); }
   }
 
@@ -1291,7 +1312,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
       if (!room || room.deleted_at) { notFound(res, 'Not Found'); return; }
 
       if (!body.cleaning_time) { badRequest(res, 'The cleaning time field is required.'); return; }
-      await prisma.rooms.update({ where: { id: roomId }, data: { cleaning_time: new Date(body.cleaning_time), updated_at: new Date() } });
+      await prisma.rooms.update({ where: { id: roomId }, data: { cleaning_time: parseCleaningTimeInput(body.cleaning_time), updated_at: new Date() } });
 
       const dateStr = String(body.date ?? (req.user as any)?.bussinesDate ?? new Date().toISOString().slice(0, 10));
       const dateObj = new Date(dateStr.length <= 10 ? dateStr + 'T00:00:00.000Z' : dateStr);
@@ -1583,17 +1604,27 @@ success(res, bigintToNumber(data), 'Success', 200, {
         where: { date: dateObj, property_id: pid, is_assigned: 1 },
       });
 
+      const shiftIds = [...new Set(rosters.map((r) => r.shift_id).filter((s): s is number => s !== null && s !== undefined))];
+      const userIds = [...new Set(rosters.map((r) => r.user_id).filter((u): u is bigint => u !== null && u !== undefined))];
+
+      const [shifts, users] = await Promise.all([
+        shiftIds.length ? prisma.shift_roster.findMany({ where: { id: { in: shiftIds } } }) : Promise.resolve([]),
+        userIds.length ? prisma.users.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } }) : Promise.resolve([]),
+      ]);
+      const shiftMap = new Map(shifts.map((s) => [Number(s.id), s]));
+      const userMap = new Map(users.map((u) => [Number(u.id), u.name ?? 'Unknown User']));
+
       const result: { value: number; label: string }[] = [];
       for (const r of rosters) {
         if (r.shift_id === null || r.shift_id === undefined) continue;
-        const shift = await prisma.shift_roster.findUnique({ where: { id: BigInt(r.shift_id) } });
+        const shift = shiftMap.get(Number(r.shift_id));
         if (!shift?.time_start || !shift?.time_end) continue;
         const ts = shift.time_start.toISOString().slice(11, 16);
         const te = shift.time_end.toISOString().slice(11, 16);
         const inShift = ts <= te ? nowHm >= ts && nowHm <= te : nowHm >= ts || nowHm <= te;
         if (!inShift) continue;
-        const user = await prisma.users.findUnique({ where: { id: BigInt(r.user_id) }, select: { id: true, name: true } });
-        if (user) result.push({ value: Number(user.id), label: user.name ?? 'Unknown User' });
+        const user = userMap.get(Number(r.user_id));
+        if (user) result.push({ value: Number(r.user_id), label: user });
       }
 
       const unique = [...new Map(result.map((u) => [u.value, u])).values()];
@@ -1760,7 +1791,8 @@ success(res, bigintToNumber(data), 'Success', 200, {
       }
 
       const room = await prisma.rooms.findUnique({ where: { id: BigInt(roomIdRaw) } });
-      const where: any = { room_id: BigInt(roomIdRaw), deleted_at: null };
+      const pid = room?.property_id ?? BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, room_id: BigInt(roomIdRaw), deleted_at: null };
       if (fromDate && toDate) {
         where.date = { gte: new Date(fromDate + 'T00:00:00.000Z'), lte: new Date(toDate + 'T23:59:59.999Z') };
       } else if (fromDate) {

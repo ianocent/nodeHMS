@@ -52,8 +52,8 @@ router.get('/code-billing', authMiddleware, requirePermission(69, 'view'), Maste
 router.get('/code-billing/create', authMiddleware, requirePermission(69, 'add'), (req, res) => { req.params.model = 'code_billings'; MasterDataController.masterForm(req, res); });
 router.post('/code-billing', authMiddleware, requirePermission(69, 'add'), MasterDataController.codeBillingCreate);
 router.get('/code-billing/:id', authMiddleware, requirePermission(69, 'view'), MasterDataController.codeBillingShow);
-router.get('/code-billing/:id/edit', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeBillingEdit);
-router.get('/code-billing/:id/update', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeBillingEdit);
+router.get('/code-billing/:id/edit', authMiddleware, requirePermission(69, 'edit'), (req, res) => { req.params.model = 'code_billings'; MasterDataController.masterForm(req, res); });
+router.get('/code-billing/:id/update', authMiddleware, requirePermission(69, 'edit'), (req, res) => { req.params.model = 'code_billings'; MasterDataController.masterForm(req, res); });
 router.put('/code-billing/:id', authMiddleware, requirePermission(69, 'edit'), MasterDataController.codeBillingUpdate);
 router.delete('/code-billing/:id', authMiddleware, requirePermission(69, 'delete'), MasterDataController.codeBillingDestroy);
 

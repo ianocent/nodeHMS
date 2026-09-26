@@ -7,6 +7,7 @@ import { Pool } from 'pg';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { encrypt } from '../utils/encryption';
 import { badRequest, error, notFound, success } from '../utils/response';
+import { storedImageUrl } from '../utils/storage';
 import { crudPermission, laravelPaging, postCodeBudgetTable, setupTable } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
 import { TokenService } from '../services/token.service';
@@ -635,6 +636,13 @@ function getPrisma() {
 }
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -2846,7 +2854,7 @@ export class SystemController {
           id: Number(property.id),
           name: property.name,
           alias: property.alias,
-          logo: property.logo,
+          logo: storedImageUrl(property.logo),
           image: property.image,
           address: property.address,
           email: property.email,
@@ -4008,7 +4016,7 @@ static async helperTaskNotification(req: Request, res: Response): Promise<void> 
       const data = await getPrisma().room_change_histories.create({
         data: { property_id: pid, folio_id: BigInt(folio_id), folio_number: folio_number || '', check_in_date: new Date(check_in_date), check_out_date: new Date(check_out_date), from_room_id: BigInt(from_room_id), from_room_type_id: BigInt(from_room_type_id), to_room_id: BigInt(to_room_id), to_room_type_id: BigInt(to_room_type_id), user_id: userId, reason, datetime: new Date() },
       });
-      success(res, bigintToNumber(data), 'Room change recorded', 201);
+      success(res, bigintToNumber(data), 'Room change recorded', 200);
     } catch (err: any) { console.error('Room change error:', err); error(res, 'Failed to record room change', 500); }
   }
 

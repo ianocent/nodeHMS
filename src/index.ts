@@ -11,6 +11,7 @@ import { requestLogger } from './middleware/logger.middleware';
 import { requestParser } from './middleware/requestParser.middleware';
 import { errorHandler } from './middleware/errorHandler.middleware';
 import { success, notFound } from './utils/response';
+import { storageRoot } from './utils/storage';
 import authRoutes from './routes/auth.routes';
 import userGuestRoutes from './routes/user-guest.routes';
 import reservationRoutes from './routes/reservation.routes';
@@ -57,8 +58,10 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.text({ limit: '10mb', type: 'text/plain' }));
 
-// 2b. Static files — Laravel storage/app/public parity (/storage/{path})
-app.use('/storage', express.static(path.join(process.cwd(), 'storage')));
+// 2b. Static files — Laravel storage/app/public parity (/storage/{path}).
+// Must resolve to the SAME root the upload helpers write into, otherwise
+// STORAGE_PATH uploads 404 here.
+app.use('/storage', express.static(storageRoot()));
 
 // 2c. Theme static files — SVG icons, images (/theme/cms/images/...)
 app.use('/theme', express.static(path.join(process.cwd(), 'theme')));

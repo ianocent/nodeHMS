@@ -14,6 +14,7 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 const STATUS_ACTIVE = 1;
+const MODULE_BAR = 'bar';
 const MENU_ID = 86;
 const MENU_ID_BAR = 87;
 
@@ -219,6 +220,13 @@ async function resetRateSyncFlags(rateId: bigint): Promise<void> {
 }
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -245,6 +253,29 @@ function getDatesInRange(start: Date, end: Date): Date[] {
     current.setDate(current.getDate() + 1);
   }
   return dates;
+}
+
+// Laravel BarRate/RateRate store/index parse flat checkbox keys: days_*, room_type_*, fields_*
+function getPrefixedKeys(obj: any, prefix: string): string[] {
+  if (!obj || typeof obj !== 'object') return [];
+  return Object.keys(obj)
+    .filter((k) => k.startsWith(prefix))
+    .map((k) => k.slice(prefix.length))
+    .filter((v) => v !== '');
+}
+
+// Laravel ->srcarrwf('text_fields'): keys text_fields<code> -> { code: value }
+function pickTextFields(obj: any): Record<string, any> {
+  const out: Record<string, any> = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const k of Object.keys(obj)) {
+    if (k.startsWith('text_fields')) out[k.slice('text_fields'.length)] = obj[k];
+  }
+  return out;
+}
+
+function getBusinessDate(d: Date = new Date()): string {
+  return formatDate(d);
 }
 
 function getDayIndex(date: Date): number {
@@ -330,7 +361,7 @@ const allCodePosts = await prisma.code_posts.findMany({
       let syntheticBar: any = null;
       if (branchRateId) {
         const firstBar = await prisma.rates.findFirst({
-          where: { module: 'bar', deleted_at: null, status: STATUS_ACTIVE },
+          where: { module: 'bar', deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
           orderBy: { start_date: 'asc' },
           select: { start_date: true, end_date: true },
         });
@@ -482,13 +513,13 @@ const allCodePosts = await prisma.code_posts.findMany({
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
-        prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type' },
+prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -620,7 +651,7 @@ grouping: grouping || null,
           })
         : [];
 
-      const result = {
+const result = {
         ...rate,
         id: Number(rate.id),
         property_id: Number(rate.property_id),
@@ -628,6 +659,9 @@ grouping: grouping || null,
         minimum_rate: Number(rate.minimum_rate),
         start_date: rate.start_date ? formatDate(rate.start_date) : null,
         end_date: rate.end_date ? formatDate(rate.end_date) : null,
+        created_by: rate.created_by ? Number(rate.created_by) : null,
+        updated_by: rate.updated_by ? Number(rate.updated_by) : null,
+        deleted_by: rate.deleted_by ? Number(rate.deleted_by) : null,
         code_post: rate.code_posts ? { id: Number(rate.code_posts.id), name: rate.code_posts.name } : null,
         code_posts: undefined,
         rate_rates: undefined,
@@ -665,13 +699,13 @@ prisma.room_types.findMany({
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
-        prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type' },
+prisma.types.findMany({
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
@@ -689,6 +723,8 @@ prisma.room_types.findMany({
         comm_codes: [],
         company_types: companyTypes.map((t: any) => ({ value: Number(t.id), label: t.name })),
         cancelations: cancelations.map((t: any) => ({ value: Number(t.id), label: t.name })),
+        days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
+        fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
       };
 
       const result = {
@@ -879,7 +915,54 @@ prisma.room_types.findMany({
 
       // Determine date range
       if (!startDateStr || !endDateStr) {
-        success(res, [], 'Success', 200, { table: [], master: {}, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
+        // Parity: grid page must still render. Fall back to the rate's own
+        // validity range so the table shows on first open before picking dates.
+        const rateRow = await prisma.rates.findUnique({ where: { id: rateId } }).catch(() => null);
+        const defaultStart = rateRow?.start_date ? formatDate(rateRow.start_date) : '';
+        const defaultEnd = rateRow?.end_date ? formatDate(rateRow.end_date) : '';
+        if (!defaultStart || !defaultEnd) {
+          success(res, [], 'Success', 200, { table: [], master: {}, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
+          return;
+        }
+        const startDateF = new Date(startDateStr || defaultStart);
+        const endDateF = new Date(endDateStr || defaultEnd);
+        const allDatesF = getDatesInRange(startDateF, endDateF);
+        const paginatedDatesF = allDatesF.slice((page - 1) * limit, page * limit);
+        const whereDefault: any = {
+          rate_id: rateId,
+          property_id: propertyId,
+          deleted_at: null,
+          date: { in: paginatedDatesF.map((d) => new Date(formatDate(d))) },
+        };
+        const defaultRateRates = roomTypeFilter.length
+          ? []
+          : await prisma.rate_rates.findMany({ where: whereDefault, orderBy: [{ date: 'asc' }, { room_type_id: 'asc' }] });
+        const allRoomTypesD = roomTypeFilter.length
+          ? []
+          : await prisma.room_types.findMany({
+              where: { property_id: propertyId!, deleted_at: null, status: STATUS_ACTIVE },
+              orderBy: { name: 'asc' },
+            });
+        const rowsDefault = paginatedDatesF.map((date, i) => {
+          const dateStr = formatDate(date);
+          const row: any = { date: dateStr, day_name: getDayName(date) };
+          for (const rt of allRoomTypesD) {
+            for (const field of GRID_FIELDS) {
+              const colKey = `${Number(rt.id)}_${field}`;
+              const match = defaultRateRates.find((rr: any) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id);
+              row[colKey] = match ? (gridFieldType(field) === 'checkbox' ? !!Number((match as any)[field] ?? 0) : Number((match as any)[field] ?? 0)) : 0;
+              if (match) row.id = Number(match.id);
+            }
+          }
+          if (row.id === undefined) row.id = i + 1;
+          return row;
+        });
+        const tableDefault = buildGridTable(allRoomTypesD, GRID_FIELDS);
+        success(res, bigintToNumber(rowsDefault), 'Success', 200, {
+          table: tableDefault,
+          master: {},
+          pagination: { current_page: 1, last_page: 1, per_page: limit, total: allDatesF.length, from: 1, to: rowsDefault.length },
+        });
         return;
       }
 
@@ -930,7 +1013,7 @@ prisma.room_types.findMany({
       });
 
       // Build data rows: one per date, columns = roomType_field combinations
-      const rows = paginatedDates.map((date) => {
+      const rows = paginatedDates.map((date, i) => {
         const dateStr = formatDate(date);
         const row: any = {
           date: dateStr,
@@ -951,6 +1034,7 @@ prisma.room_types.findMany({
             if (match) row.id = Number(match.id);
           }
         }
+        if (row.id === undefined) row.id = i + 1;
 
         return row;
       });
@@ -1148,61 +1232,88 @@ prisma.room_types.findMany({
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   static async rateGridUpdate(req: Request, res: Response): Promise<void> {
     try {
-      const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
-      const rateId = BigInt(rateIdParam);
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
 
-      const { date, room_type_id, ...fields } = req.body;
-
-      if (!date || !room_type_id) {
-        badRequest(res, 'date and room_type_id are required');
+      // Laravel RateRateController@update inline-edit payload: date + "{room_type_id}_{field}" keys.
+      // rate_id may come from body (queryString rate_id) or route param; fall back to the {id} in URL.
+      let rateId: bigint;
+      try {
+        rateId = BigInt(req.body.rate_id ?? req.params.rateId);
+      } catch {
+        badRequest(res, 'rate_id is required');
         return;
       }
 
+      const { date, rate_id: bodyRateId, ...rest } = req.body;
+      if (!date) {
+        badRequest(res, 'date is required');
+        return;
+      }
       const targetDate = new Date(date);
-      const targetRoomTypeId = BigInt(room_type_id);
 
-      // Build update data from allowed fields
-      const updateData: any = {
-        property_id: propertyId!,
-        rate_id: rateId,
-        room_type_id: targetRoomTypeId,
-        date: targetDate,
-        updated_by: userId,
-        updated_at: new Date(),
-        status: STATUS_ACTIVE,
+      // Collect fields per room type from both base inline-edit keys and legacy explicit keys.
+      const fieldsByRoomType = new Map<number, Record<string, any>>();
+      const allFields = [...GRID_FIELDS, ...RESTRICTION_FIELDS];
+
+      const setField = (rt: number, field: string, value: any) => {
+        if (!fieldsByRoomType.has(rt)) fieldsByRoomType.set(rt, {});
+        const row = fieldsByRoomType.get(rt)!;
+        row[field] = gridFieldType(field) === 'checkbox' ? Number(Boolean(value)) : Number(value);
       };
 
-      for (const field of GRID_FIELDS) {
-        if (fields[field] !== undefined) {
-          updateData[field] = fields[field];
+      const explicitRoomType = req.body.room_type_id !== undefined
+        ? Number(req.body.room_type_id)
+        : undefined;
+
+      for (const field of allFields) {
+        if (rest[field] !== undefined && explicitRoomType !== undefined) {
+          setField(explicitRoomType, field, rest[field]);
         }
-      }
-      for (const field of RESTRICTION_FIELDS) {
-        if (fields[field] !== undefined) {
-          updateData[field] = fields[field];
+        for (const key of Object.keys(rest)) {
+          if (key.endsWith('_' + field)) {
+            const rtStr = key.slice(0, key.length - field.length - 1);
+            if (/^\d+$/.test(rtStr)) setField(Number(rtStr), field, rest[key]);
+          }
         }
       }
 
-      await prisma.rate_rates.upsert({
-        where: {
-          rate_rates_rate_id_room_type_id_date_key: {
-            rate_id: rateId,
-            room_type_id: targetRoomTypeId,
-            date: targetDate,
+      if (fieldsByRoomType.size === 0) {
+        // Base behaves the same: no matching field keys -> nothing to write, still 200.
+        success(res, null, 'Success');
+        return;
+      }
+
+      for (const [rtId, fields] of fieldsByRoomType) {
+        const updateData: any = {
+          property_id: propertyId!,
+          rate_id: rateId,
+          room_type_id: BigInt(rtId),
+          date: targetDate,
+          updated_by: userId,
+          updated_at: new Date(),
+          status: STATUS_ACTIVE,
+          ...fields,
+        };
+
+        await prisma.rate_rates.upsert({
+          where: {
+            rate_rates_rate_id_room_type_id_date_key: {
+              rate_id: rateId,
+              room_type_id: BigInt(rtId),
+              date: targetDate,
+            },
+          } as any,
+          create: {
+            ...updateData,
+            created_by: userId,
           },
-        } as any,
-        create: {
-          ...updateData,
-          created_by: userId,
-        },
-        update: updateData,
-      });
+          update: updateData,
+        });
+      }
 
       // Laravel RateRateController@update (:439-469): sync flags + cascade + BE dispatch
       await resetRateSyncFlags(rateId);
-      const fieldsByRoomType = new Map<number, Record<string, any>>([[Number(targetRoomTypeId), fields]]);
       await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, [targetDate]);
       enqueueJob('sync-price-booking-engine', {});
 
@@ -1404,8 +1515,25 @@ prisma.room_types.findMany({
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /api/bar-rates
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  static emptyGrid(res: Response): void {
-    success(res, [], 'Success', 200, { table: [], master: {}, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
+  // Grid responses must always carry `permission` + `table`, otherwise table-edit
+  // never sets isedit and renders no columns.
+  static emptyGrid(req: Request, res: Response): void {
+    success(res, [], 'Success', 200, {
+      table: buildGridTable([], GRID_FIELDS),
+      master: {},
+      permission: RateController.barPermission(req),
+      pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 0, to: 0 },
+    });
+  }
+
+  private static barPermission(req: Request) {
+    const permFlags = getPermissionFlags(req.user, MENU_ID_BAR);
+    return {
+      view: true,
+      add: req.user?.superUser || permFlags.add,
+      edit: req.user?.superUser || permFlags.edit,
+      delete: req.user?.superUser || permFlags.delete,
+    };
   }
 
   static async barRateIndex(req: Request, res: Response): Promise<void> {
@@ -1416,14 +1544,21 @@ prisma.room_types.findMany({
       const endDateStr = req.query.end_date as string;
 
       if (!rateIdParam || !/^\d+$/.test(rateIdParam)) {
-        RateController.emptyGrid(res);
+        RateController.emptyGrid(req, res);
         return;
       }
 
       const rateId = BigInt(rateIdParam);
 
-      const bar = await prisma.bars.findUnique({
-        where: { id: rateId },
+      // Bars live in `rates` with module='bar' (see BarController.list). The legacy
+      // `bars` table is empty, so looking there always 404'd and the grid never rendered.
+      const bar = await prisma.rates.findFirst({
+        where: {
+          id: rateId,
+          module: MODULE_BAR,
+          deleted_at: null,
+          ...(propertyId ? { property_id: BigInt(propertyId) } : {}),
+        },
         select: { id: true, name: true },
       });
 
@@ -1450,7 +1585,7 @@ prisma.room_types.findMany({
       const limit = parseInt(req.query.limit as string) || 10;
 
       if (!startDateStr || !endDateStr) {
-        success(res, [], 'Success', 200, { table: [], master: {}, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } });
+        RateController.emptyGrid(req, res);
         return;
       }
 
@@ -1505,13 +1640,7 @@ prisma.room_types.findMany({
         return row;
       });
 
-      const permFlags = getPermissionFlags(req.user, MENU_ID_BAR);
-      const permission = {
-        view: true,
-        add: req.user?.superUser || permFlags.add,
-        edit: req.user?.superUser || permFlags.edit,
-        delete: req.user?.superUser || permFlags.delete,
-      };
+      const permission = RateController.barPermission(req);
 
       const master = {
         room_types: allRoomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name, min_rate: Number(rt.min_rate) })),
@@ -1548,6 +1677,8 @@ prisma.room_types.findMany({
   static async barRateCreate(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
+      const id = String(req.query.id ?? '');
+      const rate = id && /^\d+$/.test(id) ? await prisma.rates.findUnique({ where: { id: BigInt(id) } }) : null;
 
       const [roomTypes, codePosts, rates] = await Promise.all([
         prisma.room_types.findMany({
@@ -1569,14 +1700,17 @@ prisma.room_types.findMany({
 
       const master = {
         statuses: STATUSES,
+        business_date: getBusinessDate(),
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         code_posts: codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name })),
         rates: rates.map((r: any) => ({ value: Number(r.id), label: `${r.code} - ${r.name}` })),
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
-        fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
+        fields: GRID_FIELDS.map((f) => ({ value: f, label: gridFieldLabel(f) })),
+        field_restrictions: GRID_FIELDS.filter((f) => f.startsWith('stop_')).map((f) => ({ value: f, label: gridFieldLabel(f) })),
       };
 
-      success(res, master, 'Success', 200, { master });
+      const data = rate ? { start_date: formatDate(rate.start_date!), end_date: formatDate(rate.end_date!) } : {};
+      success(res, data, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Bar rate create error:', err);
       error(res, 'Failed to load bar rate form data', 500);
@@ -1590,45 +1724,66 @@ prisma.room_types.findMany({
     try {
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
+      const body = req.body ?? {};
+      const barId = body.bar_id ?? body.rate_id;
+      const { start_date, end_date } = body;
+      const isMinimum = body.isMinimum;
 
-      const { rate_id, start_date, end_date, text_fields = [] } = req.body;
-
-      if (!rate_id || !start_date || !end_date) {
-        badRequest(res, 'rate_id, start_date, and end_date are required');
+      if (!barId || !start_date || !end_date) {
+        badRequest(res, 'bar_id, start_date, and end_date are required');
         return;
       }
 
-      const rateId = BigInt(rate_id);
+      const rateId = BigInt(barId);
       const startDate = new Date(start_date);
       const endDate = new Date(end_date);
-      const allDates = getDatesInRange(startDate, endDate);
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        badRequest(res, 'Invalid start_date or end_date');
+        return;
+      }
 
-      // Get all active room types
+      const bar = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!bar || bar.deleted_at) {
+        badRequest(res, 'Bar not found');
+        return;
+      }
+      if (bar.start_date && bar.end_date && (bar.start_date > startDate || bar.end_date < endDate)) {
+        badRequest(res, `Please filter range date (${formatDate(bar.start_date!)} - ${formatDate(bar.end_date!)})`);
+        return;
+      }
+
+      // Laravel BarRateController@store parses flat checkbox keys + text_fields<code> values
+      const dayIndexes = getPrefixedKeys(body, 'days_').map((d) => parseInt(d, 10)).filter((d) => d >= 0 && d <= 6);
+      const selectedRoomTypeIds = getPrefixedKeys(body, 'room_type_').map((s) => Number(s)).filter((s) => s > 0);
+      const selectedFields = getPrefixedKeys(body, 'fields_');
+      const textValues = pickTextFields(body);
+
+      let allDates = getDatesInRange(startDate, endDate);
+      if (dayIndexes.length > 0) allDates = allDates.filter((d) => dayIndexes.includes(d.getDay()));
+
       const allRoomTypes = await prisma.room_types.findMany({
         where: { property_id: propertyId!, deleted_at: null, status: STATUS_ACTIVE },
         select: { id: true, min_rate: true },
       });
-      const allRoomTypeIds = allRoomTypes.map((rt) => rt.id);
+      const targetRoomTypes = selectedRoomTypeIds.length > 0 ? allRoomTypes.filter((rt) => selectedRoomTypeIds.includes(Number(rt.id))) : allRoomTypes;
+      const roomTypeIds = targetRoomTypes.map((rt) => rt.id);
+      if (roomTypeIds.length === 0 || allDates.length === 0) {
+        badRequest(res, 'No room type or date selected');
+        return;
+      }
 
-      // Laravel BarRateController@gridStore min-rate guard (:299-323):
-      // first pass (no isMinimum) -> if any written value < room type min_rate,
-      // answer {isMinimum:true}; the confirmed retry sends isMinimum and is rejected.
-      const isMinimum = req.body.isMinimum;
+      // Laravel min-rate guard (:299-323): first pass -> {isMinimum:true}; confirmed retry rejected
       if (!isMinimum) {
         const priceValues: number[] = [];
-        for (const tf of text_fields) {
-          for (const field of ['one_adult', 'two_adult', 'extra_adult', 'extra_child']) {
-            if (tf[field] !== undefined && tf[field] !== null && !['min_night', 'max_night'].includes(field)) {
-              priceValues.push(Number(tf[field]));
-            }
-          }
+        for (const f of selectedFields) {
+          if (f === 'min_night' || f === 'max_night') continue;
+          const v = textValues[f];
+          if (v !== undefined && v !== null && v !== '') priceValues.push(Number(v));
         }
         const minValue = priceValues.length ? Math.min(...priceValues) : Infinity;
-        for (const rt of allRoomTypes) {
-          if (Number(rt.min_rate ?? 0) > minValue) {
-            success(res, { isMinimum: true }, 'Success', 200);
-            return;
-          }
+        if (targetRoomTypes.some((rt) => Number(rt.min_rate ?? 0) > minValue)) {
+          success(res, { isMinimum: true }, 'Success', 200);
+          return;
         }
       }
       if (isMinimum) {
@@ -1636,78 +1791,71 @@ prisma.room_types.findMany({
         return;
       }
 
-      // Existing rows — unset fields keep stored values (Laravel :330-377).
+      // Existing rows — unselected fields keep stored values (Laravel store fallback to RateRate).
       const existingRows = await prisma.rate_rates.findMany({
         where: {
           rate_id: rateId,
-          room_type_id: { in: allRoomTypeIds },
+          room_type_id: { in: roomTypeIds },
           date: { gte: allDates[0], lte: allDates[allDates.length - 1] },
         },
       });
       const existingKey = new Map<string, any>();
-      for (const row of existingRows) {
-        existingKey.set(`${Number(row.room_type_id)}|${formatDate(row.date)}`, row);
-      }
+      for (const row of existingRows) existingKey.set(`${Number(row.room_type_id)}|${formatDate(row.date)}`, row);
 
       await resetRateSyncFlags(rateId);
 
       const fieldsByRoomType = new Map<number, Record<string, any>>();
       for (const date of allDates) {
-        for (const rtId of allRoomTypeIds) {
-          const fieldData: any = {};
-          const match = text_fields.find((tf: any) => {
-            const tfRtId = typeof tf.room_type_id === 'bigint' ? tf.room_type_id : BigInt(tf.room_type_id);
-            return tfRtId === rtId;
-          });
-          if (match) {
-            Object.assign(fieldData, match);
-          }
-          // Apply fallback from body
-          for (const field of GRID_FIELDS) {
-            if (fieldData[field] === undefined && req.body[field] !== undefined) {
-              fieldData[field] = req.body[field];
+        for (const rt of targetRoomTypes) {
+          const existing = existingKey.get(`${Number(rt.id)}|${formatDate(date)}`);
+          const stored: Record<string, any> = {};
+          for (const f of GRID_FIELDS) {
+            if (f === 'stop_arrival' || f === 'stop_departure' || f === 'stop_sell') {
+              stored[f] = 0;
+              continue;
+            }
+            if (selectedFields.includes(f) && textValues[f] !== undefined && textValues[f] !== '') {
+              stored[f] = Number(textValues[f]);
+            } else {
+              const val = existing?.[f];
+              stored[f] = val !== undefined && val !== null ? Number(val) : 0;
             }
           }
-
-          const existing: any = existingKey.get(`${Number(rtId)}|${formatDate(date)}`);
-          const preserved: Record<string, any> = { ...fieldData };
-          for (const field of GRID_FIELDS) {
-            if (preserved[field] === undefined) {
-              const val = existing?.[field];
-              preserved[field] = val !== undefined && val !== null ? Number(val) : 0;
-            }
-          }
-          fieldsByRoomType.set(Number(rtId), preserved);
+          stored.status = STATUS_ACTIVE;
+          fieldsByRoomType.set(Number(rt.id), stored);
 
           await prisma.rate_rates.upsert({
             where: {
               rate_rates_rate_id_room_type_id_date_key: {
                 rate_id: rateId,
-                room_type_id: rtId,
+                room_type_id: rt.id,
                 date,
               },
             } as any,
             create: {
               property_id: propertyId!,
               rate_id: rateId,
-              room_type_id: rtId,
+              room_type_id: rt.id,
               date,
-              one_adult: preserved.one_adult ?? 0,
-              two_adult: preserved.two_adult ?? 0,
-              extra_adult: preserved.extra_adult ?? 0,
-              extra_child: preserved.extra_child ?? 0,
-              min_night: preserved.min_night ?? 0,
-              max_night: preserved.max_night ?? 0,
+              one_adult: stored.one_adult ?? 0,
+              two_adult: stored.two_adult ?? 0,
+              extra_adult: stored.extra_adult ?? 0,
+              extra_child: stored.extra_child ?? 0,
+              min_night: stored.min_night ?? 0,
+              max_night: stored.max_night ?? 0,
+              stop_arrival: 0,
+              stop_departure: 0,
+              stop_sell: 0,
               status: STATUS_ACTIVE,
               created_by: userId,
             },
             update: {
-              one_adult: preserved.one_adult ?? 0,
-              two_adult: preserved.two_adult ?? 0,
-              extra_adult: preserved.extra_adult ?? 0,
-              extra_child: preserved.extra_child ?? 0,
-              min_night: preserved.min_night ?? 0,
-              max_night: preserved.max_night ?? 0,
+              one_adult: stored.one_adult ?? 0,
+              two_adult: stored.two_adult ?? 0,
+              extra_adult: stored.extra_adult ?? 0,
+              extra_child: stored.extra_child ?? 0,
+              min_night: stored.min_night ?? 0,
+              max_night: stored.max_night ?? 0,
               status: STATUS_ACTIVE,
               updated_by: userId,
               updated_at: new Date(),
@@ -1716,11 +1864,11 @@ prisma.room_types.findMany({
         }
       }
 
-      // Laravel BarRateController@gridStore: cascade to linked rates then BE dispatch
+      // Laravel BarRateController@store: cascade to linked rates then BE dispatch
       await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, allDates);
       enqueueJob('sync-price-booking-engine', {});
 
-      success(res, { updated: allDates.length * allRoomTypeIds.length }, 'Success');
+      success(res, { updated: allDates.length * roomTypeIds.length }, 'Success');
     } catch (err: any) {
       console.error('Bar rate store error:', err);
       error(res, 'Failed to save bar rates', 500);
@@ -1793,6 +1941,215 @@ prisma.room_types.findMany({
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /api/rates/:rateId/day-uses
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─────────────────────────────────────────────
+  // RateRateGrid — /rate/rate* (Laravel RateRateController parity, menuId 86)
+  // ─────────────────────────────────────────────
+  static async rateRateCreate(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty;
+      const id = String(req.query.id ?? req.query.rate_id ?? '');
+      const rate = id && /^\d+$/.test(id) ? await prisma.rates.findUnique({ where: { id: BigInt(id) } }) : null;
+
+      const roomTypes = await prisma.room_types.findMany({
+        where: {
+          deleted_at: null,
+          status: STATUS_ACTIVE,
+          ...(propertyId ? { property_id: propertyId } : {}),
+          name: { not: { contains: 'virtual' } },
+        },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const codePosts = await prisma.code_posts.findMany({
+        where: { deleted_at: null, status: STATUS_ACTIVE },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const rates = await prisma.rates.findMany({
+        where: { deleted_at: null, status: STATUS_ACTIVE, module: 'rate' },
+        select: { id: true, name: true, code: true },
+        orderBy: { name: 'asc' },
+      });
+
+      const business_date = getBusinessDate(new Date());
+      const master = {
+        statuses: STATUSES,
+        business_date,
+        room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
+        code_posts: codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name })),
+        rates: rates.map((r: any) => ({ value: Number(r.id), label: `${r.code} - ${r.name}` })),
+        days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
+        fields: GRID_FIELDS.map((f) => ({ value: f, label: gridFieldLabel(f), description: '', is_checked: true })),
+        field_restrictions: GRID_FIELDS.filter((f) => f.startsWith('stop_')).map((f) => ({ value: f, label: gridFieldLabel(f), description: '', is_checked: true })),
+      };
+      const data = rate ? { start_date: formatDate(rate.start_date!), end_date: formatDate(rate.end_date!) } : {};
+      success(res, data, 'Success', 200, { master });
+    } catch (err: any) {
+      console.error('Rate rate create error:', err);
+      error(res, 'Failed to load rate rate form data', 500);
+    }
+  }
+
+  static async rateRateIndex(req: Request, res: Response): Promise<void> {
+    try {
+      req.params.rateId = String(req.query.rate_id ?? req.query.id ?? '');
+      await this.rateGrid(req, res);
+    } catch (err: any) {
+      error(res, 'Failed to fetch rate rate grid', 500);
+    }
+  }
+
+  static async rateRateStore(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty;
+      const userId = req.user?.id;
+      const body = req.body ?? {};
+      const rateIdParam = body.rate_id ?? body.bar_id ?? body.id;
+      const { start_date, end_date } = body;
+      const isMinimum = body.isMinimum;
+
+      if (!rateIdParam || !start_date || !end_date) {
+        badRequest(res, 'rate_id, start_date, and end_date are required');
+        return;
+      }
+
+      const rateId = BigInt(rateIdParam);
+      const startDate = new Date(start_date);
+      const endDate = new Date(end_date);
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        badRequest(res, 'Invalid start_date or end_date');
+        return;
+      }
+
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) {
+        badRequest(res, 'Rate is not found');
+        return;
+      }
+      if (rate.start_date && rate.end_date && (rate.start_date > startDate || rate.end_date < endDate)) {
+        badRequest(res, `Please filter range date (${formatDate(rate.start_date!)} - ${formatDate(rate.end_date!)})`);
+        return;
+      }
+
+      const dayIndexes = getPrefixedKeys(body, 'days_').map((d) => parseInt(d, 10)).filter((d) => d >= 0 && d <= 6);
+      const selectedRoomTypeIds = getPrefixedKeys(body, 'room_type_').map((s) => Number(s)).filter((s) => s > 0);
+      const selectedFields = getPrefixedKeys(body, 'fields_');
+      const textValues = pickTextFields(body);
+
+      let allDates = getDatesInRange(startDate, endDate);
+      if (dayIndexes.length > 0) allDates = allDates.filter((d) => dayIndexes.includes(d.getDay()));
+
+      const allRoomTypes = await prisma.room_types.findMany({
+        where: { property_id: propertyId!, deleted_at: null, status: STATUS_ACTIVE },
+        select: { id: true, min_rate: true },
+      });
+      const targetRoomTypes = selectedRoomTypeIds.length > 0 ? allRoomTypes.filter((rt) => selectedRoomTypeIds.includes(Number(rt.id))) : allRoomTypes;
+      const roomTypeIds = targetRoomTypes.map((rt) => rt.id);
+      if (roomTypeIds.length === 0 || allDates.length === 0) {
+        badRequest(res, 'No room type or date selected');
+        return;
+      }
+
+      if (!isMinimum) {
+        const priceValues: number[] = [];
+        for (const f of selectedFields) {
+          if (f === 'min_night' || f === 'max_night') continue;
+          const v = textValues[f];
+          if (v !== undefined && v !== null && v !== '') priceValues.push(Number(v));
+        }
+        const minValue = priceValues.length ? Math.min(...priceValues) : Infinity;
+        if (targetRoomTypes.some((rt) => Number(rt.min_rate ?? 0) > minValue)) {
+          success(res, { isMinimum: true }, 'Success', 200);
+          return;
+        }
+      }
+      if (isMinimum) {
+        badRequest(res, 'Please check minimum rate');
+        return;
+      }
+
+      const existingRows = await prisma.rate_rates.findMany({
+        where: {
+          rate_id: rateId,
+          room_type_id: { in: roomTypeIds },
+          date: { gte: allDates[0], lte: allDates[allDates.length - 1] },
+        },
+      });
+      const existingKey = new Map<string, any>();
+      for (const row of existingRows) existingKey.set(`${Number(row.room_type_id)}|${formatDate(row.date)}`, row);
+
+      await resetRateSyncFlags(rateId);
+
+      const fieldsByRoomType = new Map<number, Record<string, any>>();
+      for (const date of allDates) {
+        for (const rt of targetRoomTypes) {
+          const existing = existingKey.get(`${Number(rt.id)}|${formatDate(date)}`);
+          const stored: Record<string, any> = {};
+          for (const f of GRID_FIELDS) {
+            if (f === 'stop_arrival' || f === 'stop_departure' || f === 'stop_sell') {
+              stored[f] = 0;
+              continue;
+            }
+            if (selectedFields.includes(f) && textValues[f] !== undefined && textValues[f] !== '') {
+              stored[f] = Number(textValues[f]);
+            } else {
+              const val = existing?.[f];
+              stored[f] = val !== undefined && val !== null ? Number(val) : 0;
+            }
+          }
+          stored.status = STATUS_ACTIVE;
+          fieldsByRoomType.set(Number(rt.id), stored);
+
+          await prisma.rate_rates.upsert({
+            where: {
+              rate_rates_rate_id_room_type_id_date_key: {
+                rate_id: rateId,
+                room_type_id: rt.id,
+                date,
+              },
+            } as any,
+            create: {
+              property_id: propertyId!,
+              rate_id: rateId,
+              room_type_id: rt.id,
+              date,
+              one_adult: stored.one_adult ?? 0,
+              two_adult: stored.two_adult ?? 0,
+              extra_adult: stored.extra_adult ?? 0,
+              extra_child: stored.extra_child ?? 0,
+              min_night: stored.min_night ?? 0,
+              max_night: stored.max_night ?? 0,
+              status: STATUS_ACTIVE,
+              created_by: userId,
+            },
+            update: {
+              one_adult: stored.one_adult ?? 0,
+              two_adult: stored.two_adult ?? 0,
+              extra_adult: stored.extra_adult ?? 0,
+              extra_child: stored.extra_child ?? 0,
+              min_night: stored.min_night ?? 0,
+              max_night: stored.max_night ?? 0,
+              status: STATUS_ACTIVE,
+              updated_by: userId,
+              updated_at: new Date(),
+            },
+          });
+        }
+      }
+
+      await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, allDates);
+      enqueueJob('sync-price-booking-engine', {});
+      success(res, { updated: allDates.length * roomTypeIds.length }, 'Success');
+    } catch (err: any) {
+      console.error('Rate rate store error:', err);
+      error(res, 'Failed to save rate rates', 500);
+    }
+  }
+
+  static async rateRateUpdate(req: Request, res: Response): Promise<void> {
+    await this.rateGridStore(req, res);
+  }
+
   static async dayUseList(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -1889,7 +2246,7 @@ time: time || 0,
         },
       });
 
-      success(res, bigintToNumber(item), 'Success', 201);
+      success(res, bigintToNumber(item), 'Success', 200);
     } catch (err: any) {
       console.error('Day use store error:', err);
       error(res, 'Failed to create day use', 500);
@@ -2056,7 +2413,7 @@ const { name, time, status } = req.body;
         },
       });
 
-      success(res, bigintToNumber(item), 'Success', 201);
+      success(res, bigintToNumber(item), 'Success', 200);
     } catch (err: any) {
       console.error('Rate config store error:', err);
       error(res, 'Failed to create rate config', 500);
@@ -2140,15 +2497,26 @@ const { name, description, image, status } = req.body;
     return Math.round((v + a) * 100) / 100;
   }
 
-  private static async getRateLinkRows(rateId: bigint, statusFilter?: string): Promise<any[]> {
+private static async getRateLinkRows(rateId: bigint, statusFilter?: string, propertyId?: bigint | number | null): Promise<any[]> {
     const [links, rll] = await Promise.all([
       prisma.model_has_rates.findMany({ where: { model_id: rateId, model_type: 'App\\Models\\Rate' } }),
-      prisma.rate_link_listings.findMany({ where: { rate_id: rateId, ...(statusFilter ? { status: statusFilter } : {}) } }),
+      prisma.rate_link_listings.findMany({
+        where: {
+          rate_id: rateId,
+          deleted_at: null,
+          ...(statusFilter ? { status: statusFilter } : {}),
+          ...(propertyId ? { property_id: propertyId } : {}),
+        },
+      }),
     ]);
     const linkedRateIds = links.map(l => l.rate_id);
     const rateRates = linkedRateIds.length > 0
       ? await prisma.rate_rates.findMany({
-          where: { rate_id: { in: linkedRateIds }, deleted_at: null },
+          where: {
+            rate_id: { in: linkedRateIds },
+            deleted_at: null,
+            ...(propertyId ? { property_id: propertyId } : {}),
+          },
           include: { room_types: { select: { id: true, name: true } } },
         })
       : [];
@@ -2180,9 +2548,9 @@ const { name, description, image, status } = req.body;
       const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
       if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
       const rateId = BigInt(rateIdRaw);
-      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
-      const rows = await this.getRateLinkRows(rateId);
+      const rows = await this.getRateLinkRows(rateId, undefined, req.user?.lastProperty);
       const table = [
         { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
         { label: 'Amount', key: 'amount', type: 'number', is_search: false },
@@ -2213,9 +2581,9 @@ const { name, description, image, status } = req.body;
       const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
       if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
       const rateId = BigInt(rateIdRaw);
-      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
-      const rows = await this.getRateLinkRows(rateId, '1');
+      const rows = await this.getRateLinkRows(rateId, '1', req.user?.lastProperty);
       const table = [
         { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
         { label: 'Amount', key: 'amount', type: 'number', is_search: false },
@@ -2598,7 +2966,9 @@ const { name, description, image, status } = req.body;
 
   static async rateCodeItemStore(req: Request, res: Response): Promise<void> {
     try {
-      const rateId = BigInt(String(req.body.rate_id ?? ''));
+      const rateIdRaw = String(req.body.rate_id ?? req.query.rate_id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { notFound(res, 'Rate is not found'); return; }
+      const rateId = BigInt(rateIdRaw);
       let idx: any[] = req.body.idx || [];
       if (!Array.isArray(idx)) idx = [idx];
 
@@ -2629,7 +2999,9 @@ const { name, description, image, status } = req.body;
 
   static async rateCodeItemUpdate(req: Request, res: Response): Promise<void> {
     try {
-      const rateId = BigInt(String(req.body.rate_id ?? ''));
+      const rateIdRaw = String(req.body.rate_id ?? req.query.rate_id ?? '');
+      if (!/^\d+$/.test(rateIdRaw)) { notFound(res, 'Rate is not found'); return; }
+      const rateId = BigInt(rateIdRaw);
       const id = String(req.params.id);
       if (!/^\d+$/.test(id)) { notFound(res, 'Code Item is not found'); return; }
       await prisma.$executeRaw`

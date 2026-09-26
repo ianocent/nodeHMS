@@ -1,18 +1,22 @@
-﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '@prisma/client';
+import { Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { TABLES, laravelPaging } from '../utils/tableMeta';
-import { STATUSES, REGIONS, SUBSCRIBE_TYPES, IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS } from '../utils/cmsConfig';
-import { AuthController } from './auth.controller';
-import { TokenService } from '../services/token.service';
 import { notificationService } from '../services/notification.service';
+import { TokenService } from '../services/token.service';
+import { IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS, REGIONS, STATUSES, SUBSCRIBE_TYPES } from '../utils/cmsConfig';
+import { badRequest, error, notFound, success, validationError } from '../utils/response';
+import { deleteStoredFile, isInlineImageData, mimeFromPath, resolveStoredPath, savePropertyLogo, storedImageUrl } from '../utils/storage';
+import { TABLES, laravelPaging } from '../utils/tableMeta';
+import { AuthController } from './auth.controller';
 
 const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adminAdapter = new PrismaPg(adminPool);
 const adminPrisma = new PrismaClient({ adapter: adminAdapter });
+const STORAGE_PATH = process.env.STORAGE_PATH || path.join(process.cwd(), 'storage');
 
 function getPrisma() {
   return adminPrisma;
@@ -22,6 +26,13 @@ function getPrisma() {
 const taskHkReadCache = new Map<string, any>();
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -475,7 +486,18 @@ export class AdminController {
       const id = idParam(req.params.id);
       const perm = await getPrisma().permissions.findUnique({ where: { id } });
       if (!perm) { notFound(res, 'Permission not found'); return; }
-      success(res, bigintToNumber(perm), 'Success');
+      const master = { statuses: STATUSES };
+      success(res, bigintToNumber(perm), 'Success', 200, { master });
+    } catch (err: any) { error(res, 'Failed to load permission', 500); }
+  }
+
+  static async permissionEdit(req: Request, res: Response): Promise<void> {
+    try {
+      const id = idParam(req.params.id);
+      const perm = await getPrisma().permissions.findUnique({ where: { id } });
+      if (!perm) { notFound(res, 'Permission not found'); return; }
+      const master = { statuses: STATUSES };
+      success(res, bigintToNumber(perm), 'Success', 200, { master });
     } catch (err: any) { error(res, 'Failed to load permission', 500); }
   }
 
@@ -1071,17 +1093,32 @@ export class AdminController {
           orderBy: { id: 'desc' },
           skip: (page - 1) * limit,
           take: limit,
-          include: { cities: true },
+          select: {
+            id: true,
+            name: true,
+            alias: true,
+            email: true,
+            address: true,
+            telp: true,
+            logo: true,
+            cities: { select: { name: true } },
+          },
         }),
         getPrisma().properties.count({ where }),
       ]);
 
+      // Return a lightweight URL instead of massive Base64 blobs.
+      // Frontend <img src={row.image}> will lazily fetch the actual image.
       const mapped = data.map(p => ({
-        ...bigintToNumber(p),
         id: Number(p.id),
         name: p.name,
         alias: p.alias,
-        image: p.logo || p.image,
+        // Absolute-from-API-root paths: the frontend prefixes env.uriApi, the
+        // same convention as table-view-document and work-order images.
+        // storedImageUrl() returns null for legacy base64 columns, so those
+        // rows fall through to the /cms/property/:id/image handler instead of
+        // emitting '/storage' + <base64>.
+        image: storedImageUrl(p.logo) || `/cms/property/${Number(p.id)}/image`,
         email: p.email,
         address: p.address,
         phone: p.telp ? Number(p.telp) : null,
@@ -1103,12 +1140,103 @@ export class AdminController {
     }
   }
 
+  /**
+   * GET /cms/property/:id/image
+   * Serves property logo/image as binary (not encrypted) so <img src> works.
+   * This keeps the list endpoint tiny while images load lazily.
+   */
+  // static async propertyImage(req: Request, res: Response): Promise<void> {
+  //   try {
+  //     const id = BigInt(String(req.params.id));
+  //     const property = await getPrisma().properties.findUnique({
+  //       where: { id },
+  //       select: { logo: true, image: true },
+  //     });
+  //     if (!property) { res.status(404).send('Not found'); return; }
+
+  //     const raw = property.logo || property.image;
+  //     if (!raw) { res.status(404).send('No image'); return; }
+
+  //     // If it's a Base64 data URI like "data:image/png;base64,iVBOR..."
+  //     const dataUriMatch = raw.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+  //     if (dataUriMatch) {
+  //       const mimeType = dataUriMatch[1];
+  //       const base64Data = dataUriMatch[2];
+  //       const buffer = Buffer.from(base64Data, 'base64');
+  //       res.setHeader('Content-Type', mimeType);
+  //       res.setHeader('Cache-Control', 'public, max-age=86400'); // cache 1 day
+  //       res.send(buffer);
+  //       return;
+  //     }
+
+  //     // If it's a plain Base64 string without data URI prefix
+  //     if (/^[A-Za-z0-9+/=]{100,}$/.test(raw.replace(/\s/g, ''))) {
+  //       const buffer = Buffer.from(raw, 'base64');
+  //       res.setHeader('Content-Type', 'image/png');
+  //       res.setHeader('Cache-Control', 'public, max-age=86400');
+  //       res.send(buffer);
+  //       return;
+  //     }
+
+  //     // If it's a URL path, redirect to it
+  //     res.redirect(raw);
+  //   } catch (err: any) {
+  //     console.error('Property image error:', err);
+  //     res.status(500).send('Error');
+  //   }
+  // }
+
+  // Fallback route: properties without a usable `logo` path (seeded rows, or
+  // legacy rows whose column still holds a base64 blob) resolve to
+  // storage/cms/property/<id>/image.png. New uploads are served straight off
+  // /storage by express.static and never reach this handler.
+  static async propertyImage(req: Request, res: Response): Promise<void> {
+    try {
+      const id = String(req.params.id);
+      if (!/^\d+$/.test(id)) { res.status(400).send('Bad id'); return; }
+
+      const property = await getPrisma().properties.findUnique({
+        where: { id: BigInt(id) },
+        select: { logo: true },
+      });
+      if (!property) { res.status(404).send('Not found'); return; }
+
+      // Legacy row: the column is the image itself, so stream it back inline
+      // rather than 404-ing while the backfill script has yet to run.
+      if (isInlineImageData(property.logo)) {
+        const m = String(property.logo).match(/^data:(image\/\w+);base64,(.*)$/s);
+        if (m) {
+          res.setHeader('Content-Type', m[1]);
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+          res.send(Buffer.from(m[2], 'base64'));
+          return;
+        }
+      }
+
+      const candidates = [
+        property.logo ? resolveStoredPath(property.logo) : null,
+        path.join(STORAGE_PATH, 'cms', 'property', id, 'image.png'),
+        path.join(STORAGE_PATH, 'property', id, 'image.png'),
+      ].filter((p): p is string => !!p && fs.existsSync(p));
+
+      const filePath = candidates[0];
+      if (!filePath) { res.status(404).send('No image'); return; }
+
+      res.setHeader('Content-Type', mimeFromPath(filePath));
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.sendFile(filePath);
+    } catch (err: any) {
+      console.error('Property image error:', err);
+      res.status(500).send('Error');
+    }
+  }
+
   static async propertyAuth(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
       const property = await getPrisma().properties.findUnique({
         where: { id },
-        select: { id: true, name: true, alias: true, logo: true, image: true, address: true, email: true, telp: true },
+        select: { id: true, name: true, alias: true, address: true, email: true, telp: true, logo: true },
       });
       if (!property) { notFound(res, 'Property not found'); return; }
 
@@ -1136,14 +1264,15 @@ export class AdminController {
       // Full login payload scoped to the new property
       const data = await AuthController.buildLoginData(user, roleIds, roleNames, plainTextToken, createdAt, id);
 
-      // Raw response â€” Laravel PropertyController@auth puts name/image/mandatory_check_in
+      // Raw response — Laravel PropertyController@auth puts name/image/mandatory_check_in
       // at the TOP LEVEL and the user payload inside `data` (Profile.tsx reads
       // datajsonp?.name + datajsonp?.data.* after choosing a property).
+      // Use lightweight URL path instead of massive Base64 blob.
       res.status(200).json({
         code: 200,
         message: 'Success',
         name: property.name,
-        image: property.logo || property.image,
+        image: storedImageUrl(property.logo) || `/cms/property/${Number(id)}/image`,
         mandatory_check_in: [],
         data,
       });
@@ -1156,7 +1285,7 @@ export class AdminController {
   // Replicates Laravel PropertyController@create master (statuses/companies/is_taxs/is_tax_exclude_restaurants/market_segments/subscribe_types/regions) + node extras.
   private static async buildPropertyMaster(): Promise<{ [key: string]: any }> {
     const [cities, countries, companies] = await Promise.all([
-      getPrisma().cities.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      Promise.resolve([]),
       getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
       getPrisma().company_profiles.findMany({
         where: { deleted_at: null, status: 1 },
@@ -1197,6 +1326,9 @@ export class AdminController {
       const b = req.body || {};
       if (!b.name) { validationError(res, { name: ['The name field is required.'] }); return; }
       const now = new Date();
+      // Laravel PropertyController@store decodes the base64 logo to
+      // storage/property/<name>-<ts>.<ext> and persists only that path.
+      const logoPath = savePropertyLogo(b.logo, b.name);
       const data: any = {
         name: b.name,
         alias: b.alias || null,
@@ -1204,7 +1336,7 @@ export class AdminController {
         telp: b.telp ? BigInt(String(b.telp)) : null,
         fax: b.fax ? BigInt(String(b.fax)) : null,
         address: b.address || null,
-        logo: b.logo || null,
+        logo: logoPath,
         image: b.image || null,
         slug: b.slug || null,
         whatsapp: b.whatsapp || null,
@@ -1220,7 +1352,7 @@ export class AdminController {
         updated_at: now,
       };
       const record = await getPrisma().properties.create({ data });
-      success(res, { ...bigintToNumber(record), id: Number(record.id) }, 'Created', 201, {
+      success(res, { ...bigintToNumber(record), id: Number(record.id) }, 'Created', 200, {
         table: [], search_data: [], permission: { view: true, add: true, edit: true, delete: true },
       });
     } catch (err: any) {
@@ -1254,6 +1386,10 @@ export class AdminController {
       const existing = await getPrisma().properties.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Property not found'); return; }
       const b = req.body || {};
+      // A base64 data-URI means "new upload": write it to storage and swap the
+      // stored path. Anything else (existing path, empty) keeps the current logo,
+      // matching Laravel PropertyController@update's else-branch.
+      const uploaded = savePropertyLogo(b.logo, b.name ?? existing.name);
       const data: any = {
         name: b.name ?? existing.name,
         alias: b.alias !== undefined ? b.alias : existing.alias,
@@ -1261,7 +1397,7 @@ export class AdminController {
         telp: b.telp ? BigInt(String(b.telp)) : (b.telp === null || b.telp === '' ? null : existing.telp),
         fax: b.fax ? BigInt(String(b.fax)) : (b.fax === null || b.fax === '' ? null : existing.fax),
         address: b.address !== undefined ? b.address : existing.address,
-        logo: b.logo !== undefined ? b.logo : existing.logo,
+        logo: uploaded ?? existing.logo,
         image: b.image !== undefined ? b.image : existing.image,
         slug: b.slug !== undefined ? b.slug : existing.slug,
         whatsapp: b.whatsapp !== undefined ? b.whatsapp : existing.whatsapp,
@@ -1274,6 +1410,11 @@ export class AdminController {
         updated_at: new Date(),
       };
       const record = await getPrisma().properties.update({ where: { id }, data });
+      // Only unlink after the row is committed, and never the seeded
+      // storage/cms|property/<id>/image.png fallbacks.
+      if (uploaded && existing.logo && !/^\/cms\/|^\/property\/\d+\//.test(existing.logo)) {
+        deleteStoredFile(existing.logo);
+      }
       success(res, { ...bigintToNumber(record), id: Number(record.id) }, 'Updated');
     } catch (err: any) {
       console.error('Property update error:', err);

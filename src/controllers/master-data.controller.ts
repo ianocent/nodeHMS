@@ -12,6 +12,13 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -39,6 +46,62 @@ function num(v: any, fallback = 0): number {
 function bool(v: any, fallback = false): boolean {
   if (v === undefined || v === null || v === '') return fallback;
   return v === true || v === 1 || v === '1' || v === 'true';
+}
+
+function typeLabel(t: string | null | undefined): string {
+  return t === 'DEFAULT' ? 'Revenue' : (t === 'IS_PAYMENT' ? 'Payment' : 'Statistic');
+}
+
+function statusLabel(status: any): string {
+  const found = STATUS_OPTIONS.find((s) => s.value === num(status));
+  return found?.label ?? (status ? 'Active' : 'Inactive');
+}
+
+function pickVal(v: any): any {
+  if (v && typeof v === 'object' && 'value' in v) return v.value;
+  return v;
+}
+
+function formatCodeItemData(r: any): any {
+  if (!r) return r;
+  return {
+    ...r,
+    is_online: !!r.is_online,
+    is_event: !!r.is_event,
+    process_on: r.process_on ? { value: r.process_on, label: r.process_on } : null,
+    calculator: r.calculator ? { value: r.calculator, label: r.calculator } : null,
+    code_post_id: { value: r.code_post_id ?? null, label: r.code_posts?.name ?? '' },
+    status: num(r.status),
+    relation: {
+      code_post: r.code_posts ? { id: Number(r.code_posts.id), name: r.code_posts.name } : null,
+    },
+    code_posts: undefined,
+  };
+}
+
+function formatCodePostData(r: any): any {
+  if (!r) return r;
+  return {
+    ...r,
+    pay_commission: !!r.pay_commission,
+    is_pos: !!r.is_pos,
+    local_tax: !!r.local_tax,
+    service_charge: !!r.service_charge,
+    service_charge_include_local_tax: !!r.service_charge_include_local_tax,
+    tax: !!r.tax,
+    tax_include_local_tax: !!r.tax_include_local_tax,
+    type: { value: r.type, label: typeLabel(r.type) },
+    code_gl_id: { value: r.code_gl_id ?? null, label: r.code_gls?.name ?? '' },
+    code_billing_id: { value: r.code_billing_id ?? null, label: r.code_billings?.name ?? '' },
+    code_gl_description: r.code_gls?.name ?? '',
+    status: num(r.status),
+    relation: {
+      code_billing: r.code_billings ? { ...bigintToNumber(r.code_billings) } : null,
+      code_gl: r.code_gls ? { ...bigintToNumber(r.code_gls) } : null,
+    },
+    code_billings: undefined,
+    code_gls: undefined,
+  };
 }
 
 function parsePagination(query: any) {
@@ -246,13 +309,32 @@ export class MasterDataController {
     }
   }
 
+  private static async codePostMaster(pid?: bigint) {
+    const [codeBillings, codeGls] = await Promise.all([
+      prisma.code_billings.findMany({ select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+      prisma.code_gls.findMany({ select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+    ]);
+    return {
+      statuses: STATUS_OPTIONS,
+      code_billings: codeBillings.map(c => ({ value: Number(c.id), label: c.name })),
+      code_gls: codeGls.map(g => ({ value: Number(g.id), label: g.name })),
+    };
+  }
+
   static async codePostShow(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const result = await prisma.code_posts.findUnique({ where: { id } });
+      const result = await prisma.code_posts.findUnique({
+        where: { id },
+        include: { code_billings: { select: { id: true, name: true } } },
+      });
       if (!result) { notFound(res, 'Code post not found'); return; }
-      success(res, bigintToNumber(result), 'Success');
+      const r = bigintToNumber(result);
+      const gl = r.code_gl_id != null ? await prisma.code_gls.findUnique({ where: { id: BigInt(r.code_gl_id) }, select: { id: true, name: true } }) : null;
+      const master = await this.codePostMaster();
+      success(res, formatCodePostData({ ...r, code_gls: gl }), 'Success', 200, { master });
     } catch (err: any) {
+      console.error('CodePost show error:', err);
       error(res, 'Failed to load code post', 500);
     }
   }
@@ -260,10 +342,17 @@ export class MasterDataController {
   static async codePostEdit(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const result = await prisma.code_posts.findUnique({ where: { id } });
+      const result = await prisma.code_posts.findUnique({
+        where: { id },
+        include: { code_billings: { select: { id: true, name: true } } },
+      });
       if (!result) { notFound(res, 'Code post not found'); return; }
-      success(res, bigintToNumber(result), 'Success');
+      const r = bigintToNumber(result);
+      const gl = r.code_gl_id != null ? await prisma.code_gls.findUnique({ where: { id: BigInt(r.code_gl_id) }, select: { id: true, name: true } }) : null;
+      const master = await this.codePostMaster();
+      success(res, formatCodePostData({ ...r, code_gls: gl }), 'Success', 200, { master });
     } catch (err: any) {
+      console.error('CodePost edit error:', err);
       error(res, 'Failed to load code post', 500);
     }
   }
@@ -276,27 +365,52 @@ export class MasterDataController {
       const existing = await prisma.code_posts.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Code post not found'); return; }
 
+      // parity CodePostController@update validators
+      if (name !== undefined && !String(name).trim()) { badRequest(res, 'The name field is required.'); return; }
+      if (name !== undefined && String(name).trim() !== String(existing.name)) {
+        const dup = await prisma.code_posts.findFirst({ where: { property_id: existing.property_id, name: String(name).trim(), id: { not: id }, deleted_at: null } });
+        if (dup) { badRequest(res, 'The name has already been taken.'); return; }
+      }
+      if (status !== undefined && num(status) === 0) {
+        const [rates, typePayments] = await Promise.all([
+          prisma.rates.count({ where: { code_post_id: id, status: 1, deleted_at: null } }),
+          prisma.type_payments.count({ where: { code_post_id: id, status: 1, deleted_at: null } }),
+        ]);
+        if (rates > 0) { badRequest(res, 'Post Code cannot be inactive, because there are Rate that use this Post Code.'); return; }
+        if (typePayments > 0) { badRequest(res, 'Post Code cannot be inactive, because there are Payment Type that use this Post Code.'); return; }
+      }
+
+      // parity: service_charge off cascades percents and taxes to zero
       const data: any = { updated_at: new Date() };
-      if (name !== undefined) data.name = name;
+      if (name !== undefined) data.name = String(name).trim();
       if (type !== undefined) data.type = type;
-      if (code_billing_id !== undefined) data.code_billing_id = BigInt(code_billing_id);
-      if (code_gl_id !== undefined) data.code_gl_id = BigInt(code_gl_id);
+      if (code_billing_id) data.code_billing_id = BigInt(code_billing_id);
+      if (code_gl_id) data.code_gl_id = BigInt(code_gl_id);
       if (pay_commission !== undefined) data.pay_commission = num(pay_commission);
       if (is_pos !== undefined) data.is_pos = num(is_pos);
       if (local_tax !== undefined) data.local_tax = num(local_tax);
       if (local_tax_percentage !== undefined) data.local_tax_percentage = num(local_tax_percentage);
       if (service_charge !== undefined) data.service_charge = num(service_charge);
-      if (service_charge_percentage !== undefined) data.service_charge_percentage = num(service_charge_percentage);
-      if (service_charge_include_local_tax !== undefined) data.service_charge_include_local_tax = num(service_charge_include_local_tax);
-      if (tax !== undefined) data.tax = num(tax);
-      if (tax_percentage !== undefined) data.tax_percentage = num(tax_percentage);
-      if (tax_include_local_tax !== undefined) data.tax_include_local_tax = num(tax_include_local_tax);
+      if (service_charge !== undefined && !num(service_charge)) {
+        data.service_charge_percentage = 0;
+        data.service_charge_include_local_tax = 0;
+        data.tax = 0;
+        data.tax_percentage = 0;
+        data.tax_include_local_tax = 0;
+      } else {
+        if (service_charge_percentage !== undefined) data.service_charge_percentage = num(service_charge_percentage);
+        if (service_charge_include_local_tax !== undefined) data.service_charge_include_local_tax = num(service_charge_include_local_tax);
+        if (tax !== undefined) data.tax = num(tax);
+        if (tax_percentage !== undefined) data.tax_percentage = num(tax_percentage);
+        if (tax_include_local_tax !== undefined) data.tax_include_local_tax = num(tax_include_local_tax);
+      }
       if (sort !== undefined) data.sort = num(sort);
       if (status !== undefined) data.status = num(status);
 
       const result = await prisma.code_posts.update({ where: { id }, data });
       success(res, bigintToNumber(result), 'Code post updated');
     } catch (err: any) {
+      console.error('CodePost update error:', err);
       error(res, 'Failed to update code post', 500);
     }
   }
@@ -310,6 +424,44 @@ export class MasterDataController {
       success(res, null, 'Code post deleted');
     } catch (err: any) {
       error(res, 'Failed to delete code post', 500);
+    }
+  }
+
+  static async codePostCreateForm(req: Request, res: Response): Promise<void> {
+    try {
+      const master = await this.codePostMaster();
+      success(res, { status: 1 }, 'Success', 200, { master });
+    } catch (err: any) {
+      console.error('CodePost create form error:', err);
+      error(res, 'Failed to load code post', 500);
+    }
+  }
+
+  private static async codeItemMaster(pid?: bigint) {
+    const propertyFilter = pid ? { property_id: pid } : {};
+    const [codePosts] = await Promise.all([
+      prisma.code_posts.findMany({ where: { ...propertyFilter, deleted_at: null, status: 1, type: 'DEFAULT' }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+    ]);
+    return {
+      statuses: STATUS_OPTIONS,
+      code_posts: codePosts.map(p => ({ value: Number(p.id), label: p.name })),
+    };
+  }
+
+  static async codeItemCreateForm(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const [codePosts] = await Promise.all([
+        prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null, status: 1, type: 'DEFAULT' }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+      ]);
+      const master = {
+        statuses: STATUS_OPTIONS,
+        code_posts: codePosts.map(p => ({ value: Number(p.id), label: p.name })),
+      };
+      success(res, { status: 1 }, 'Success', 200, { master });
+    } catch (err: any) {
+      console.error('CodeItem create form error:', err);
+      error(res, 'Failed to load code item', 500);
     }
   }
 
@@ -431,7 +583,7 @@ export class MasterDataController {
           include: { code_posts: { select: { id: true, name: true } } },
         }),
         prisma.code_items.count({ where }),
-        prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+        prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null, status: 1, type: 'DEFAULT' }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
       ]);
 
       const postOptions = codePosts.map((p: any) => ({ value: Number(p.id), label: p.name }));
@@ -466,10 +618,12 @@ export class MasterDataController {
   static async codeItemCreate(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { code_post_id, name, is_online, is_event, description, sales, cost, sort, status } = req.body;
+      const { code_post_id, name, is_online, is_event, description, sales, cost, process_on, calculator, sort, status } = req.body;
 
       if (!code_post_id) { badRequest(res, 'code_post_id is required'); return; }
       if (!name) { badRequest(res, 'name is required'); return; }
+      if (!process_on) { badRequest(res, 'process_on is required'); return; }
+      if (!calculator) { badRequest(res, 'calculator is required'); return; }
 
       const result = await prisma.code_items.create({
         data: {
@@ -481,6 +635,8 @@ export class MasterDataController {
           description: description || null,
           sales: num(sales),
           cost: num(cost),
+          process_on: pickVal(process_on) || null,
+          calculator: pickVal(calculator) || null,
           sort: num(sort),
           status: num(status),
           created_at: new Date(),
@@ -503,8 +659,11 @@ export class MasterDataController {
         include: { code_posts: { select: { id: true, name: true } } },
       });
       if (!result) { notFound(res, 'Code item not found'); return; }
-      success(res, bigintToNumber(result), 'Success');
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const master = await this.codeItemMaster(pid);
+      success(res, formatCodeItemData(bigintToNumber(result)), 'Success', 200, { master });
     } catch (err: any) {
+      console.error('CodeItem show error:', err);
       error(res, 'Failed to load code item', 500);
     }
   }
@@ -517,8 +676,11 @@ export class MasterDataController {
         include: { code_posts: { select: { id: true, name: true } } },
       });
       if (!result) { notFound(res, 'Code item not found'); return; }
-      success(res, bigintToNumber(result), 'Success');
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const master = await this.codeItemMaster(pid);
+      success(res, formatCodeItemData(bigintToNumber(result)), 'Success', 200, { master });
     } catch (err: any) {
+      console.error('CodeItem edit error:', err);
       error(res, 'Failed to load code item', 500);
     }
   }
@@ -526,25 +688,28 @@ export class MasterDataController {
   static async codeItemUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const { code_post_id, name, is_online, is_event, description, sales, cost, sort, status } = req.body;
+      const { code_post_id, name, is_online, is_event, description, sales, cost, process_on, calculator, sort, status } = req.body;
 
       const existing = await prisma.code_items.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Code item not found'); return; }
 
       const data: any = { updated_at: new Date() };
-      if (code_post_id !== undefined) data.code_post_id = BigInt(code_post_id);
+      if (code_post_id) data.code_post_id = BigInt(code_post_id);
       if (name !== undefined) data.name = name;
       if (is_online !== undefined) data.is_online = bool(is_online);
       if (is_event !== undefined) data.is_event = bool(is_event);
       if (description !== undefined) data.description = description;
       if (sales !== undefined) data.sales = num(sales);
       if (cost !== undefined) data.cost = num(cost);
+      if (process_on !== undefined) data.process_on = pickVal(process_on);
+      if (calculator !== undefined) data.calculator = pickVal(calculator);
       if (sort !== undefined) data.sort = num(sort);
       if (status !== undefined) data.status = num(status);
 
       const result = await prisma.code_items.update({ where: { id }, data });
       success(res, bigintToNumber(result), 'Code item updated');
     } catch (err: any) {
+      console.error('CodeItem update error:', err);
       error(res, 'Failed to update code item', 500);
     }
   }
@@ -980,7 +1145,7 @@ export class MasterDataController {
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   //  HOLIDAY
   // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  static async holidayList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.holidays, req, res); }
+  static async holidayList(req: Request, res: Response): Promise<void> { return MasterDataController.crudList(prisma.holidays, req, res, TABLES.holiday.map((c: any) => ({ ...c }))); }
   static async holidayShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.holidays.findUnique({ where: { id } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }
   static async holidayStore(req: Request, res: Response): Promise<void> {
     try { const pid = BigInt(req.user?.lastProperty ?? 0); const { name, start_date, end_date, sort, status } = req.body; if (!name) { badRequest(res, 'name required'); return; } const d = await prisma.holidays.create({ data: { property_id: pid, name, start_date: new Date(start_date), end_date: new Date(end_date), sort: num(sort), status: num(status, 1), created_at: new Date(), updated_at: new Date() } }); success(res, bigintToNumber(d), 'Created'); } catch (err: any) { error(res, 'Failed', 500); }

@@ -72,11 +72,13 @@ router.post('/rate/rate', authMiddleware, requirePermission(86, 'view'), (req, r
 router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.create);
 router.post('/rate/rate/store', authMiddleware, requirePermission(86, 'add'), (req, res) => {
   if (req.body.rate_id === undefined && req.body.bar_id !== undefined) req.body.rate_id = req.body.bar_id;
-  return RateController.barRateStore(req, res);
+  return RateController.rateRateStore(req, res);
 });
 router.put('/rate/rate/:id', authMiddleware, requirePermission(86, 'edit'), (req, res) => {
+  req.params.rateId = rateIdFromQuery(req);
+  if (req.body.rate_id === undefined && req.params.rateId !== undefined) req.body.rate_id = req.params.rateId;
   if (req.body.rate_id === undefined) req.body.rate_id = req.params.id;
-  return RateController.barRateUpdate(req, res);
+  return RateController.rateGridUpdate(req, res);
 });
 router.get('/rate/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.create);
 
@@ -145,11 +147,31 @@ router.post('/bar/rate', authMiddleware, requirePermission(87, 'view'), RateCont
 router.get('/bar/rate/create', authMiddleware, requirePermission(87, 'add'), RateController.barRateCreate);
 router.post('/bar/rate/store', authMiddleware, requirePermission(87, 'add'), RateController.barRateStore);
 router.put('/bar/rate/:id', authMiddleware, requirePermission(87, 'edit'), RateController.barRateUpdate);
-// /bar/rate-link-listing parity (Laravel BarRelationController::link)
-router.get('/bar/rate-link-listing', authMiddleware, requirePermission(87, 'view'), RateController.rateLinkListing);
+// /bar/rate-link-listing parity (Laravel BarRelationController::link) — see line 197
 
 // Short alias: /rate/:id/update — frontend form edit URL
 router.get('/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.edit);
+
+// ── RateRate Grid (Laravel RateRateController parity, menuId 86) — rate/rate page ──
+router.get('/rate/rate', authMiddleware, requirePermission(86, 'view'), RateController.rateRateIndex);
+router.post('/rate/rate', authMiddleware, requirePermission(86, 'view'), RateController.rateRateIndex);
+router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.rateRateCreate);
+router.post('/rate/rate/store', authMiddleware, requirePermission(86, 'add'), RateController.rateRateStore);
+router.put('/rate/rate/:id', authMiddleware, requirePermission(86, 'edit'), RateController.rateRateUpdate);
+router.get('/rate/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.rateRateCreate);
+
+// Rate restrictions (frontend sends rate_id as query/body param)
+router.get('/rate/restriction', authMiddleware, requirePermission(86, 'view'), (req, res) => {
+  req.params.rateId = String(req.query.rate_id ?? '');
+  return RateController.rateGridRestriction(req, res);
+});
+router.post('/rate/restriction', authMiddleware, requirePermission(86, 'edit'), (req, res) => {
+  req.params.rateId = String(req.body.rate_id ?? req.query.rate_id ?? '');
+  return RateController.rateGridRestrictionStore(req, res);
+});
+
+// Rate rate link listing (RateRelationController parity)
+router.get('/rate/rate-link-listing', authMiddleware, requirePermission(86, 'view'), RateController.rateLinkListing);
 
 // ── Bar Master (menuId: 87) — parity with Laravel BarController (rates where module='bar')
 // Order matters: static paths (create, minimum-rate, inclusives) BEFORE /bar/:id
@@ -196,7 +218,7 @@ router.get('/bar/rate/:id/update', authMiddleware, requirePermission(87, 'edit')
 // ── /bar/rate-link-listing — BarRelationController::link parity (must precede /bar/:id) ──
 router.get('/bar/rate-link-listing', authMiddleware, requirePermission(87, 'view'), (req, res) => {
   const barId = String(req.query.bar_id ?? req.query.rate_id ?? '');
-  if (!/^\d+$/.test(barId)) { return RateController.emptyGrid(res); }
+  if (!/^\d+$/.test(barId)) { return RateController.emptyGrid(req, res); }
   req.params.barId = barId;
   return RateAddonController.barRelationLink(req, res);
 });

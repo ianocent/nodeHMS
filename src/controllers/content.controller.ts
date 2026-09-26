@@ -23,6 +23,13 @@ const TEMPLATE_TYPES = [
 ];
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -100,7 +107,7 @@ export class ContentController {
       const data = await prisma.contents.create({
         data: { property_id: pid, name, keyword, status: status ?? 1, image, description, url, group, room_type_id: room_type_id ? BigInt(room_type_id) : null, language, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Content created', 201);
+      success(res, bigintToNumber(data), 'Content created', 200);
     } catch (err: any) { console.error('Content store error:', err); error(res, 'Failed to create content', 500); }
   }
 
@@ -178,7 +185,7 @@ export class ContentController {
       const data = await prisma.content_banners.create({
         data: { property_id: pid, name, status: status ?? 1, image, description, url, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Banner created', 201);
+      success(res, bigintToNumber(data), 'Banner created', 200);
     } catch (err: any) { console.error('Banner store error:', err); error(res, 'Failed to create banner', 500); }
   }
 
@@ -257,7 +264,7 @@ export class ContentController {
       const data = await prisma.cancelation_rules.create({
         data: { property_id: pid, uuid: crypto.randomUUID(), room_type_id: BigInt(room_type_id), code, description, type_date, type_refund, value: value ?? 0, value_days: value_days ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Cancelation rule created', 201);
+      success(res, bigintToNumber(data), 'Cancelation rule created', 200);
     } catch (err: any) { console.error('Cancelation rule store error:', err); error(res, 'Failed to create cancelation rule', 500); }
   }
 
@@ -320,7 +327,7 @@ export class ContentController {
       const data = await prisma.cancelation_rule_dates.create({
         data: { property_id: pid, uuid: crypto.randomUUID(), cancelation_rule_id: BigInt(cancelation_rule_id), start_date: new Date(start_date), end_date: new Date(end_date), status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Cancelation rule date created', 201);
+      success(res, bigintToNumber(data), 'Cancelation rule date created', 200);
     } catch (err: any) { console.error('Cancelation rule date store error:', err); error(res, 'Failed to create cancelation rule date', 500); }
   }
 
@@ -394,7 +401,7 @@ export class ContentController {
       const data = await prisma.email_builders.create({
         data: { property_id: pid, template_name, subject, body, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Email builder created', 201);
+      success(res, bigintToNumber(data), 'Email builder created', 200);
     } catch (err: any) { console.error('Email builder store error:', err); error(res, 'Failed to create email builder', 500); }
   }
 
@@ -475,7 +482,7 @@ export class ContentController {
       const data = await prisma.email_groups.create({
         data: { property_id: pid, group_name, group_list: groupListString, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Email group created', 201);
+      success(res, bigintToNumber(data), 'Email group created', 200);
     } catch (err: any) { console.error('Email group store error:', err); error(res, 'Failed to create email group', 500); }
   }
 
@@ -592,7 +599,7 @@ export class ContentController {
           created_by: req.user?.id,
         },
       });
-      success(res, bigintToNumber(data), 'Other guest created', 201);
+      success(res, bigintToNumber(data), 'Other guest created', 200);
     } catch (err: any) { console.error('Other guest store error:', err); error(res, 'Failed to create other guest', 500); }
   }
 

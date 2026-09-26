@@ -2,16 +2,27 @@
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
+import * as fs from 'fs';
+import * as path from 'path';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { buildDefaultTable } from '../utils/table';
+import { TABLES } from '../utils/tableMeta';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, ITEM_LOST_FOUND_STATUS, STATUS_LOST } from '../utils/cmsConfig';
+import { storageRoot } from '../utils/storage';
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -79,7 +90,7 @@ export class ConciergeController {
       const data = await prisma.phone_book_groups.create({
         data: { property_id: pid, parent_id: parent_id ? BigInt(parent_id) : null, name, sort: sort || 0, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Group created', 201);
+      success(res, bigintToNumber(data), 'Group created', 200);
     } catch (err: any) { console.error('Phone book group store error:', err); error(res, 'Failed to create group', 500); }
   }
 
@@ -132,7 +143,7 @@ export class ConciergeController {
       const data = await prisma.phone_books.create({
         data: { property_id: pid, phone_book_group_id: BigInt(phone_book_group_id), name, address, telp, fax, email, contact_name, remark, sort: sort || 0, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Phone book created', 201);
+      success(res, bigintToNumber(data), 'Phone book created', 200);
     } catch (err: any) { console.error('Phone book store error:', err); error(res, 'Failed to create phone book', 500); }
   }
 
@@ -167,7 +178,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        table: buildDefaultTable(data),
+        table: TABLES.baggage,
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -178,12 +189,25 @@ export class ConciergeController {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const { date, name, tag_no, remark, phone_number, status } = req.body;
-      if (!date) { badRequest(res, 'date is required'); return; }
+      if (!date) { badRequest(res, 'The date field is required.'); return; }
+      if (!name) { badRequest(res, 'The name field is required.'); return; }
+
+      let filePath: string | null = null;
+      let file: string | null = req.body.file ?? null;
+      if ((req as any).file) {
+        const f = (req as any).file as Express.Multer.File;
+        const ext = f.originalname.split('.').pop()?.toLowerCase() || 'dat';
+        file = f.originalname;
+        filePath = `file-baggage/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const abs = path.join(storageRoot(), filePath);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, f.buffer);
+      }
 
       const data = await prisma.baggages.create({
-        data: { property_id: pid, date: new Date(date), name, tag_no, remark, phone_number, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, date: new Date(date), name, tag_no, remark, file, file_path: filePath, phone_number, status: (status === 'true' || status === 1 || status === '1') ? 1 : 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Baggage created', 201);
+      success(res, bigintToNumber(data), 'Baggage created', 200);
     } catch (err: any) { console.error('Baggage store error:', err); error(res, 'Failed to create baggage', 500); }
   }
 
@@ -191,9 +215,25 @@ export class ConciergeController {
     try {
       const id = idParam(req.params.id);
       const { date, name, tag_no, remark, phone_number, status } = req.body;
-      await prisma.baggages.update({ where: { id }, data: { date: date ? new Date(date) : undefined, name, tag_no, remark, phone_number, status, updated_at: new Date(), updated_by: req.user?.id } });
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
+      if (date !== undefined) data.date = new Date(date);
+      if (name !== undefined) data.name = name;
+      if (tag_no !== undefined) data.tag_no = tag_no;
+      if (remark !== undefined) data.remark = remark;
+      if (phone_number !== undefined) data.phone_number = phone_number;
+      if (status !== undefined) data.status = (status === 'true' || status === 1 || status === '1') ? 1 : 0;
+      if ((req as any).file) {
+        const f = (req as any).file as Express.Multer.File;
+        const ext = f.originalname.split('.').pop()?.toLowerCase() || 'dat';
+        data.file = f.originalname;
+        data.file_path = `file-baggage/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const abs = path.join(storageRoot(), data.file_path);
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, f.buffer);
+      }
+      await prisma.baggages.update({ where: { id }, data });
       success(res, null, 'Baggage updated');
-    } catch (err: any) { error(res, 'Failed to update baggage', 500); }
+    } catch (err: any) { console.error('Baggage update error:', err); error(res, 'Failed to update baggage', 500); }
   }
 
   static async baggageDestroy(req: Request, res: Response): Promise<void> {
@@ -234,7 +274,7 @@ export class ConciergeController {
       const data = await prisma.car_parks.create({
         data: { property_id: pid, room: room ? parseInt(room) : null, remark, car_park_lot, vehicle_no, folio, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Car park created', 201);
+      success(res, bigintToNumber(data), 'Car park created', 200);
     } catch (err: any) { console.error('Car park store error:', err); error(res, 'Failed to create car park', 500); }
   }
 
@@ -362,7 +402,7 @@ export class ConciergeController {
       const data = await prisma.lost_and_founds.create({
         data: { property_id: pid, ref_no, report_date: report_date ? new Date(report_date) : null, item, room: room ? parseInt(room) : null, room_founder: room_founder ? parseInt(room_founder) : null, owner_item, item_status, hotel_location, item_description: description, instruction, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Lost & found created', 201);
+      success(res, bigintToNumber(data), 'Lost & found created', 200);
     } catch (err: any) { console.error('Lost & found store error:', err); error(res, 'Failed to create lost & found', 500); }
   }
 

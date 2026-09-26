@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../../utils/response';
+import { normalizeJson } from '../../utils/json';
 import { STATUSES } from '../../utils/cmsConfig';
 export { STATUSES };
 
@@ -22,17 +23,7 @@ export const adapter = new PrismaPg(pool);
 export const prisma = new PrismaClient({ adapter });
 
 export function bigintToNumber(val: any): any {
-  if (typeof val === 'bigint') return Number(val);
-  if (Array.isArray(val)) return val.map(bigintToNumber);
-  if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
-  if (val && typeof val === 'object') {
-    const out: any = {};
-    for (const [k, v] of Object.entries(val)) {
-      out[k] = bigintToNumber(v);
-    }
-    return out;
-  }
-  return val;
+  return normalizeJson(val);
 }
 
 export function isNumeric(v: any): boolean {

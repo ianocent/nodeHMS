@@ -85,6 +85,7 @@ export function requestParser(
     if (incomingWasEncrypted || String(req.headers.accept || '').toLowerCase().includes('text/plain') || req.query.encrypt === 'true') {
       const encrypted = encryptAES(JSON.stringify(body));
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('X-Response-Length', String(encrypted.length));
       return res.send(encrypted);
     }
 

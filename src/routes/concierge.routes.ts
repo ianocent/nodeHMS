@@ -1,8 +1,12 @@
 import { Router } from 'express';
 import { ConciergeController } from '../controllers/concierge.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { makeUpload } from '../utils/upload';
 
 const router = Router();
+
+// Baggage file upload (Laravel BaggageController: 'file' => 'nullable|file|mimes:pdf,jpg,png,doc,docx|max:2048')
+const baggageUpload = makeUpload(['pdf', 'jpg', 'png', 'doc', 'docx']);
 
 // Phone Book Groups
 router.get('/phone-book-groups', authMiddleware, ConciergeController.phoneBookGroupList);
@@ -62,20 +66,20 @@ router.delete('/phone-book/:id', authMiddleware, ConciergeController.phoneBookDe
 
 // Baggage
 router.get('/baggages', authMiddleware, ConciergeController.baggageList);
-router.post('/baggages', authMiddleware, ConciergeController.baggageStore);
-router.put('/baggages/:id', authMiddleware, ConciergeController.baggageUpdate);
+router.post('/baggages', authMiddleware, baggageUpload.single('file'), ConciergeController.baggageStore);
+router.put('/baggages/:id', authMiddleware, baggageUpload.single('file'), ConciergeController.baggageUpdate);
 router.delete('/baggages/:id', authMiddleware, ConciergeController.baggageDestroy);
 
 // Singular aliases for frontend compatibility
 router.get('/baggage', authMiddleware, ConciergeController.baggageList);
-router.post('/baggage', authMiddleware, ConciergeController.baggageStore);
-router.put('/baggage/:id', authMiddleware, ConciergeController.baggageUpdate);
+router.post('/baggage', authMiddleware, baggageUpload.single('file'), ConciergeController.baggageStore);
+router.put('/baggage/:id', authMiddleware, baggageUpload.single('file'), ConciergeController.baggageUpdate);
 router.delete('/baggage/:id', authMiddleware, ConciergeController.baggageDestroy);
 
 // Frontend /concierge/baggage alias
 router.get('/concierge/baggage', authMiddleware, ConciergeController.baggageList);
-router.post('/concierge/baggage', authMiddleware, ConciergeController.baggageStore);
-router.put('/concierge/baggage/:id', authMiddleware, ConciergeController.baggageUpdate);
+router.post('/concierge/baggage', authMiddleware, baggageUpload.single('file'), ConciergeController.baggageStore);
+router.put('/concierge/baggage/:id', authMiddleware, baggageUpload.single('file'), ConciergeController.baggageUpdate);
 router.delete('/concierge/baggage/:id', authMiddleware, ConciergeController.baggageDestroy);
 router.get('/concierge/baggage/create', authMiddleware, ConciergeController.baggageForm);
 router.get('/concierge/baggage/:id', authMiddleware, ConciergeController.baggageForm);

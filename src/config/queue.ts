@@ -20,7 +20,11 @@ let boss: any;
 async function getBoss() {
   if (!boss) {
     const PgBossClass = await getPgBoss();
-    boss = new PgBossClass(connectionString || '');
+    // poolSize = max concurrent jobs. pg-boss default (10) fires ALL overdue
+    // scheduled jobs at once on boot (sync-price*, night-audit-post, ...) -> heap
+    // balloons to >1.1GB on 1-core boxes. 2 keeps boot memory sane.
+    const poolSize = Number(process.env.PG_BOSS_POOLSIZE) || 2;
+    boss = new PgBossClass(connectionString || '', { poolSize });
   }
   return boss;
 }
@@ -30,6 +34,25 @@ export async function initQueue() {
   
   const bossInstance = await getBoss();
   bossInstance.on('error', (error: Error) => console.error('pg-boss error:', error));
+
+  // Wrap all job handlers with a memory/runtime log so we can detect which job
+  // balloons the V8 heap (the process OOM'd at ~1GB inside a worker at boot).
+  const origWork = bossInstance.work.bind(bossInstance);
+  bossInstance.work = (name: string, handler: any) =>
+    origWork(name, async (job: any) => {
+      const mem = () =>
+        `rss=${Math.round(process.memoryUsage().rss / 1048576)}MB heap=${Math.round(process.memoryUsage().heapUsed / 1048576)}MB`;
+      console.log(`[queue] job start: ${name} id=${job?.id} ${mem()}`);
+      const t0 = Date.now();
+      try {
+        return await handler(job);
+      } catch (e) {
+        console.error(`[queue] job error: ${name} id=${job?.id}`, (e as any)?.message || e);
+        throw e;
+      } finally {
+        console.log(`[queue] job end:   ${name} id=${job?.id} ${mem()} dt=${Date.now() - t0}ms`);
+      }
+    });
 
   try {
     await bossInstance.start();

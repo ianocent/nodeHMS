@@ -41,6 +41,13 @@ const REGIONS = [
 ];
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -102,7 +109,7 @@ export class GuestController {
       const hasFolioId = req.query.folio_id || req.query.reservation;
 
       // Laravel GuestProfileController@index ignores trash param; always active scope
-      const where: any = { deleted_at: null };
+      const where: any = { deleted_at: null, property_id: BigInt(req.user?.lastProperty ?? 0) };
 
       if (search) {
         where.OR = [
@@ -695,7 +702,7 @@ export class GuestController {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
-      const where: any = { deleted_at: null };
+      const where: any = { deleted_at: null, property_id: BigInt(req.user?.lastProperty ?? 0) };
       if (search) {
         where.OR = [
           { first_name: { contains: search, mode: 'insensitive' } },
@@ -747,7 +754,7 @@ export class GuestController {
   static async autocomplete(req: Request, res: Response): Promise<void> {
     try {
       const search = req.query.search as string;
-      const where: any = { status: 1, deleted_at: null };
+      const where: any = { status: 1, deleted_at: null, property_id: BigInt(req.user?.lastProperty ?? 0) };
 
       if (search) {
         where.OR = [
@@ -848,7 +855,8 @@ export class GuestController {
       const limit = parseInt(req.query.limit as string) || 10;
       const guestIdRaw = String(req.query.guest_id ?? req.query.guestId ?? '');
       if (!/^\d+$/.test(guestIdRaw)) { success(res, [], 'Success', 200, { pagination: { current_page: 1, last_page: 1, per_page: limit, total: 0, from: 1, to: 0 } }); return; }
-      const where: any = { guest_profile_id: BigInt(guestIdRaw) };
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, guest_profile_id: BigInt(guestIdRaw) };
       const [data, total] = await Promise.all([
         prisma.folios.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
         prisma.folios.count({ where }),
@@ -885,7 +893,7 @@ export class GuestController {
       }
       if (data.company_profile_id === undefined) { badRequest(res, 'company_profile_id is required'); return; }
       const record = await prisma.folios.create({ data });
-      success(res, bigintToNumber(record), 'Folio created successfully', 201);
+      success(res, bigintToNumber(record), 'Folio created successfully', 200);
     } catch (err: any) { console.error('Guest folio store error:', err); error(res, 'Failed to create folio', 500); }
   }
 
@@ -904,7 +912,8 @@ export class GuestController {
     try {
       const guestId = idParamBig(req.params.guestId);
       const { page, limit } = parsePaginationFn(req.query);
-      const where: any = { guest_profile_id: guestId, deleted_at: null };
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, guest_profile_id: guestId, deleted_at: null };
 
       const [data, total] = await Promise.all([
         prisma.guest_profile_documents.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
@@ -954,7 +963,7 @@ export class GuestController {
       const data = await prisma.guest_profile_documents.create({
         data: { property_id: pid, guest_profile_id: guestId, file, description, file_path: file_path ?? null, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Document created', 201);
+      success(res, bigintToNumber(data), 'Document created', 200);
     } catch (err: any) { console.error('Document store error:', err); error(res, 'Failed to create document', 500); }
   }
 
@@ -1000,7 +1009,8 @@ export class GuestController {
   static async familyList(req: Request, res: Response): Promise<void> {
     try {
       const guestId = idParamBig(req.params.guestId);
-      const data = await prisma.guest_profile_family_members.findMany({ where: { guest_profile_id: guestId, deleted_at: null } });
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const data = await prisma.guest_profile_family_members.findMany({ where: { property_id: pid, guest_profile_id: guestId, deleted_at: null } });
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { console.error('Family list error:', err); error(res, 'Failed to list family', 500); }
   }
@@ -1014,7 +1024,7 @@ export class GuestController {
       const data = await prisma.guest_profile_family_members.create({
         data: { property_id: pid, guest_profile_id: guestId, has_guest_profile_id: BigInt(has_guest_profile_id), relationship, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Family member added', 201);
+      success(res, bigintToNumber(data), 'Family member added', 200);
     } catch (err: any) { console.error('Family store error:', err); error(res, 'Failed to add family', 500); }
   }
 
@@ -1031,7 +1041,8 @@ export class GuestController {
     try {
       const guestId = idParamBig(req.params.guestId);
       const { page, limit } = parsePaginationFn(req.query);
-      const where: any = { id_guest_profile: guestId, deleted_at: null };
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, id_guest_profile: guestId, deleted_at: null };
 
       const [data, total] = await Promise.all([
         prisma.guest_profile_histories.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
@@ -1110,7 +1121,7 @@ export class GuestController {
       const data = await prisma.guest_profile_preferences.create({
         data: { property_id: pid, id_guest_profile: guestId, preference, remark, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Preference added', 201);
+      success(res, bigintToNumber(data), 'Preference added', 200);
     } catch (err: any) { console.error('Preference store error:', err); error(res, 'Failed to add preference', 500); }
   }
 
@@ -1205,7 +1216,7 @@ export class GuestController {
       const data = await prisma.guest_profile_loyalty_cards.create({
         data: { property_id: pid, guest_profile_id: guestId, card_type, card_number, join_date, card_expiry: card_expiry ? new Date(card_expiry) : null, is_default: is_default ?? false, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Loyalty card created', 201);
+      success(res, bigintToNumber(data), 'Loyalty card created', 200);
     } catch (err: any) { console.error('Loyalty store error:', err); error(res, 'Failed to create loyalty card', 500); }
   }
 
@@ -1292,7 +1303,8 @@ export class GuestController {
       const minAge = req.query.min_age as string;
       const maxAge = req.query.max_age as string;
 
-      const where: any = { deleted_at: null };
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, deleted_at: null };
       if (status !== undefined && status !== '') where.status_profile = parseInt(status);
       if (gender && gender !== 'all') where.gender = gender;
 
@@ -1365,20 +1377,35 @@ export class GuestController {
   }
 
   // Merge Guest (menu 84) — Laravel GuestProfileController@mergeUpdate parity
+  // Row dari TableMergeGuest berbentuk dataObjectFormat ({value,label}); whitelist field harus
+  // match kolom schema guest_profiles + koersi tipe (title disimpan via model_has_types).
   static async mergeUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
-      // Whitelist (Laravel mergeUpdate uses $user->only([...]) — never mass-assign raw body).
-      const ALLOWED = [
-        'title', 'first_name', 'last_name', 'email', 'mobile_phone', 'telp', 'gender',
-        'birth_of_date', 'nationality_id', 'address', 'city_id', 'country_id', 'postal_code',
-        'id_type', 'id_number', 'id_expiry', 'vip_status', 'source', 'remark',
-        'status_profile', 'blacklist', 'is_subscribe',
-      ];
+      const has = (k: string): boolean => req.body[k] !== undefined && req.body[k] !== null;
+      const pick = (k: string): any => {
+        const v = req.body[k];
+        if (v && typeof v === 'object' && 'value' in v) return v.value;
+        return v;
+      };
+
       const data: any = {};
-      for (const key of ALLOWED) {
-        if (req.body[key] !== undefined) data[key] = req.body[key];
+      for (const key of ['status_profile', 'nationality_id', 'city_id', 'country_id', 'blacklist', 'status']) {
+        if (has(key)) data[key] = Number(pick(key));
       }
+      if (has('is_subscribe')) data.is_subscribe = !!pick('is_subscribe');
+      for (const key of [
+        'short_code', 'first_name', 'last_name', 'region', 'telp', 'mobile_phone',
+        'card_type', 'card_number', 'card_expiry', 'email', 'gender', 'fax',
+        'address', 'postal_code', 'car_reg_number',
+      ]) {
+        if (has(key)) data[key] = pick(key);
+      }
+      if (has('birth_of_date')) {
+        const b = new Date(pick('birth_of_date'));
+        if (!isNaN(b.getTime())) data.birth_of_date = b;
+      }
+
       const existing = await prisma.guest_profiles.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Guest profile not found'); return; }
 
@@ -1386,6 +1413,18 @@ export class GuestController {
         where: { id },
         data: { ...data, updated_at: new Date(), updated_by: req.user?.id ?? null },
       });
+
+      // syncTypes parity — guest-title disimpan via model_has_types, bukan kolom guest_profiles.
+      if (has('title')) {
+        const titleId = pick('title');
+        if (titleId !== undefined && titleId !== null && titleId !== '') {
+          await prisma.model_has_types.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' } });
+          await prisma.model_has_types.create({
+            data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(String(titleId)) },
+          });
+        }
+      }
+
       success(res, bigintToNumber(guest), 'Guest merged', 200);
     } catch (err: any) {
       console.error('Merge guest error:', err);
@@ -1473,7 +1512,7 @@ export class GuestController {
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
-      success(res, bigintToNumber(noteRow), 'Note created successfully.', 201);
+      success(res, bigintToNumber(noteRow), 'Note created successfully.', 200);
     } catch (err: any) { console.error('Notes store error:', err); error(res, 'Failed to create note', 500); }
   }
 
@@ -1558,7 +1597,7 @@ export class GuestController {
       const reverse = await prisma.guest_profile_family_members.create({
         data: { property_id: pid, guest_profile_id: memberId, has_guest_profile_id: guestId, relationship, status: 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(reverse), 'Family member created successfully.', 201);
+      success(res, bigintToNumber(reverse), 'Family member created successfully.', 200);
     } catch (err: any) { console.error('Family member store error:', err); error(res, 'Failed to create family member', 500); }
   }
 

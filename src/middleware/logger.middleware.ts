@@ -14,8 +14,14 @@ export function requestLogger(
     const duration = Date.now() - start;
     const status = _res.statusCode;
     const icon = status >= 500 ? '🔴' : status >= 400 ? '🟡' : '🟢';
+    const mem =
+      process.memoryUsage().heapUsed > 256 * 1024 * 1024
+        ? ` heap=${Math.round(process.memoryUsage().heapUsed / 1048576)}MB`
+        : '';
+    const len = _res.getHeader('content-length') ?? _res.getHeader('x-response-length');
+    const lenStr = len ? ` len=${len}` : '';
     console.log(
-      `[${new Date().toISOString()}] ${icon} ${method} ${originalUrl} → ${status} (${duration}ms)`
+      `[${new Date().toISOString()}] ${icon} ${method} ${originalUrl} → ${status} (${duration}ms)${mem}${lenStr}`
     );
   });
 

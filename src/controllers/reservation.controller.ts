@@ -1,15 +1,15 @@
-import { Request, Response } from 'express';
-import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { Prisma, PrismaClient } from '@prisma/client';
+import { Request, Response } from 'express';
 import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
-import { getPermissionFlags } from '../middleware/permission.middleware';
-import { dataSearch, applySearchField } from '../utils/search';
-import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
-import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
-import { findPromosForNight, priceNight, PromoLike, applyPromoDiscounts } from '../utils/reservationPricing';
-import { AuthController } from './auth.controller';
 import { enqueueJob } from '../config/queue';
+import { getPermissionFlags } from '../middleware/permission.middleware';
+import { calculateCodePost, moneyFormat } from '../utils/cmsConfig';
+import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { applyPromoDiscounts, findPromosForNight, priceNight, PromoLike } from '../utils/reservationPricing';
+import { badRequest, error, notFound, success, validationError } from '../utils/response';
+import { applySearchField, dataSearch } from '../utils/search';
+import { AuthController } from './auth.controller';
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
@@ -107,6 +107,13 @@ function fmtLocalDate(d: any): string | null {
 }
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -578,7 +585,47 @@ async function updateParentFolioImpl(req: Request, res: Response, id: bigint): P
   }
   success(res, bigintToNumber(folio), 'Success', 200);
 }
-
+async function createFolioWithRetry(propertyId: bigint, typeReservation: string, folioData: (num: string) => any, maxRetries = 5) {
+  // Laravel Folio@savingLegacy/generateCodeReservation parity (Global.php folioNumberFormat + Folio.php getCodeReservation/getLastResevation)
+  const code =
+    typeReservation === 'git' ? 'G'
+    : typeReservation === 'fit' ? 'F'
+    : typeReservation === 'day-use' ? 'D'
+    : 'V';
+  const propStr = String(propertyId).padStart(3, '0');
+  const now = new Date();
+  const ym = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const prefix = `${code}${propStr}${ym}`;
+  const storedType = typeReservation === 'day-use' ? 'fit' : typeReservation;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const lastFolio = await prisma.folios.findFirst({
+      where: {
+        folio_number: { startsWith: prefix },
+        parent: 0,
+        deleted_at: null,
+        type_reservation: storedType,
+      },
+      orderBy: { folio_number: 'desc' },
+      select: { folio_number: true },
+    });
+    let nextSeq = 1;
+    if (lastFolio?.folio_number) {
+      const rest = lastFolio.folio_number.slice(prefix.length);
+      const m = rest.match(/^(\d{4})/);
+      if (m) nextSeq = parseInt(m[1], 10) + 1;
+    }
+    const folioNumber = prefix + String(nextSeq).padStart(4, '0');
+    try {
+      return await prisma.folios.create({ data: folioData(folioNumber) });
+    } catch (err: any) {
+      if (err?.code === 'P2002' && err?.meta?.target?.includes('folio_number')) {
+        continue; // race — retry
+      }
+      throw err;
+    }
+  }
+  throw new Error('Failed to generate unique folio number after retries');
+}
 export class ReservationController {
   // Replicates Laravel ReservationController@moveLedger (PUT /reservation/ledger/move/:id).
   static async moveLedger(req: Request, res: Response): Promise<void> {
@@ -693,10 +740,26 @@ const table = [
         prisma.folios.count({ where }),
       ]);
 
-const formatted = await Promise.all(folios.map(async (f: any) => {
+const folioIds = folios.map((f: any) => f.id);
+      const [batchTransactions, batchGuests] = await Promise.all([
+        prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null } }),
+        prisma.guest_profiles.findMany({
+          where: { id: { in: folios.filter((f: any) => !((f.first_name || '').trim()) && f.guest_profile_id).map((f: any) => f.guest_profile_id) } },
+          select: { id: true, first_name: true, last_name: true },
+        }),
+      ]);
+      const txnByFolio = new Map<string, any[]>();
+      for (const t of batchTransactions) {
+        const key = String(t.folio_id);
+        if (!txnByFolio.has(key)) txnByFolio.set(key, []);
+        txnByFolio.get(key)!.push(t);
+      }
+      const guestByProfileId = new Map(batchGuests.map((g: any) => [String(g.id), g]));
+
+const formatted = folios.map((f: any) => {
         let guestName = `${f.first_name || ''} ${f.last_name || ''}`.trim();
         if (!guestName && f.guest_profile_id) {
-          const gp = await prisma.guest_profiles.findUnique({ where: { id: f.guest_profile_id } });
+          const gp = guestByProfileId.get(String(f.guest_profile_id));
           if (gp) guestName = `${gp.first_name || ''} ${gp.last_name || ''}`.trim();
         }
 
@@ -705,10 +768,8 @@ const formatted = await Promise.all(folios.map(async (f: any) => {
         const roomTypeName = lastReservation?.room_type_name || '';
         const roomNext = lastReservation?.room_id_next ? (lastReservation.rooms?.name || '') : '';
 
-        // Get balance from transactions
-        const transactions = await prisma.transactions.findMany({
-          where: { folio_id: f.id, deleted_at: null },
-        });
+        // Get balance from transactions (batched)
+        const transactions = txnByFolio.get(String(f.id)) || [];
         const balance = transactions.reduce((sum: number, t: any) => sum + Number(t.total || 0), 0);
 
         // Stay calculation
@@ -767,7 +828,7 @@ const formatted = await Promise.all(folios.map(async (f: any) => {
           cc,
           actions: [],
         };
-      }));
+      });
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
@@ -997,16 +1058,16 @@ success(res, formatted, 'Success', 200, {
         const typeUpper = String(req.body.type_reservation ?? '').toUpperCase();
         const roomActions = ['assign_room', 'un_check_out', 'un_check_in', 'check_out', 'check_in'];
         if (roomActions.concat('move_reservation').includes(req.body.status_reservation) && typeUpper === 'VR') {
-          return await this.updateVR(req, res);
+          return await ReservationController.updateVR(req, res);
         }
         if (roomActions.includes(req.body.status_reservation) && typeUpper !== 'GIT') {
-          return await this.assignRoom(req, res);
+          return await ReservationController.assignRoom(req, res);
         }
         if (req.body.status_reservation === 'move_reservation' && typeUpper !== 'GIT') {
-          return await this.moveReservationItems(req, res);
+          return await ReservationController.moveReservationItems(req, res);
         }
         if (roomActions.includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 1) === 0) {
-          return await this.assignRoom(req, res);
+          return await ReservationController.assignRoom(req, res);
         }
         if (roomActions.concat('move_reservation').includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 0) === 1) {
           return await updateSubFolioImpl(req, res, id);
@@ -1588,70 +1649,54 @@ success(res, formatted, 'Success', 200, {
       }
 
       // Generate folio number
-      const lastFolio = await prisma.folios.findFirst({
-        where: { property_id: propertyId!, deleted_at: null },
-        orderBy: { id: 'desc' },
-        select: { folio_number: true },
-      });
-
-      let nextFolioNum = 1;
-      if (lastFolio?.folio_number) {
-        const match = lastFolio.folio_number.match(/(\d+)$/);
-        if (match) nextFolioNum = parseInt(match[1]) + 1;
-      }
-      const folioNumber = String(nextFolioNum).padStart(7, '0');
-
-      // Create folio
-      const folio = await prisma.folios.create({
-        data: {
-          folio_number: folioNumber,
-          parent: 0,
-          property_id: propertyId!,
-          type_reservation: type_reservation === 'day-use' ? 'fit' : type_reservation,
-          guest_profile_id: guest_profile_id ? BigInt(guest_profile_id) : null,
-          company_profile_id: resolvedCompanyId!,
-          company_name: companyProfile?.name || null,
-          first_name: guestProfile?.first_name || first_name || null,
-          last_name: guestProfile?.last_name || last_name || null,
-          title: null,
-          telp: guestProfile?.telp || telp || null,
-          email: guestProfile?.email || email || null,
-          remark: remark || null,
-          remark_ins: remark_ins || null,
-          dept_branch: dept_branch || null,
-          booking_agent_id: booking_agent_id ? BigInt(booking_agent_id) : null,
-          contact_person_id: contact_person_id ? BigInt(contact_person_id) : null,
-          is_pending: is_pending || false,
-          cash_on_arrival: cash_on_arrival || false,
-          guaranted: guaranted || false,
-          is_walk_in: is_walk_in || false,
-          is_house_use: is_house_use || false,
-          complimentary: complimentary || false,
-          is_compliment_tour_leader: is_compliment_tour_leader || false,
-          is_day_use: type_reservation === 'day-use',
-          is_virtual: type_reservation === 'vr',
-          promo_code: promo_code || null,
-          check_in_date: new Date(actualCheckIn),
-          check_out_date: new Date(actualCheckOut),
-          res_date: new Date(),
-          res_time: new Date().toISOString().substring(11, 16),
-          status: STATUS_ACTIVE,
-          status_reservation: statusReservation,
-          gender: guestProfile?.gender || null,
-          birth_of_date: guestProfile?.birth_of_date || null,
-          mobile_phone: guestProfile?.mobile_phone || null,
-          nationality_id: guestProfile?.nationality_id || null,
-          address: guestProfile?.address || null,
-          city_id: guestProfile?.city_id || null,
-          country_id: guestProfile?.country_id || null,
-          postal_code: guestProfile?.postal_code || null,
-          image: guestProfile?.image || null,
-          card_type: guestProfile?.card_type || null,
-          card_number: guestProfile?.card_number || null,
-          card_expiry: guestProfile?.card_expiry || null,
-          created_by: userId,
-        },
-      });
+      const folio = await createFolioWithRetry(propertyId!, type_reservation, (folioNumber) => ({
+        folio_number: folioNumber,
+        parent: 0,
+        property_id: propertyId!,
+        type_reservation: type_reservation === 'day-use' ? 'fit' : type_reservation,
+        guest_profile_id: guest_profile_id ? BigInt(guest_profile_id) : null,
+        company_profile_id: resolvedCompanyId!,
+        company_name: companyProfile?.name || null,
+        first_name: guestProfile?.first_name || first_name || null,
+        last_name: guestProfile?.last_name || last_name || null,
+        title: null,
+        telp: guestProfile?.telp || telp || null,
+        email: guestProfile?.email || email || null,
+        remark: remark || null,
+        remark_ins: remark_ins || null,
+        dept_branch: dept_branch || null,
+        booking_agent_id: booking_agent_id ? BigInt(booking_agent_id) : null,
+        contact_person_id: contact_person_id ? BigInt(contact_person_id) : null,
+        is_pending: is_pending || false,
+        cash_on_arrival: cash_on_arrival || false,
+        guaranted: guaranted || false,
+        is_walk_in: is_walk_in || false,
+        is_house_use: is_house_use || false,
+        complimentary: complimentary || false,
+        is_compliment_tour_leader: is_compliment_tour_leader || false,
+        is_day_use: type_reservation === 'day-use',
+        is_virtual: type_reservation === 'vr',
+        promo_code: promo_code || null,
+        check_in_date: new Date(actualCheckIn),
+        check_out_date: new Date(actualCheckOut),
+        res_date: new Date(),
+        res_time: new Date(),
+        status: STATUS_ACTIVE,
+        status_reservation: statusReservation,
+        gender: guestProfile?.gender || null,
+        birth_of_date: guestProfile?.birth_of_date || null,
+        mobile_phone: guestProfile?.mobile_phone || null,
+        nationality_id: guestProfile?.nationality_id || null,
+        address: guestProfile?.address || null,
+        city_id: guestProfile?.city_id || null,
+        country_id: guestProfile?.country_id || null,
+        postal_code: guestProfile?.postal_code || null,
+        image: guestProfile?.image || null,
+        card_type: guestProfile?.card_type || null,
+        card_number: guestProfile?.card_number || null,
+        card_expiry: guestProfile?.card_expiry || null,
+        created_by: userId,
+      }));
 
       // Create reservation items (per-night entries, priced via Folio::saveReservation parity)
       if (type_reservation !== 'git' && reservation_list.length > 0) {
@@ -1769,7 +1814,7 @@ success(res, formatted, 'Success', 200, {
         for (const roomItem of room_reservation_list) {
           const qty = roomItem.qty || 1;
           for (let i = 0; i < qty; i++) {
-            const subFolioNumber = `${folioNumber}/${String(subIndex).padStart(3, '0')}`;
+            const subFolioNumber = `${folio.folio_number}/${String(subIndex).padStart(3, '0')}`;
 
             const subFolio = await prisma.folios.create({
               data: {
@@ -1870,7 +1915,6 @@ success(res, formatted, 'Success', 200, {
       });
       success(res, result, message, 200);
     } catch (err: any) {
-      console.error('Reservation store error:', err?.message, err?.stack?.substring(0, 500));
       error(res, `Failed to create reservation: ${err?.message || 'unknown'}`, 500);
     }
   }
@@ -2739,6 +2783,15 @@ success(res, formatted, 'Success', 200, {
       if (start && end) {
         where.check_in_date = { lte: new Date(end) };
         where.check_out_date = { gte: new Date(start) };
+      } else {
+        // Defensive default window so a bare request never returns the whole
+        // table (was ~39MB). Calendar pages always send start/end.
+        const from = new Date();
+        from.setMonth(from.getMonth() - 2);
+        const to = new Date();
+        to.setFullYear(to.getFullYear() + 1);
+        where.check_in_date = { lte: to };
+        where.check_out_date = { gte: from };
       }
 
       const folios = await prisma.folios.findMany({
@@ -2885,16 +2938,15 @@ success(res, formatted, 'Success', 200, {
         return;
       }
 
-      let allAvailable = true;
-      const roomIds: Record<number, number[]> = {};
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const roomTypeIds = room_reservation_list.map((item: any) => BigInt(item.id));
 
-      for (const item of room_reservation_list) {
-        const roomTypeId = BigInt(item.id);
-
-        // Find available rooms of this type for the date range
-        const reservedRoomIds = await prisma.reservations.findMany({
+      // Batch availability: one query for all reserved rooms + all rooms across requested types.
+      const [reservedRoomRows, allRoomRows] = await Promise.all([
+        prisma.reservations.findMany({
           where: {
-            room_type_id: roomTypeId,
+            property_id: pid,
+            room_type_id: { in: roomTypeIds },
             date: { gte: new Date(check_in_date), lt: new Date(check_out_date) },
             deleted_at: null,
             folios: {
@@ -2902,28 +2954,42 @@ success(res, formatted, 'Success', 200, {
               status_reservation: { in: [STATUS_RESERVATION.reservation.id, STATUS_RESERVATION.check_in.id] },
             },
           },
-          select: { room_id: true },
+          select: { room_type_id: true, room_id: true },
           distinct: ['room_id'],
-        });
-
-        const reservedIds = reservedRoomIds
-          .filter((r) => r.room_id !== null)
-          .map((r) => Number(r.room_id));
-
-        const allRooms = await prisma.rooms.findMany({
+        }),
+        prisma.rooms.findMany({
           where: {
-            room_type_id: roomTypeId,
+            property_id: pid,
+            room_type_id: { in: roomTypeIds },
             deleted_at: null,
             status: STATUS_ACTIVE,
             is_physical: true,
           },
-          select: { id: true },
-        });
+          select: { room_type_id: true, id: true },
+        }),
+      ]);
 
-        const availableRoomIds = allRooms
-          .filter((r) => !reservedIds.includes(Number(r.id)))
-          .map((r) => Number(r.id));
+      const reservedByType = new Map<string, Set<number>>();
+      for (const r of reservedRoomRows) {
+        if (r.room_id === null) continue;
+        const key = String(r.room_type_id);
+        if (!reservedByType.has(key)) reservedByType.set(key, new Set<number>());
+        reservedByType.get(key)!.add(Number(r.room_id));
+      }
+      const roomsByType = new Map<string, number[]>();
+      for (const r of allRoomRows) {
+        const key = String(r.room_type_id);
+        if (!roomsByType.has(key)) roomsByType.set(key, []);
+        roomsByType.get(key)!.push(Number(r.id));
+      }
 
+      let allAvailable = true;
+      const roomIds: Record<number, number[]> = {};
+
+      for (const item of room_reservation_list) {
+        const roomTypeId = BigInt(item.id);
+        const reservedIds = reservedByType.get(String(roomTypeId)) || new Set<number>();
+        const availableRoomIds = (roomsByType.get(String(roomTypeId)) || []).filter((id) => !reservedIds.has(id));
         roomIds[Number(item.id)] = availableRoomIds;
 
         if (availableRoomIds.length < (item.qty || 1)) {
@@ -3160,24 +3226,9 @@ success(res, formatted, 'Success', 200, {
         return;
       }
 
-      // Generate new folio number
-      const lastFolio = await prisma.folios.findFirst({
-        where: { property_id: propertyId!, deleted_at: null },
-        orderBy: { id: 'desc' },
-        select: { folio_number: true },
-      });
-
-      let nextFolioNum = 1;
-      if (lastFolio?.folio_number) {
-        const match = lastFolio.folio_number.match(/(\d+)$/);
-        if (match) nextFolioNum = parseInt(match[1]) + 1;
-      }
-      const newFolioNumber = String(nextFolioNum).padStart(7, '0');
-
-      // Create new folio from existing
-      const newFolio = await prisma.folios.create({
-        data: {
-          folio_number: newFolioNumber,
+      // Generate new folio number (Laravel folioNumberFormat parity)
+      const newFolio = await createFolioWithRetry(propertyId!, existing.type_reservation, (folioNumber) => ({
+          folio_number: folioNumber,
           parent: BigInt(0),
           property_id: existing.property_id,
           type_reservation: existing.type_reservation,
@@ -3203,8 +3254,7 @@ success(res, formatted, 'Success', 200, {
           gender: existing.gender,
           nationality_id: existing.nationality_id,
           created_by: userId,
-        },
-      });
+      }));
 
       // Replicate reservation items
       for (const resv of existing.reservations) {
@@ -3384,7 +3434,7 @@ success(res, formatted, 'Success', 200, {
         },
       });
 
-      success(res, bigintToNumber(item), 'Success', 201);
+      success(res, bigintToNumber(item), 'Success', 200);
     } catch (err: any) {
       console.error('Reservation item add error:', err);
       error(res, 'Failed to add reservation item', 500);
@@ -3611,8 +3661,9 @@ success(res, formatted, 'Success', 200, {
       const limit = parseInt(req.query.limit as string) || 10;
       const search = req.query.search as string;
       const folioIdRaw = String(req.query.folio_id ?? '');
+      const pid = BigInt(req.user?.lastProperty ?? 0);
 
-      let where: any = { deleted_at: null };
+      let where: any = { property_id: pid, deleted_at: null };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       // Get folio's rate to filter code items (Laravel parity via model_has_code_items)
@@ -3675,8 +3726,9 @@ success(res, formatted, 'Success', 200, {
       const limit = parseInt(req.query.limit as string) || 10;
       const folioIdRaw = String(req.query.folio_id ?? req.query.subfolio_id ?? '');
       const search = req.query.search as string;
+      const pid = BigInt(req.user?.lastProperty ?? 0);
 
-      let where: any = { deleted_at: null };
+      let where: any = { property_id: pid, deleted_at: null };
       if (search) where.description = { contains: search, mode: 'insensitive' };
 
       // Get folio's rate to filter inclusives (Laravel parity)
@@ -3727,7 +3779,8 @@ success(res, formatted, 'Success', 200, {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const search = req.query.search as string;
-      const where: any = { deleted_at: null };
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, deleted_at: null };
       if (search) where.description = { contains: search, mode: 'insensitive' };
       const [data, total] = await Promise.all([
         prisma.rate_inclusives.findMany({ where, orderBy: { description: 'asc' }, skip: (page - 1) * limit, take: limit }),
@@ -3905,7 +3958,7 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
         if (propertyId) barWhere.property_id = propertyId;
         barWhere.start_date = { lte: ciD };
         barWhere.end_date = { gte: coD };
-        const bars = await prisma.bars.findMany({ where: barWhere });
+        const bars = await prisma.rates.findMany({ where: { ...barWhere, module: 'bar' } });
         if (bars.length > 0) {
           // Laravel :2453-2479 — ONE pseudo BAR row aggregated over ALL active bars
           // (min start, max end); not just the first bar.
@@ -3936,7 +3989,11 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
         const matched = data.filter((d: any) => d.name && String(d.name).toLowerCase().includes(needle));
         if (matched.length > 0) {
           const seen = new Set<number>();
-          data = [...matched, ...data].filter((d: any) => (seen.has(d.id) ? false : (seen.add(d.id), true)));
+          data = [...matched, ...data].filter((d: any) => {
+            if (seen.has(d.id)) return false;
+            seen.add(d.id);
+            return true;
+          });
         }
       }
 
@@ -4185,9 +4242,9 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
 
       const propertyId = req.user?.lastProperty;
       const [overbookings, rooms, workOrders] = await Promise.all([
-        prisma.overbookings.findMany({ where: { date: { gte: new Date(ci), lte: new Date(co) } } }),
+        prisma.overbookings.findMany({ where: { property_id: propertyId ? BigInt(propertyId) : undefined, date: { gte: new Date(ci), lte: new Date(co) } } }),
         prisma.rooms.findMany({ where: { deleted_at: null, status: 1, property_id: propertyId ? BigInt(propertyId) : undefined }, select: { id: true, room_type_id: true, room_status: true } }),
-        prisma.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: { not: null }, date: { lte: new Date(ci) }, OR: [{ end_date: { gte: new Date(ci) } }, { end_date: null }] } }),
+        prisma.work_orders.findMany({ where: { deleted_at: null, status: 1, property_id: propertyId ? BigInt(propertyId) : undefined, room_id: { not: null }, date: { lte: new Date(ci) }, OR: [{ end_date: { gte: new Date(ci) } }, { end_date: null }] } }),
       ]);
 
       const roomTypes = await prisma.room_types.findMany({ where: { deleted_at: null, status: 1, property_id: propertyId ? BigInt(propertyId) : undefined } });
@@ -4285,7 +4342,7 @@ const total = data.length;
       }
 
       const [overbookings, availableIds] = await Promise.all([
-        prisma.overbookings.findMany({ where: { date: { gte: new Date(ci), lte: new Date(co) } } }),
+        prisma.overbookings.findMany({ where: { property_id: req.user?.lastProperty ? BigInt(req.user.lastProperty) : undefined, date: { gte: new Date(ci), lte: new Date(co) } } }),
         req.user?.lastProperty ? onlyAvailableRoomIds(req.user.lastProperty, ci, co) : Promise.resolve(new Set<number>()),
       ]);
 
@@ -4380,7 +4437,7 @@ const filtered = data.filter((d: any) => d.available > 0);
       if (!ci || !co) { badRequest(res, 'Check in date required'); return; }
 
       const [overbookings, availableIds] = await Promise.all([
-        prisma.overbookings.findMany({ where: { date: { gte: new Date(ci), lte: new Date(co) } } }),
+        prisma.overbookings.findMany({ where: { property_id: folio.property_id ? BigInt(folio.property_id) : undefined, date: { gte: new Date(ci), lte: new Date(co) } } }),
         folio.property_id ? onlyAvailableRoomIds(folio.property_id, ci, co) : Promise.resolve(new Set<number>()),
       ]);
 
@@ -4534,7 +4591,8 @@ const filtered = data.filter((d: any) => d.available > 0);
       const search = req.query.search as string;
       const typeReservationParam = req.query['type-reservation'] as string;
 
-      const where: any = { deleted_at: null };
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const where: any = { property_id: pid, deleted_at: null };
       // Laravel explode('-', 'vr-fit') -> ['vr','fit'] whereIn type_reservation
       if (typeReservationParam) {
         const types = String(typeReservationParam).split('-').filter(Boolean);
@@ -4542,7 +4600,7 @@ const filtered = data.filter((d: any) => d.available > 0);
       }
       if (search) {
         const companies = await prisma.company_profiles.findMany({
-          where: { name: { contains: search, mode: 'insensitive' } },
+          where: { property_id: pid, name: { contains: search, mode: 'insensitive' } },
           select: { id: true },
           take: 50,
         });

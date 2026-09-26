@@ -11,6 +11,13 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
+    if (val instanceof Date) {
+      const u = val.getUTCFullYear();
+      const iso = val.toISOString();
+      if (u === 1970 && val.getUTCMonth() === 0 && val.getUTCDate() === 1) return iso.slice(11, 19);
+      const s = iso.slice(0, 19).replace('T', ' ');
+      return s.endsWith(' 00:00:00') ? s.slice(0, 10) : s;
+    }
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(bigintToNumber);
   if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') return Number((val as any).toNumber());
@@ -82,7 +89,7 @@ export class EventController {
       const data = await prisma.event_venues.create({
         data: { property_id: req.user?.lastProperty ? Number(req.user.lastProperty) : 0, name, description, status: status ?? true, created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Venue created', 201);
+      success(res, bigintToNumber(data), 'Venue created', 200);
     } catch (err: any) { console.error('Venue store error:', err); error(res, 'Failed to create venue', 500); }
   }
 
@@ -162,7 +169,7 @@ export class EventController {
       const data = await prisma.event_capacities.create({
         data: { property_id: pid, pax: num(pax, 0), venue_id: num(venue_id, 0), layout_id: num(layout_id, 0), description, status: num(status, 1), created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Capacity created', 201);
+      success(res, bigintToNumber(data), 'Capacity created', 200);
     } catch (err: any) { console.error('Capacity store error:', err); error(res, 'Failed to create capacity', 500); }
   }
 
@@ -229,7 +236,7 @@ export class EventController {
       const data = await prisma.event_layouts.create({
         data: { property_id: Number(req.user?.lastProperty ?? 0), name, description, status: status ?? true, created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Layout created', 201);
+      success(res, bigintToNumber(data), 'Layout created', 200);
     } catch (err: any) { console.error('Layout store error:', err); error(res, 'Failed to create layout', 500); }
   }
 
@@ -348,7 +355,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const data = await prisma.event_events.create({
         data: { property_id: pid, event_no: event_no || `EVT${Date.now()}`, name, event_start_time: new Date(event_start_time), event_end_time: new Date(event_end_time), guest_name, guest_phone, guest_email, company_profile_id: company_profile_id ? BigInt(company_profile_id) : null, sales_in_charge: sales_in_charge ? BigInt(sales_in_charge) : null, package_id: num(package_id), venue_id: num(venue_id), layout_id: num(layout_id), pax: num(pax), folio_id: folio_id ? BigInt(folio_id) : null, status: status || 'Tentative', description, total_amount: num(total_amount, 0), created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Event created', 201);
+      success(res, bigintToNumber(data), 'Event created', 200);
     } catch (err: any) { console.error('Event store error:', err); error(res, 'Failed to create event', 500); }
   }
 
@@ -433,7 +440,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const data = await prisma.event_packages.create({
         data: { property_id: pid ? Number(pid) : null, name, capacity_id: num(capacity_id), max_capacity: num(max_capacity), venue_id: num(venue_id), layout_id: num(layout_id), description, price: num(price, 0), status: status ?? true, created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Package created', 201);
+      success(res, bigintToNumber(data), 'Package created', 200);
     } catch (err: any) { console.error('Package store error:', err); error(res, 'Failed to create package', 500); }
   }
 
@@ -510,7 +517,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const data = await prisma.event_inventories.create({
         data: { property_id: pid, code_post_id: parseInt(code_post_id), description, sales: sales || 0, quantity: quantity || 0, created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Inventory created', 201);
+      success(res, bigintToNumber(data), 'Inventory created', 200);
     } catch (err: any) { console.error('Inventory store error:', err); error(res, 'Failed to create inventory', 500); }
   }
 
@@ -660,7 +667,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const data = await prisma.event_deposit_plans.create({
         data: { event_id: eventId, portion: portion || '1', date: date ? new Date(date) as any : undefined, amount: amount || 0, created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Deposit plan created', 201);
+      success(res, bigintToNumber(data), 'Deposit plan created', 200);
     } catch (err: any) { error(res, 'Failed to create deposit plan', 500); }
   }
 
@@ -688,7 +695,7 @@ static async eventList(req: Request, res: Response): Promise<void> {
       const data = await prisma.event_deposit_actuals.create({
         data: { event_id: eventId, portion: portion || '1', date: date ? new Date(date) as any : undefined, amount: amount || 0, created_at: new Date() },
       });
-      success(res, bigintToNumber(data), 'Deposit actual created', 201);
+      success(res, bigintToNumber(data), 'Deposit actual created', 200);
     } catch (err: any) { error(res, 'Failed to create deposit actual', 500); }
   }
 

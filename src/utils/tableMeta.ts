@@ -135,6 +135,80 @@ export const TABLES: Record<string, any[]> = {
     { label: 'Payment for AR', key: 'is_payment_ar', type: 'checkbox', is_search: false },
     { label: 'Company', key: 'company_id', type: 'autocomplete', url_autocomplete: '/cms/profile/company-v2', is_search: true },
   ],
+  holiday: [
+    NO_COL(),
+    STATUS_COL(),
+    { label: 'Start Date', key: 'start_date', type: 'date', is_search: true },
+    { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+  ],
+  yield: [
+    NO_COL(),
+    STATUS_COL(),
+    { label: 'Is General', key: 'is_general', type: 'checkbox', is_search: false },
+    { label: 'Room Type', key: 'room_type_id', type: 'select', is_search: true },
+    { label: 'Start Date', key: 'start_date', type: 'date', is_search: true },
+    { label: 'End Date', key: 'end_date', type: 'date', is_search: true },
+    { label: 'Min Rate', key: 'min_rate', type: 'number', is_search: false },
+    { label: 'Occupancy From', key: 'occupancy_from', type: 'number', is_search: false },
+    { label: 'Occupancy To', key: 'occupancy_to', type: 'number', is_search: false },
+  ],
+  // Company profile submenu tabs (company_id filtered) — CompanyProfileDepartment formatTable parity
+  companyDepartment: [
+    { label: 'Department', key: 'department', type: 'text', is_search: true },
+    { label: 'Address', key: 'address', type: 'text', is_search: true },
+  ],
+  // CompanyProfileActivity formatTable parity (company_follow_up/company_activity select cols have no DB column in node)
+  companyActivity: [
+    { label: 'Date', key: 'date', type: 'date', is_search: true },
+    { label: 'Subject', key: 'subject', type: 'text', is_search: true },
+    { label: 'Objective', key: 'objective', type: 'text', is_search: true },
+  ],
+  // CompanyProfileDocument formatTable parity
+  companyDocument: [
+    { label: 'File', key: 'file', type: 'file_document', is_search: false },
+    { label: 'Description', key: 'description', type: 'text', is_search: true },
+  ],
+  // CompanyGuest formatTable parity
+  companyGuest: [
+    { label: 'Account', key: 'id', type: 'none', is_search: false },
+    { label: 'First Name', key: 'first_name', type: 'text', is_search: true },
+    { label: 'Last Name', key: 'last_name', type: 'text', is_search: true },
+    { label: 'Email', key: 'email', type: 'text', is_search: true },
+    { label: 'Mobile Phone', key: 'mobile_phone', type: 'text', is_search: true },
+  ],
+  // CompanyProfileStatistic formatTable parity (aggregate from folios+reservations per month)
+  companyStatistic: [
+    { label: 'Month', key: 'month', type: 'text', is_search: true },
+    { label: 'Number of Night', key: 'room_night', type: 'text', is_search: true },
+    { label: 'Room Revenue', key: 'room_revenue', type: 'text', is_search: true },
+    { label: 'ARR', key: 'arr', type: 'text', is_search: true },
+  ],
+  // CompanyProfileBillingSetup formatTable parity (row per active code_billing)
+  companyBillingSetup: [
+    { label: 'Billing Code', key: 'code_billing_id', type: 'none', is_search: false },
+    { label: 'Billing', key: 'billing', type: 'number', is_search: false },
+  ],
+  // CompanyProfileContactPerson formatTable parity (department options injected per company_id)
+  companyContact: [
+    STATUS_COL(),
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Email', key: 'email', type: 'text', is_search: true },
+    { label: 'Position', key: 'position', type: 'text', is_search: true },
+    { label: 'Department', key: 'department', type: 'select', is_search: true },
+    { label: 'Mobile Phone', key: 'mobile_phone', type: 'text', is_search: true },
+  ],
+  // Baggage formatTable parity (concierge/baggage)
+  baggage: [
+    NO_COL(),
+    STATUS_COL(),
+    { label: 'Date', key: 'date', type: 'date', is_search: true },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Phone number', key: 'phone_number', type: 'text', is_search: true },
+    { label: 'Tag No', key: 'tag_no', type: 'text', is_search: true },
+    { label: 'Image', key: 'file', type: 'file_document', is_search: false },
+    { label: 'Remark', key: 'remark', type: 'text', is_search: true },
+  ],
 };
 
 export function setupTable(group: string): any[] {
