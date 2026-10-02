@@ -1,0 +1,11 @@
+-- Supervisor authorisation PIN for destructive cashiering operations.
+--
+-- Void and refund used to be gated on `pin_enshift`, which is the operator's
+-- OWN shift-close PIN. Any cashier who could press "Void" could therefore
+-- authorise their own void with a PIN they had set themselves.
+--
+-- A separate column lets a manager/duty-manager hold an approval PIN that is
+-- distinct from the shift PIN, so the approver and the operator can be
+-- different people. NULL means "this user cannot approve", which is the safe
+-- default for every existing account.
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "pin_void_approve" INTEGER;

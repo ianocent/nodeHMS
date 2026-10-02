@@ -1,13 +1,8 @@
-﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../config/prisma';
+import { Request, Response } from 'express';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const MENU_ID = 83;
 const RATE_MODEL_TYPE = 'App\\Models\\Rate';
@@ -75,17 +70,21 @@ export class CompanyContractRateController {
         prisma.model_has_company_profiles.count({ where: linkWhere }),
       ]);
 
+      const ratesOpt = await prisma.rates.findMany({ where: { deleted_at: null }, select: { id: true, name: true, description: true } });
+      const table = [
+        { label: 'Rate Code', key: 'contract_rate', type: 'select', options: ratesOpt.map(r => ({ value: Number(r.id), label: r.name })), is_search: true },
+        { label: 'Description', key: 'description', type: 'none' }, // it says rate.description before, but we can't edit it directly. Actually, the backend code maps `rate` property. Let's keep `rate.description` for view, but edit will only send `contract_rate`. Wait, type 'none' is right for view-only cols.
+        { label: 'Action', key: 'action', type: 'action' },
+      ];
+      
       const data = links.map((l: any) => ({
         id: Number(l.model_id),
         company_profile_id: Number(l.company_profile_id),
+        contract_rate: l.rates ? { value: Number(l.rates.id), label: l.rates.name } : null,
+        description: l.rates ? l.rates.description : null,
         rate: l.rates ? bigintToNumber(l.rates) : null,
       }));
 
-      const table = [
-        { label: 'Rate Code', key: 'rate', type: 'none' },
-        { label: 'Description', key: 'rate.description', type: 'none' },
-        { label: 'Action', key: 'action', type: 'action' },
-      ];
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
         view: permFlags.view ?? true,

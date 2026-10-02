@@ -11,6 +11,7 @@ router.get('/type-payments/create', authMiddleware, (req, res) => { req.params.m
 router.post('/type-payments', authMiddleware, MasterDataController.typePaymentStore);
 router.get('/type-payments/:id', authMiddleware, MasterDataController.typePaymentShow);
 router.get('/type-payments/:id/update', authMiddleware, (req, res) => { req.params.model = 'type_payments'; MasterDataController.masterForm(req, res); });
+router.get('/type-payments/:id/edit', authMiddleware, (req, res) => { req.params.model = 'type_payments'; MasterDataController.masterForm(req, res); });
 router.put('/type-payments/:id', authMiddleware, MasterDataController.typePaymentUpdate);
 router.delete('/type-payments/:id', authMiddleware, MasterDataController.typePaymentDestroy);
 
@@ -20,6 +21,7 @@ router.get('/type-payment/create', authMiddleware, (req, res) => { req.params.mo
 router.post('/type-payment', authMiddleware, MasterDataController.typePaymentStore);
 router.get('/type-payment/:id', authMiddleware, MasterDataController.typePaymentShow);
 router.get('/type-payment/:id/update', authMiddleware, (req, res) => { req.params.model = 'type_payments'; MasterDataController.masterForm(req, res); });
+router.get('/type-payment/:id/edit', authMiddleware, (req, res) => { req.params.model = 'type_payments'; MasterDataController.masterForm(req, res); });
 router.put('/type-payment/:id', authMiddleware, MasterDataController.typePaymentUpdate);
 router.delete('/type-payment/:id', authMiddleware, MasterDataController.typePaymentDestroy);
 
@@ -29,6 +31,7 @@ router.get('/countries/create', authMiddleware, (req, res) => { req.params.model
 router.post('/countries', authMiddleware, MasterDataController.countryStore);
 router.get('/countries/:id', authMiddleware, MasterDataController.countryShow);
 router.get('/countries/:id/update', authMiddleware, (req, res) => { req.params.model = 'countries'; MasterDataController.masterForm(req, res); });
+router.get('/countries/:id/edit', authMiddleware, (req, res) => { req.params.model = 'countries'; MasterDataController.masterForm(req, res); });
 router.put('/countries/:id', authMiddleware, MasterDataController.countryUpdate);
 router.delete('/countries/:id', authMiddleware, MasterDataController.countryDestroy);
 
@@ -38,6 +41,7 @@ router.get('/country/create', authMiddleware, (req, res) => { req.params.model =
 router.post('/country', authMiddleware, MasterDataController.countryStore);
 router.get('/country/:id', authMiddleware, MasterDataController.countryShow);
 router.get('/country/:id/update', authMiddleware, (req, res) => { req.params.model = 'countries'; MasterDataController.masterForm(req, res); });
+router.get('/country/:id/edit', authMiddleware, (req, res) => { req.params.model = 'countries'; MasterDataController.masterForm(req, res); });
 router.put('/country/:id', authMiddleware, MasterDataController.countryUpdate);
 router.delete('/country/:id', authMiddleware, MasterDataController.countryDestroy);
 
@@ -47,6 +51,7 @@ router.get('/cities/create', authMiddleware, (req, res) => { req.params.model = 
 router.post('/cities', authMiddleware, MasterDataController.cityStore);
 router.get('/cities/:id', authMiddleware, MasterDataController.cityShow);
 router.get('/cities/:id/update', authMiddleware, (req, res) => { req.params.model = 'cities'; MasterDataController.masterForm(req, res); });
+router.get('/cities/:id/edit', authMiddleware, (req, res) => { req.params.model = 'cities'; MasterDataController.masterForm(req, res); });
 router.put('/cities/:id', authMiddleware, MasterDataController.cityUpdate);
 router.delete('/cities/:id', authMiddleware, MasterDataController.cityDestroy);
 
@@ -56,6 +61,7 @@ router.get('/city/create', authMiddleware, (req, res) => { req.params.model = 'c
 router.post('/city', authMiddleware, MasterDataController.cityStore);
 router.get('/city/:id', authMiddleware, MasterDataController.cityShow);
 router.get('/city/:id/update', authMiddleware, (req, res) => { req.params.model = 'cities'; MasterDataController.masterForm(req, res); });
+router.get('/city/:id/edit', authMiddleware, (req, res) => { req.params.model = 'cities'; MasterDataController.masterForm(req, res); });
 router.put('/city/:id', authMiddleware, MasterDataController.cityUpdate);
 router.delete('/city/:id', authMiddleware, MasterDataController.cityDestroy);
 
@@ -65,6 +71,7 @@ router.get('/holidays/create', authMiddleware, (req, res) => { req.params.model 
 router.post('/holidays', authMiddleware, MasterDataController.holidayStore);
 router.get('/holidays/:id', authMiddleware, MasterDataController.holidayShow);
 router.get('/holidays/:id/update', authMiddleware, (req, res) => { req.params.model = 'holidays'; MasterDataController.masterForm(req, res); });
+router.get('/holidays/:id/edit', authMiddleware, (req, res) => { req.params.model = 'holidays'; MasterDataController.masterForm(req, res); });
 router.put('/holidays/:id', authMiddleware, MasterDataController.holidayUpdate);
 router.delete('/holidays/:id', authMiddleware, MasterDataController.holidayDestroy);
 
@@ -74,6 +81,7 @@ router.get('/holiday/create', authMiddleware, (req, res) => { req.params.model =
 router.post('/holiday', authMiddleware, MasterDataController.holidayStore);
 router.get('/holiday/:id', authMiddleware, MasterDataController.holidayShow);
 router.get('/holiday/:id/update', authMiddleware, (req, res) => { req.params.model = 'holidays'; MasterDataController.masterForm(req, res); });
+router.get('/holiday/:id/edit', authMiddleware, (req, res) => { req.params.model = 'holidays'; MasterDataController.masterForm(req, res); });
 router.put('/holiday/:id', authMiddleware, MasterDataController.holidayUpdate);
 router.delete('/holiday/:id', authMiddleware, MasterDataController.holidayDestroy);
 

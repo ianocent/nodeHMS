@@ -92,14 +92,14 @@ export function requireTransactionPermission(
  * Returns { view, add, edit, delete } for a given menuId.
  */
 export function getPermissionFlags(user: Express.Request['user'], menuId: bigint | number) {
-  if (!user) return { view: false, add: false, edit: false, delete: false };
-  if (user.superUser) return { view: true, add: true, edit: true, delete: true };
+  if (!user) return { view: 0, add: 0, edit: 0, delete: 0 };
+  if (user.superUser) return { view: 1, add: 1, edit: 1, delete: 1 };
 
   const crud = user.permissions.get(BigInt(menuId));
   return {
-    view: crud?.view ?? false,
-    add: crud?.add ?? false,
-    edit: crud?.edit ?? false,
-    delete: crud?.delete ?? false,
+    view: crud?.view ? 1 : 0,
+    add: crud?.add ? 1 : 0,
+    edit: crud?.edit ? 1 : 0,
+    delete: crud?.delete ? 1 : 0,
   };
 }

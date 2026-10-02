@@ -1,14 +1,9 @@
+import { prisma } from '../../config/prisma';
 // Laravel Jobs/SyncStaahAvailability.php parity — raw ARI push after rate grid
 // / interface writes. Prices are the RAW one_adult/two_adult values (this job,
 // unlike SyncPriceStaah, does not apply code_post markup in Laravel either).
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { StaahService } from '../../services/staah.service';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];

@@ -1,15 +1,10 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { Pool } from 'pg';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { calculateCodePost } from '../utils/cmsConfig';
 import { ROOM_STATUSES } from '../utils/cmsStatus';
 import { redactPayload } from '../middleware/staahSecurity';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // Laravel config/cms.php parity
 const STATUS_RESERVATION = {
@@ -160,7 +155,7 @@ export class BookingEngineController {
         }
       }
 
-      success(res, { data, connect_room_type: connectRoomType }, 'Data has been loaded');
+      success(res, data, 'Data has been loaded', 200, { connect_room_type: connectRoomType });
     } catch (err: any) {
       console.error('roomAvailability error:', err);
       error(res, 'Failed to load room availability', 500);
@@ -391,8 +386,11 @@ export class BookingEngineController {
       }
 
       const typeGroups = ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'];
+      // Property-scoped (Laravel Type uses the HasProperties global scope).
+      // Without this, pickFirst below returns whichever property's segment
+      // happens to come first in id order — not this booking's.
       const typeList = await prisma.types.findMany({
-        where: { group: { in: typeGroups }, deleted_at: null, status: STATUS_ACTIVE },
+        where: { group: { in: typeGroups }, deleted_at: null, status: STATUS_ACTIVE, property_id: pid },
       });
       const pickFirst = (group: string): { value: string; label: string } | undefined => {
         const t = typeList.find((x) => x.group === group);

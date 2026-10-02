@@ -73,6 +73,7 @@ router.post('/room-type-images', authMiddleware, requirePermission(1120, 'add'),
 router.post('/room-types/:roomTypeId/images', authMiddleware, requirePermission(1120, 'add'), RoomController.imageStore);
 router.get('/room-type-images/:id', authMiddleware, requirePermission(1120, 'view'), RoomController.imageForm);
 router.get('/room-type-images/:id/update', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageForm);
+router.get('/room-type-images/:id/edit', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageForm);
 router.put('/room-type-images/:id', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageUpdate);
 router.delete('/room-type-images/:id', authMiddleware, requirePermission(1120, 'delete'), RoomController.imageDestroy);
 router.post('/room-type-images/:id/restore', authMiddleware, requirePermission(1120, 'edit'), RoomController.imageRestore);

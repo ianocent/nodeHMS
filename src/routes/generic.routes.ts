@@ -24,6 +24,7 @@ router.post('/:model', ctrl.create.bind(ctrl));
 router.get('/:model/create', ctrl.createForm.bind(ctrl));
 router.get('/:model/:id', ctrl.show.bind(ctrl));
 router.get('/:model/:id/update', ctrl.editForm.bind(ctrl));
+router.get('/:model/:id/edit', ctrl.editForm.bind(ctrl));
 router.put('/:model/:id', ctrl.update.bind(ctrl));
 router.delete('/:model/:id', ctrl.destroy.bind(ctrl));
 router.post('/:model/:id/restore', ctrl.restore.bind(ctrl));

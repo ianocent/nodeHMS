@@ -1,15 +1,10 @@
+import { prisma } from '../../config/prisma';
 // Event reports — Laravel Report/Event/BanquetEventOrderController +
 // EventBreakdownCalculationController parity. PDF via puppeteer renderPdf.
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { error, notFound } from '../../utils/response';
 import { renderPdf } from './excel';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function esc(v: any): string {
   return String(v ?? '')

@@ -209,6 +209,127 @@ export const TABLES: Record<string, any[]> = {
     { label: 'Image', key: 'file', type: 'file_document', is_search: false },
     { label: 'Remark', key: 'remark', type: 'text', is_search: true },
   ],
+  guestDocument: [
+    { label: 'File', key: 'file', type: 'file_document', is_search: false },
+    { label: 'Description', key: 'description', type: 'text', is_search: true },
+    { label: 'Status', key: 'status', type: 'checkbox', options: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }], is_search: true },
+  ],
+  guestFolio: [
+    { label: 'Folio', key: 'folio_number', type: 'text', is_search: true },
+    { label: 'Check In', key: 'check_in_date', type: 'date', is_search: true },
+    { label: 'Check Out', key: 'check_out_date', type: 'date', is_search: true },
+    { label: 'Status', key: 'status', type: 'checkbox', is_search: true },
+  ],
+  hotelCompetitor: [
+    { label: 'Date', key: 'date', type: 'date', is_search: true },
+    { label: 'Hotel Competitor', key: 'master_hotel_competitor_id', type: 'select', is_search: true },
+    { label: 'Room Available', key: 'room_available', type: 'number', is_search: false },
+    { label: 'Room Sold', key: 'room_sold', type: 'number', is_search: false },
+    { label: 'ARR', key: 'arr', type: 'number', is_search: false },
+    { label: 'Total Revenue', key: 'total_revenue', type: 'number', is_search: false },
+  ],
+  roomAllotments: [
+    { label: 'Room Type', key: 'room_type_id', type: 'select', is_search: true },
+    { label: 'Amount', key: 'data', type: 'text', is_search: true },
+  ],
+  // ── Concierge (Laravel PhoneBookGroup{1,2,3}Controller + PhoneBookController
+  //    + CarParkController + LostAndFoundController formatTable parity) ──
+  //
+  // These must be static definitions. The previous `buildDefaultTable(rows)`
+  // derived the columns from Object.keys(rows[0]), so an EMPTY table produced
+  // zero columns and the in-table add row rendered no inputs at all — and a
+  // populated one exposed property_id / created_by / deleted_at as editable
+  // string fields. `options` for the select columns are injected per request in
+  // ConciergeController.
+  phoneBookGroup1: [
+    { label: 'Sort', key: 'no', type: 'none', is_search: true },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+  ],
+  // Level 2 and 3 add a Parent Group select, sourced from the level above.
+  phoneBookGroup2: [
+    { label: 'Sort', key: 'no', type: 'none', is_search: true },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Parent Group', key: 'parent_id', type: 'select', options: [], is_search: true },
+  ],
+  phoneBookGroup3: [
+    { label: 'Sort', key: 'no', type: 'none', is_search: true },
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Parent Group', key: 'parent_id', type: 'select', options: [], is_search: true },
+  ],
+  phoneBook: [
+    { label: 'Sort', key: 'no', type: 'none', is_search: false },
+    { label: 'Phone Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Address', key: 'address', type: 'text', is_search: true },
+    { label: 'Telp', key: 'telp', type: 'text', is_search: true },
+    { label: 'Fax', key: 'fax', type: 'text', is_search: false },
+    { label: 'Email', key: 'email', type: 'text', is_search: false },
+    { label: 'Contact Name', key: 'contact_name', type: 'text', is_search: false },
+    { label: 'Remark', key: 'remark', type: 'text', is_search: false },
+  ],
+  carPark: [
+    { label: 'Sort', key: 'no', type: 'none', is_search: true },
+    { label: 'Car Park Lot', key: 'car_park_lot', type: 'text', is_search: true },
+    { label: 'Vehicle No', key: 'vehicle_no', type: 'text', is_search: true },
+    { label: 'Folio', key: 'folio', type: 'autocomplete', url_autocomplete: '/cms/reservation/folio', is_search: false },
+    { label: 'Room', key: 'room', type: 'select', options: [], is_search: true },
+    { label: 'Remark', key: 'remark', type: 'text', is_search: false },
+  ],
+  lostFound: [
+    { label: 'Ref No', key: 'ref_no', type: 'text', is_search: true },
+    { label: 'Status', key: 'status_lost', type: 'select', options: [], is_search: true },
+    { label: 'Date lost', key: 'report_date', type: 'date', is_search: true },
+    { label: 'Item name', key: 'item', type: 'text', is_search: true },
+    { label: 'Item status', key: 'item_status', type: 'select', options: [], is_search: true },
+    { label: 'Hotel location', key: 'hotel_location', type: 'text', is_search: true },
+    { label: 'Description', key: 'item_description', type: 'text', is_search: true },
+    { label: 'Owner of item', key: 'owner_item', type: 'text', is_search: true },
+    { label: 'Folio', key: 'folio', type: 'text', is_search: false },
+    { label: 'Room', key: 'room', type: 'select', options: [], is_search: true },
+    { label: 'Contact number', key: 'contact_number', type: 'text', is_search: true },
+    { label: 'Founder of Item', key: 'founder_of_item', type: 'text', is_search: true },
+    { label: 'Contact number', key: 'contact_number_founder', type: 'text', is_search: true },
+    { label: 'Item Description', key: 'item_description', type: 'text', is_search: true },
+  ],
+  master_hotel_competitors: [
+    NO_COL(),
+    { label: 'Name', key: 'name', type: 'text', is_search: true },
+    { label: 'Sort', key: 'sort', type: 'number', is_search: false },
+    STATUS_COL(),
+  ],
+  hotel_competitors: [
+    NO_COL(),
+    { label: 'Date', key: 'date', type: 'date', is_search: true },
+    { label: 'Competitor', key: 'master_hotel_competitor_id', type: 'select', is_search: true },
+    { label: 'Room Available', key: 'room_available', type: 'number', is_search: false },
+    { label: 'Room Sold', key: 'room_sold', type: 'number', is_search: false },
+    { label: 'ARR', key: 'arr', type: 'number', is_search: false },
+    { label: 'Total Revenue', key: 'total_revenue', type: 'number', is_search: false },
+  ],
+  // Laravel app/Models/Message.php::formatTable
+  messages: [
+    { label: 'No', key: 'no', type: 'none', is_search: false },
+    { label: 'Message', key: 'message', type: 'text', is_search: false },
+    { label: 'From Name', key: 'from_name', type: 'text', is_search: false },
+    { label: 'Is Open', key: 'is_open', type: 'checkbox', options: [{ value: 1, label: 'Yes' }, { value: 0, label: 'No' }], is_search: false },
+    { label: 'Created By', key: 'created_by', type: 'none', is_search: false },
+    { label: 'Updated By', key: 'updated_by', type: 'none', is_search: false },
+    { label: 'Closed By', key: 'closed_by', type: 'none', is_search: false },
+    { label: 'Date', key: 'date', type: 'none', is_search: false },
+  ],
+  // Laravel app/Models/Package.php::formatTable
+  packages: [
+    { label: 'Sort', key: 'sort', type: 'text', is_search: true },
+    STATUS_COL(),
+    { label: 'Package Code', key: 'package_type', type: 'text', is_search: true },
+    { label: 'Code', key: 'code', type: 'text', is_search: true },
+    { label: 'Description', key: 'description', type: 'text', is_search: true },
+  ],
+  // Laravel app/Models/Menu.php::formatTable
+  menus: [
+    { label: 'Status', key: 'status' },
+    { label: 'Name', key: 'name' },
+    { label: 'Url', key: 'url' },
+  ],
 };
 
 export function setupTable(group: string): any[] {

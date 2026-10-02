@@ -1,12 +1,8 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../../config/prisma';
 import { StaahService } from '../../services/staah.service';
+import { ROOM_STATUSES } from '../../utils/cmsStatus';
 import crypto from 'crypto';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function addDays(dateStr: string | Date, days: number): Date {
   const d = new Date(dateStr);
@@ -44,7 +40,10 @@ export async function processSyncStaahRoomAvailability(job: any) {
     const mappingWhere: any = {
       staah_interface_id: iface.id,
       status: 'active',
-      room_type_id: { not: null }
+      // No `room_type_id: { not: null }` here: the column is non-nullable in the
+      // schema, so Prisma types the filter as BigIntFilter whose `not` slot
+      // excludes null and the whole query throws "Argument `not` must not be
+      // null" before it ever reaches the database.
     };
     if (roomTypeId) mappingWhere.room_type_id = roomTypeId;
 
@@ -58,12 +57,16 @@ export async function processSyncStaahRoomAvailability(job: any) {
     const roomsPayload: any[] = [];
 
     for (const mapping of mappings) {
+      // Sellable inventory only. Counting every physical room meant a room that
+      // is out of order or blocked on the grid was still advertised to the
+      // channel manager, and the OTA would sell a room nobody can occupy.
       const totalPhysical = await prisma.rooms.count({
         where: {
           room_type_id: mapping.room_type_id,
           property_id: propertyId,
           status: 1,
-          deleted_at: null
+          deleted_at: null,
+          room_status: { notIn: [ROOM_STATUSES.out_of_order.id, ROOM_STATUSES.block.id] },
         }
       });
 

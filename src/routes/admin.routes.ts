@@ -37,6 +37,7 @@ router.get('/permissions', authMiddleware, requirePermission(1118, 'view'), Admi
 router.post('/permissions', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionStore);
 router.get('/permissions/:id', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionShow);
 router.get('/permissions/:id/update', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionEdit);
+router.get('/permissions/:id/edit', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionEdit);
 router.put('/permissions/:id', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionUpdate);
 router.delete('/permissions/:id', authMiddleware, requirePermission(1118, 'delete'), AdminController.permissionDestroy);
 router.post('/permissions/:id/restore', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionRestore);
@@ -77,6 +78,7 @@ router.get('/property/:id/image', AdminController.propertyImage);
 router.get('/property/create', authMiddleware, AdminController.propertyCreate);
 router.post('/property', authMiddleware, AdminController.propertyStore);
 router.get('/property/:id/update', authMiddleware, AdminController.propertyEdit);
+router.get('/property/:id/edit', authMiddleware, AdminController.propertyEdit);
 router.put('/property/:id', authMiddleware, AdminController.propertyUpdate);
 router.delete('/property/:id', authMiddleware, AdminController.propertyDestroy);
 
@@ -86,6 +88,7 @@ router.post('/permission', authMiddleware, requirePermission(1118, 'add'), Admin
 router.get('/permission/create', authMiddleware, requirePermission(1118, 'add'), AdminController.permissionCreate);
 router.get('/permission/:id', authMiddleware, requirePermission(1118, 'view'), AdminController.permissionShow);
 router.get('/permission/:id/update', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionEdit);
+router.get('/permission/:id/edit', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionEdit);
 router.put('/permission/:id', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionUpdate);
 router.delete('/permission/:id', authMiddleware, requirePermission(1118, 'delete'), AdminController.permissionDestroy);
 router.post('/permission/:id/restore', authMiddleware, requirePermission(1118, 'edit'), AdminController.permissionRestore);
@@ -119,6 +122,7 @@ router.get('/role/template', authMiddleware, requirePermission(1117, 'view'), Ad
 router.post('/role', authMiddleware, requirePermission(1117, 'add'), AdminController.roleStore);
 router.get('/role/:id', authMiddleware, requirePermission(1117, 'view'), AdminController.roleShow);
 router.get('/role/:id/update', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleEdit);
+router.get('/role/:id/edit', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleEdit);
 router.put('/role/:id', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleUpdate);
 router.delete('/role/:id', authMiddleware, requirePermission(1117, 'delete'), AdminController.roleDestroy);
 router.post('/role/:id/restore', authMiddleware, requirePermission(1117, 'edit'), AdminController.roleRestore);

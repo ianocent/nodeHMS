@@ -1,12 +1,7 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../../config/prisma';
 import { StaahService } from '../../services/staah.service';
 import { calculateCodePost } from '../../utils/cmsConfig';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function addDays(dateStr: string | Date, days: number): Date {
   const d = new Date(dateStr);

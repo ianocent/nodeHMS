@@ -1,16 +1,11 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, badRequest, unauthorized, validationError } from '../utils/response';
 import { storedImageUrl } from '../utils/storage';
 import { TokenService } from '../services/token.service';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // bcrypt cost factor (matching Laravel default: 10)
 const BCRYPT_ROUNDS = 10;

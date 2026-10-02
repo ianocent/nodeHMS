@@ -29,8 +29,15 @@ router.get('/shift-roster', authMiddleware, FrontDeskController.shiftRosterList)
 router.get('/front-desk', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
 router.get('/front-desk/:id', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
 router.get('/front-desk/:id/update', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
+router.get('/front-desk/:id/edit', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
+// check-in / check-out: the handlers resolve the folio id from the path param
+// first, then fall back to body/query. Both shapes are registered so neither
+// caller can 500 on a missing `:id` (the previous route omitted it entirely,
+// so BigInt(undefined) threw and every check-in returned "Failed to check in").
 router.post('/front-desk/check-in', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.checkIn);
+router.post('/front-desk/check-in/:id', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.checkIn);
 router.post('/front-desk/check-out', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.checkOut);
+router.post('/front-desk/check-out/:id', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.checkOut);
 router.get('/front-desk/folio', authMiddleware, requirePermission(63, 'view'), FrontDeskController.transactionFolio);
 router.post('/front-desk/batch-check-out', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.batchCheckOut);
 

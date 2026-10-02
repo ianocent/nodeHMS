@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { HousekeepingController } from '../controllers/housekeeping.controller';
+import { AuthController } from '../controllers/auth.controller';
 import { decrypt } from '../utils/encryption';
 
 jest.setTimeout(30000);
@@ -27,7 +28,10 @@ describe('room-status edit form', () => {
     console.log('HKH', JSON.stringify(hkh));
     console.log('HK_OPTS', (body?.master?.housekeepers || []).length);
     console.log('ROOM_NAME', body?.data?.name ?? body?.name);
-    expect(body?.master?.business_date).toBe('2026-08-22');
+    // business_date follows Laravel LogAudit::getBusinessDate (latest log_audits
+    // date + 1 day), not req.user.bussinesDate, so derive the expectation.
+    const expected = await AuthController.getBusinessDate(999n);
+    expect(body?.master?.business_date).toBe(String(expected).slice(0, 10));
     expect(Array.isArray(body?.master?.housekeepers)).toBe(true);
   });
 });

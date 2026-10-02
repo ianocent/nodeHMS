@@ -1,11 +1,6 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../../config/prisma';
 import { StaahService } from '../../services/staah.service';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 export async function processPullStaahReservations(job: any) {
   console.log('PULL SCHEDULER: Starting Staah reservations sync...');

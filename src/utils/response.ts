@@ -3,7 +3,7 @@ import { encrypt } from './encryption';
 import { normalizeJson } from './json';
 
 export interface ApiMeta {
-  permission?: Record<string, boolean>;
+  permission?: Record<string, boolean | number>;
   pagination?: Record<string, number>;
   pagging?: Record<string, number>;
   table?: any[];
@@ -24,6 +24,14 @@ export interface ApiMeta {
   meta?: any;
   total_transaction?: any;
   ledger_id?: any;
+  connect_room_type?: any;
+  /**
+   * Field-schema envelope used by the module create/edit screens. Laravel puts
+   * `form` at the TOP level of the response (and often sends no `data` key at
+   * all), and the frontend gates on `response.form` — so it must be emitted
+   * here, not nested under `data`.
+   */
+  form?: any;
 }
 
 function sendEncrypted(res: Response, statusCode: number, payload: Record<string, any>): Response {
@@ -108,6 +116,8 @@ export function success(
     ...(meta?.meta !== undefined ? { meta: meta.meta } : {}),
     ...(meta?.total_transaction !== undefined ? { total_transaction: meta.total_transaction } : {}),
     ...(meta?.ledger_id !== undefined ? { ledger_id: meta.ledger_id } : {}),
+    ...(meta?.connect_room_type !== undefined ? { connect_room_type: meta.connect_room_type } : {}),
+...(meta?.form !== undefined ? { form: meta.form } : {}),
   });
 }
 

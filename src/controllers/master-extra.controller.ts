@@ -1,13 +1,9 @@
+import { prisma } from '../config/prisma';
+import { activeWhere } from '../utils/querySafety';
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { STATUS_OPTIONS, laravelPaging, crudPermission } from '../utils/tableMeta';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function getPrisma() {
   return prisma;
@@ -94,6 +90,18 @@ function formatReportPermission(row: any, links: any[], roleMap: Map<string, str
 }
 
 // ==================== DAY USE RATE (DayUseRateController parity) ====================
+
+/**
+ * Laravel reads the rate link with the magic accessor `$request->rate_id`, which resolves from
+ * the query string as well as the request body. Returns null when absent so the standalone
+ * Day Use Rate master page keeps working (those rows are legitimately not linked to a rate).
+ */
+function parseRateId(raw: any): bigint | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const str = String(raw);
+  return /^\d+$/.test(str) ? BigInt(str) : null;
+}
+
 export class DayUseRateController {
   // DayUseRateController@index â€” rate_id filter, search name, permission menu 86
   static async index(req: Request, res: Response): Promise<void> {
@@ -146,11 +154,18 @@ export class DayUseRateController {
       const rawStatus = payload.status;
       const statusVal = rawStatus === undefined || rawStatus === null ? true : rawStatus;
       const status = typeof statusVal === 'object' ? (statusVal as any).value : statusVal;
+      // Laravel DayUseRateController@store: 'rate_id' => $request->rate_id - a magic accessor
+      // that reads the query string as well as the body. The Rate form's "Day Use" tab posts
+      // through table-edit, which appends its `queryString` ("&rate_id=N") to the POST URL and
+      // sends only the visible columns in the body. Reading the body alone therefore stored
+      // rate_id = null, so index()'s `where rate_id = N` never showed the row that was just
+      // saved: "Inclusive Day Use does not appear after save".
+      const rateId = parseRateId(payload.rate_id ?? (req.query as any).rate_id);
 
       const created: any = await getPrisma().rate_day_uses.create({
         data: {
           property_id: req.user?.lastProperty ?? 0n,
-          rate_id: payload.rate_id ? BigInt(String(payload.rate_id)) : null,
+          rate_id: rateId,
           name,
           time: Number(timeValue) || 0,
           status: status ? 1 : 0,
@@ -224,7 +239,7 @@ export class ReportPermissionController {
 
       const where: any = {};
       const roles = await getPrisma().roles.findMany({
-        where: { deleted_at: null, property_id: propertyId },
+        where: activeWhere('roles', { property_id: propertyId }, propertyId),
         select: { id: true, name: true },
       });
       const roleMap = new Map<string, string>(roles.map((r: any) => [String(r.id), r.name]));
@@ -273,7 +288,7 @@ export class ReportPermissionController {
       }));
 
       const masterReport = await getPrisma().types.findMany({
-        where: { deleted_at: null, group: 'master-report' },
+        where: activeWhere('types', { group: 'master-report' }, propertyId),
         select: { id: true, name: true },
       });
       const table = REPORT_PERMISSION_TABLE.map((col: any) => {

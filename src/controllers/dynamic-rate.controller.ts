@@ -1,13 +1,9 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { error, notFound, success, validationError } from '../utils/response';
+import { safeOrderBy } from '../utils/querySafety';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dynamic Rate engine — Laravel app/Services/DynamicRateService.php parity.
@@ -727,7 +723,7 @@ export class DynamicRateController {
       const [configs, total] = await Promise.all([
         prisma.dynamic_rate_configs.findMany({
           where,
-          orderBy: { [sort]: order },
+          orderBy: safeOrderBy('dynamic_rate_configs', sort, { id: order }),
           skip: (page - 1) * limit,
           take: limit
         }),
@@ -1345,7 +1341,7 @@ export class DynamicRateController {
     }
   }
 
-  // â”€â”€â”€ Private Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Private Helpers 
 
   /**
    * Calculate adjustment percent based on forecast method

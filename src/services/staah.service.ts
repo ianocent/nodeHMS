@@ -13,6 +13,12 @@ export class StaahService {
   private client: AxiosInstance;
   private accessToken: string | null = null;
   private tokenExpiry: number = 0;
+  // Staah API hard limit: 10,000 requests per property per hour.
+  // Laravel StaahService::checkRateLimit() used 9,500 as the safety margin.
+  private static readonly RATE_LIMIT_MAX = 9500;
+  private static readonly RATE_LIMIT_WINDOW_MS = 3600 * 1000;
+  private rateWindowStart = 0;
+  private rateWindowCount = 0;
 
   constructor() {
     this.config = {
@@ -29,10 +35,79 @@ export class StaahService {
     });
 
     this.client.interceptors.request.use(async (config) => {
+      this.checkRateLimit();
       const headers = await this.getAuthHeaders();
       Object.assign(config.headers, headers);
       return config;
     });
+  }
+
+  /** Laravel parity: StaahService::checkRateLimit() */
+  private checkRateLimit(): void {
+    const now = Date.now();
+    if (this.rateWindowStart === 0 || now - this.rateWindowStart >= StaahService.RATE_LIMIT_WINDOW_MS) {
+      this.rateWindowStart = now;
+      this.rateWindowCount = 0;
+    }
+    this.rateWindowCount += 1;
+    if (this.rateWindowCount > StaahService.RATE_LIMIT_MAX) {
+      throw new Error('Staah API rate limit exceeded (max 10,000 requests per hour). Please try again later.');
+    }
+  }
+
+  /**
+   * Laravel parity: StaahResponseParser::isStaahSuccess() — STAAH returns HTTP 200 with
+   * a business-level { "Status": "Fail", "Errors": ... } body on rejection, so an axios
+   * success alone does NOT mean the push was accepted.
+   */
+  static isSuccess(response: any): boolean {
+    const r = response?.data ?? response;
+    if (!r || typeof r !== 'object') return false;
+    return (r.Status ?? r.status) === 'Success';
+  }
+
+  /**
+   * Laravel parity: StaahResponseParser::extractStaahErrorMsg() — handles both the
+   * single-object shape { Errors: { Type, Code, ShortText } } and the list shape
+   * { Errors: [{ Code, ShortText }, ...] }.
+   */
+  static extractErrorMsg(response: any): string {
+    const r = response?.data ?? response;
+    if (!r || typeof r !== 'object') return String(response ?? '');
+    const errors = (r as any).Errors;
+    const fallback = () => {
+      try {
+        return JSON.stringify(r);
+      } catch {
+        return String(r);
+      }
+    };
+    if (!errors || (Array.isArray(errors) && errors.length === 0)) return fallback();
+
+    const scalar = (v: any): string => (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
+
+    // Shape B: single error object with ShortText at the root of Errors
+    if (!Array.isArray(errors) && typeof errors === 'object' && 'ShortText' in errors) {
+      const code = 'Code' in errors ? `[${scalar(errors.Code)}] ` : '';
+      return code + scalar(errors.ShortText);
+    }
+
+    // Shape A: list of error objects
+    if (Array.isArray(errors)) {
+      const messages: string[] = [];
+      for (const err of errors) {
+        if (err === null || typeof err !== 'object') {
+          messages.push(String(err));
+          continue;
+        }
+        if ('ShortText' in (err as any)) {
+          const code = 'Code' in (err as any) ? `[${scalar((err as any).Code)}] ` : '';
+          messages.push(code + scalar((err as any).ShortText));
+        }
+      }
+      if (messages.length) return messages.join(' | ');
+    }
+    return fallback();
   }
 
   private async getAuthHeaders(): Promise<Record<string, string>> {

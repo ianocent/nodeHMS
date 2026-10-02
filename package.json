@@ -39,8 +39,20 @@
         {
           "diagnostics": false
         }
+      ],
+      "^.+\\.js$": [
+        "ts-jest",
+        {
+          "diagnostics": false,
+          "tsconfig": {
+            "allowJs": true
+          }
+        }
       ]
-    }
+    },
+    "transformIgnorePatterns": [
+      "/node_modules/(?!(pg-boss|serialize-error|non-error|balanced-match|minimatch|brace-expansion)/)"
+    ]
   },
   "keywords": [],
   "author": "",
@@ -63,6 +75,7 @@
     "nodemailer": "^9.0.5",
     "pg": "^8.11.3",
     "pg-boss": "^12.27.0",
+    "pg-copy-streams": "^7.0.0",
     "puppeteer-core": "^25.7.0",
     "selenium-webdriver": "^4.47.0"
   },

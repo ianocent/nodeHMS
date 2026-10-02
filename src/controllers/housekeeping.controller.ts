@@ -1,14 +1,17 @@
+import { prisma } from '../config/prisma';
+import { activeWhere } from '../utils/querySafety';
+import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
-import { PrismaClient, Prisma } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
+import { uniqueExtendError } from '../utils/uniqueExtend';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch } from '../utils/search';
 import { STATUSES } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { TABLES } from '../utils/tableMeta';
+import { writeAudit } from '../utils/audit';
 import { AuthController } from './auth.controller';
+import { parseTrash } from '../utils/queryParamHelper';
 import { firebaseService } from '../services/firebase.service';
 import { notificationService } from '../services/notification.service';
 import * as fs from 'fs';
@@ -40,9 +43,6 @@ function saveWorkOrderImages(workOrderId: number, images: any[]): string[] {
   return saved;
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // rooms.cleaning_time is a raw TIME ("HH:MM") column in PostgreSQL modelled as
 // DateTime; ANCHOR TO THE UTC EPOCH so the column only ever carries a time-of-day
@@ -166,6 +166,14 @@ success(res, bigintToNumber(data), 'Success', 200, {
       const { code, item_name, category, used_by, description, is_required, mandatory_inspection, sort, status, room_types_detail = [], rooms_detail = [] } = req.body;
       if (!code || !item_name) { badRequest(res, 'code and item_name are required'); return; }
 
+      // Laravel HousekeepingSetupController@store:112
+      // 'code' => 'required|string|max:50|unique:housekeeping_setups,code,NULL,id,property_id,' . last_property
+      // i.e. unique per property. The node port only had the `required` check.
+      const dupCode = await uniqueExtendError(prisma, 'housekeeping_setups', 'code', 'code', code, null, {
+        property_id: pid,
+      });
+      if (dupCode) { badRequest(res, dupCode); return; }
+
       // Laravel HousekeepingSetupController@store (:139-186): setup + qty pivots.
       const data = await prisma.housekeeping_setups.create({
         data: {
@@ -213,26 +221,111 @@ success(res, bigintToNumber(data), 'Success', 200, {
     } catch (err: any) { console.error('Setup store error:', err); error(res, 'Failed to create setup', 500); }
   }
 
+  /**
+   * GET /api/housekeeping-setup/create
+   *
+   * Both `/housekeeping-setup/create` and `/housekeeping-setups/create` used to be
+   * inline stubs returning `{ statuses: [], fields: [] }` with no `master` at
+   * all, so the form's two "Specific Room" grids rendered empty and a new setup
+   * could not be created. This serves the same option lists `setupShow` uses for
+   * editing — room types and room units, both scoped to the current property.
+   */
+  static async setupCreateForm(req: Request, res: Response): Promise<void> {
+    try {
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      const [roomTypes, rooms] = await Promise.all([
+        prisma.room_types.findMany({
+          where: activeWhere('room_types', {}, pid),
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.rooms.findMany({
+          where: { deleted_at: null, property_id: pid },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+      success(res, { status: 1 }, 'Success', 200, {
+        master: {
+          room_types: roomTypes.map((r: any) => ({ value: Number(r.id), label: r.name })),
+          rooms: rooms.map((r: any) => ({ value: Number(r.id), label: r.name })),
+        },
+      } as any);
+    } catch (err: any) {
+      console.error('Housekeeping setup create form error:', err);
+      error(res, 'Failed to load form data', 500);
+    }
+  }
+
   static async setupShow(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      // Laravel edit() returns the setup WITH its rooms/room-types qty details.
-      const data = await prisma.housekeeping_setups.findUnique({
-        where: { id },
-        include: {
-          housekeeping_setup_room_types: { select: { room_type_id: true, qty: true, is_required: true } },
-          housekeeping_setup_rooms: { select: { room_id: true, qty: true, is_required: true } },
-        },
-      });
+      const pid = BigInt(req.user?.lastProperty ?? 0);
+      // Laravel HousekeepingSetupController@edit returns the setup WITH its rooms /
+      // room-types qty details plus a `master` block of {value,label} options. The port
+      // only returned the row, so `master.room_types` and `master.rooms` were undefined
+      // and both "Specific Room" dropdowns rendered empty.
+      const [data, roomTypes, rooms] = await Promise.all([
+        prisma.housekeeping_setups.findUnique({
+          where: { id },
+          include: {
+            housekeeping_setup_room_types: { select: { room_type_id: true, qty: true, is_required: true } },
+            housekeeping_setup_rooms: { select: { room_id: true, qty: true, is_required: true } },
+          },
+        }),
+        prisma.room_types.findMany({
+          where: activeWhere('room_types', {}, pid),
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.rooms.findMany({
+          where: { deleted_at: null, property_id: pid },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+      ]);
       if (!data) { notFound(res, 'Setup not found'); return; }
-      success(res, bigintToNumber(data), 'Success');
-    } catch (err: any) { error(res, 'Failed to load setup', 500); }
+
+      const roomTypeOptions = roomTypes.map((r: any) => ({ value: Number(r.id), label: r.name }));
+      const roomOptions = rooms.map((r: any) => ({ value: Number(r.id), label: r.name }));
+      const labelOf = (opts: Array<{ value: number; label: string }>, id: any) =>
+        opts.find((o) => o.value === Number(id))?.label ?? '-';
+
+      const roomTypesDetail = (data.housekeeping_setup_room_types ?? []).map((r: any) => ({
+        room_type_id: r.room_type_id,
+        room_type_id_ori: { value: Number(r.room_type_id), label: labelOf(roomTypeOptions, r.room_type_id) },
+        qty: r.qty,
+        is_required: !!r.is_required,
+      }));
+      const roomsDetail = (data.housekeeping_setup_rooms ?? []).map((r: any) => ({
+        room_id: r.room_id,
+        room_id_ori: { value: Number(r.room_id), label: labelOf(roomOptions, r.room_id) },
+        qty: r.qty,
+        is_required: !!r.is_required,
+      }));
+
+      success(res, bigintToNumber({
+        ...data,
+        room_types_detail: roomTypesDetail,
+        rooms_detail: roomsDetail,
+      }), 'Success', 200, {
+        master: { room_types: roomTypeOptions, rooms: roomOptions },
+      } as any);
+    } catch (err: any) { console.error('Setup show error:', err); error(res, 'Failed to load setup', 500); }
   }
 
   static async setupUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
       const { code, item_name, category, used_by, description, is_required, mandatory_inspection, sort, status, room_types_detail = [], rooms_detail = [] } = req.body;
+      // Laravel HousekeepingSetupController@update:305 (own id excluded).
+      if (code !== undefined) {
+        const existing = await prisma.housekeeping_setups.findUnique({ where: { id }, select: { property_id: true } });
+        const dupCode = await uniqueExtendError(prisma, 'housekeeping_setups', 'code', 'code', code, id, {
+          property_id: existing?.property_id ?? BigInt(req.user?.lastProperty ?? 0),
+        });
+        if (dupCode) { badRequest(res, dupCode); return; }
+      }
       const data: any = {};
       if (code !== undefined) data.code = String(code).toUpperCase();
       if (item_name !== undefined) data.item_name = item_name;
@@ -518,7 +611,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const mapConfig = (list: { id: number; name: string }[]) => list.map((item) => ({ value: item.id, label: item.name }));
       const types = await prisma.types.findMany({
-        where: { deleted_at: null, status: 1, group: { in: ['building', 'floor'] } },
+        where: { deleted_at: null, status: 1, group: { in: ['building', 'floor'] }, ...(req.user?.lastProperty ? { property_id: pid } : {}) },
         select: { id: true, name: true, group: true },
         orderBy: { name: 'asc' },
       });
@@ -567,15 +660,23 @@ success(res, bigintToNumber(data), 'Success', 200, {
   // Replicates Laravel WorkOrderController@index
   static async workOrderList(req: Request, res: Response): Promise<void> {
     try {
-      const { page, limit, search } = parsePagination(req.query);
+      const { page, search } = parsePagination(req.query);
+      // local parsePagination defaults to 10 and has no skip; work orders are the
+      // heavy list (3 joins per row) so they page at 25 like the rest of the app.
+      const limit = Math.min(parseInt(req.query.limit as string) || 25, 100);
+      const skip = (page - 1) * limit;
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const where: any = { property_id: pid };
+      // was `{ property_id: pid }` with NO take/skip, so every work order of the
+      // property came back with 3 joins. Soft-deleted rows were included too.
+      const where: any = { property_id: pid, ...parseTrash(req.query) };
       if (search) where.work_description = { contains: search, mode: 'insensitive' };
 
       const [data, total, typeLinks] = await Promise.all([
         prisma.work_orders.findMany({
           where,
           orderBy: { id: 'desc' },
+          skip,
+          take: limit,
           include: { rooms: { select: { name: true } }, users_work_orders_reported_byTousers: { select: { name: true } }, users_work_orders_assign_toTousers: { select: { name: true } } },
         }),
         prisma.work_orders.count({ where }),
@@ -622,13 +723,13 @@ success(res, bigintToNumber(data), 'Success', 200, {
         };
       });
 
-      const [areaTypes, workTypeTypes] = await Promise.all([
-        prisma.types.findMany({ where: { deleted_at: null, status: 1, group: 'area' }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-        prisma.types.findMany({ where: { deleted_at: null, status: 1, group: 'work-type' }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-      ]);
+const [areaTypes, workTypeTypes] = await Promise.all([
+          prisma.types.findMany({ where: { deleted_at: null, status: 1, group: 'area', property_id: pid }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+          prisma.types.findMany({ where: { deleted_at: null, status: 1, group: 'work-type', property_id: pid }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        ]);
       const areas = areaTypes.map((t: any) => ({ value: Number(t.id), label: t.name, value_name: t.name.toLowerCase() }));
       const workTypes = workTypeTypes.map((t: any) => ({ value: Number(t.id), label: t.name }));
-      const rooms = await prisma.rooms.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+      const rooms = await prisma.rooms.findMany({ where: activeWhere('rooms', {}, req.user?.lastProperty), select: { id: true, name: true }, orderBy: { name: 'asc' } });
 
       success(res, formatted, 'Success', 200, {
         table: [
@@ -790,15 +891,53 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
     } catch (err: any) { error(res, 'Failed to load work order', 500); }
   }
 
+  /**
+   * Work Order form — matches PHP WorkOrderController@create (:77-138) & edit (:270-340)
+   * Property-scoped: types (work-type, area), users (via model_has_properties), rooms.
+   */
   static async workOrderForm(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const propertyId = req.user?.lastProperty ?? 0n;
+
+      // PHP: User::whereHas('properties', fn => where('id', last_property))
+      // Get user IDs linked to this property via model_has_properties pivot
+      const propertyUsers = await prisma.model_has_properties.findMany({
+        where: { property_id: propertyId, model_type: { contains: 'User' } },
+        select: { model_id: true },
+      });
+      const propertyUserIds = propertyUsers.map(p => p.model_id);
+
       const [rooms, users, areaTypes, workTypeTypes] = await Promise.all([
-        prisma.rooms.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-        prisma.users.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-        prisma.types.findMany({ where: { deleted_at: null, status: 1, group: 'area' }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-        prisma.types.findMany({ where: { deleted_at: null, status: 1, group: 'work-type' }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+        // PHP: Room::get() — uses HasProperties trait (auto property_id scope) + hide_virtual scope
+        prisma.rooms.findMany({
+          where: { deleted_at: null, property_id: propertyId, is_physical: true },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        // PHP: User::whereHas('properties', fn => where('id', last_property))
+        prisma.users.findMany({
+          where: {
+            deleted_at: null,
+            ...(propertyUserIds.length > 0 ? { id: { in: propertyUserIds } } : {}),
+          },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        // PHP: Type::onlyActive()->where('group', 'area') — uses HasProperties trait
+        prisma.types.findMany({
+          where: { deleted_at: null, status: 1, group: 'area', property_id: propertyId },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        // PHP: Type::onlyActive()->where('group', 'work-type') — uses HasProperties trait
+        prisma.types.findMany({
+          where: { deleted_at: null, status: 1, group: 'work-type', property_id: propertyId },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
       ]);
+
       const master = {
         rooms: rooms.map(r => ({ value: Number(r.id), label: r.name })),
         users: users.map(u => ({ value: Number(u.id), label: u.name })),
@@ -806,8 +945,18 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
         areas: areaTypes.map((t: any) => ({ value: Number(t.id), label: t.name, value_name: t.name.toLowerCase() })),
         workTypes: workTypeTypes.map((t: any) => ({ value: Number(t.id), label: t.name })),
       };
+
       if (!idRaw || !/^\d+$/.test(idRaw)) {
-        success(res, { status: 1 }, 'Success', 200, { master });
+        // PHP create response (:122-138): data includes reported_by = current user, date = today
+        const createData = {
+          status: 1,
+          reported_by: {
+            value: Number(req.user?.id ?? 0),
+            label: req.user?.name ?? '',
+          },
+          date: new Date().toISOString().slice(0, 10),
+        };
+        success(res, createData, 'Success', 200, { master });
         return;
       }
       const data = await prisma.work_orders.findUnique({
@@ -815,8 +964,41 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
         include: { rooms: { select: { name: true } }, work_order_stocks: true },
       });
       if (!data) { notFound(res, 'Work order not found'); return; }
-      success(res, bigintToNumber(data), 'Success', 200, { master });
-    } catch (err: any) { error(res, 'Failed to load work order form', 500); }
+
+      // Resolve area + work_type from model_has_types (like PHP edit)
+      const woTypes = await prisma.model_has_types.findMany({
+        where: { model_id: BigInt(idRaw), model_type: { contains: 'WorkOrder' } },
+        select: { type_id: true },
+      });
+      const typeRows = woTypes.length ? await prisma.types.findMany({
+        where: { id: { in: woTypes.map(t => t.type_id) } },
+        select: { id: true, name: true, group: true },
+      }) : [];
+
+      const formattedData: any = bigintToNumber(data);
+
+      // Map area and work_type as select objects
+      const areaType = typeRows.find((t: any) => t.group === 'area');
+      const workType = typeRows.find((t: any) => t.group === 'work-type');
+      if (areaType) formattedData.area = { value: Number(areaType.id), label: areaType.name, value_name: areaType.name.toLowerCase() };
+      if (workType) formattedData.work_type = { value: Number(workType.id), label: workType.name };
+
+      // Map reported_by and assign_to as select objects
+      if (formattedData.reported_by) {
+        const reporter = users.find(u => Number(u.id) === Number(formattedData.reported_by));
+        if (reporter) formattedData.reported_by = { value: Number(reporter.id), label: reporter.name };
+      }
+      if (formattedData.assign_to) {
+        const assignee = users.find(u => Number(u.id) === Number(formattedData.assign_to));
+        if (assignee) formattedData.assign_to = { value: Number(assignee.id), label: assignee.name };
+      }
+      if (formattedData.room_id) {
+        const room = rooms.find(r => Number(r.id) === Number(formattedData.room_id));
+        if (room) formattedData.room_id = { value: Number(room.id), label: room.name };
+      }
+
+      success(res, formattedData, 'Success', 200, { master });
+    } catch (err: any) { console.error('Failed to load work order form:', err); error(res, 'Failed to load work order form', 500); }
   }
 
 static async workOrderUpdate(req: Request, res: Response): Promise<void> {
@@ -1279,7 +1461,27 @@ success(res, bigintToNumber(data), 'Success', 200, {
         data.reclean_notes = reclean_notes ?? null;
 
         if (hasUnchecked && history.room_id) {
-          await prisma.rooms.update({ where: { id: history.room_id }, data: { maid_status: 0 } });
+          // A failed inspection means the room is NOT ready. This wrote
+          // maid_status: 0 (clean), which is the opposite of what the checklist
+          // just said — and because check-in hard-blocks on maid_status !== clean
+          // (front-desk.controller.ts), it let a dirty room be occupied.
+          const roomBefore = await prisma.rooms.findUnique({
+            where: { id: history.room_id },
+            select: { maid_status: true },
+          });
+          await prisma.rooms.update({ where: { id: history.room_id }, data: { maid_status: MAID_STATUSES.dirty.id } });
+          // @ts-ignore
+          await writeAudit(prisma, req, {
+            table: 'rooms',
+            event: 'updated',
+            subjectId: history.room_id,
+            name: 'room-inspection-failed',
+            description: `Room ${history.room_id} failed inspection — returned to dirty`,
+            logName: 'housekeeping',
+            old: { maid_status: roomBefore?.maid_status ?? null },
+            attributes: { maid_status: MAID_STATUSES.dirty.id },
+            meta: { room_id: String(history.room_id), history_id: String(history.id), reclean_notes: reclean_notes ?? null },
+          });
         }
       }
 
@@ -1439,8 +1641,8 @@ success(res, bigintToNumber(data), 'Success', 200, {
 
       // Master data (= Laravel edit() tail)
       const [roomTypes, roomsList] = await Promise.all([
-        prisma.room_types.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
-        prisma.rooms.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+        prisma.room_types.findMany({ where: activeWhere('room_types', {}, req.user?.lastProperty), select: { id: true, name: true } }),
+        prisma.rooms.findMany({ where: activeWhere('rooms', {}, req.user?.lastProperty), select: { id: true, name: true } }),
       ]);
       const hkActions = ['perform_cleaning', 'perform_inspection', 'assign_housekeeper'];
       const rmcsAll = await prisma.role_menu_crud.findMany({ select: { role_id: true, transaction_actions: true } });
@@ -1764,8 +1966,30 @@ success(res, bigintToNumber(data), 'Success', 200, {
         badRequest(res, 'Invalid type'); return;
       }
 
+      const roomBefore = maidStatus !== null
+        ? await prisma.rooms.findUnique({ where: { id: roomId }, select: { maid_status: true, room_status: true } })
+        : null;
+
       await prisma.housekeeper_history.update({ where: { id: history.id }, data });
       if (maidStatus !== null) await prisma.rooms.update({ where: { id: roomId }, data: { maid_status: maidStatus } });
+
+      // Maid status drives the check-in clean-room guard, so a transition here
+      // decides whether a room can be sold to an arriving guest. It needs an
+      // actor on the record.
+      if (maidStatus !== null) {
+        // @ts-ignore
+        await writeAudit(prisma, req, {
+          table: 'rooms',
+          event: 'updated',
+          subjectId: roomId,
+          name: 'room-maid-status-changed',
+          description: `Room ${roomId} maid status ${roomBefore?.maid_status ?? '?'} -> ${maidStatus} (${type})`,
+          logName: 'housekeeping',
+          old: { maid_status: roomBefore?.maid_status ?? null, room_status: roomBefore?.room_status ?? null },
+          attributes: { maid_status: maidStatus },
+          meta: { room_id: String(roomId), type, reclean_notes: reclean_notes ?? null, history_id: String(history.id) },
+        });
+      }
 
       success(res, null, 'Success');
     } catch (err: any) { console.error('Room status update error:', err); error(res, 'Failed to update status', 500); }

@@ -418,6 +418,7 @@ model code_items {
   code_posts       code_posts         @relation(fields: [code_post_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   properties       properties         @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   room_inventories room_inventories[]
+  bar_inclusives   bar_inclusives[]
 
   @@index([code_post_id])
   @@index([property_id])
@@ -2548,7 +2549,10 @@ model properties {
   advance_deposit_previous_day_account_uid BigInt?
   guest_ledger_current_day_account_uid     BigInt?
   guest_ledger_previous_day_account_uid    BigInt?
-  day_use_item_code                        BigInt?
+day_use_item_code                        BigInt?                            
+  /// Guest-profile columns that must be filled before check-in is allowed.
+  /// Laravel parity: Property::$mandatory_check_in (cast to array).
+  mandatory_check_in                       Json?
   accountings                              accountings[]
   allotments                               allotments[]
   baggages                                 baggages[]
@@ -2765,7 +2769,7 @@ model rate_rates {
   rates          rates      @relation(fields: [rate_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   room_types     room_types @relation(fields: [room_type_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
-  @@index([rate_id, room_type_id, date])
+  @@unique([rate_id, room_type_id, date])
   @@index([rate_id, room_type_id, date, property_id])
   @@index([property_id])
   @@index([rate_id])
@@ -4105,6 +4109,10 @@ model users {
   force_change_password                      Boolean              @default(false)
   last_property                              BigInt?              
   pin_enshift                                Int?
+  // Authorisation PIN for destructive cashiering operations (void, refund).
+  // Distinct from pin_enshift, which is the operator's own shift-close PIN —
+  // using that one meant any cashier could approve their own void.
+  pin_void_approve                          Int?
   fcm_token                                  String?
   schedule_employees                         schedule_employees[]
   shift_postings                             shift_postings[]
@@ -4281,13 +4289,27 @@ model bar_inclusives {
   frequency   String?
   cost        String?
   cost_on     String?
+  created_at  DateTime?
   updated_at  DateTime?
+  deleted_at  DateTime?
+  created_by  BigInt?
   updated_by  BigInt?
+  deleted_by  BigInt?
+  sort        Int       @default(0)
+  status      Int       @default(0)
   properties  properties @relation(fields: [property_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   bars        bars       @relation(fields: [bar_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  code_items  code_items? @relation(fields: [stock], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  // `stock` is nullable on the DB (stock DEFAULT 0, FK ON DELETE SET NULL), so the
+  // relation has to be optional. Declared here to keep Prisma's FK metadata in
+  // step with the migration in sql/2026-10-03_bar_inclusives_parity.sql.
+  stock BigInt?
 
   @@index([property_id])
   @@index([bar_id])
+  @@index([bar_id, deleted_at])
+  @@index([stock])
 }
 
 model bar_rates {

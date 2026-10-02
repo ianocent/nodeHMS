@@ -1,11 +1,8 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error, badRequest, notFound } from '../utils/response';
-import { dataSearch, applySearchField } from '../utils/search';
-import { getStatusLabel } from '../utils/cmsConfig';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { badRequest, error, notFound, success } from '../utils/response';
+import { applySearchField, dataSearch } from '../utils/search';
 
 const ACCOUNTING_STATUSES = [
   { value: 1, label: 'Processed' },
@@ -66,9 +63,6 @@ const ACCOUNTING_TABLE = [
   { label: 'Action', key: 'action', type: 'action', is_search: false },
 ];
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const TYPE_MAP: Record<string, string> = {
   'invoice': 'invoice',
@@ -112,9 +106,9 @@ function resolveType(req: Request): string | null {
 }
 
 export class AccountingController {
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/accounting/{type}
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async list(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
@@ -134,7 +128,7 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
         deleted_at: trash ? { not: null } : null,
       };
 
-      applySearchField(where, req, ACCOUNTING_TABLE);
+      applySearchField(where, req, ACCOUNTING_TABLE, 'accountings');
 
       const [records, total] = await Promise.all([
         prisma.accountings.findMany({
@@ -253,9 +247,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/accounting/get/{type}
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/accounting/get/{type} & /cms/allocation-accounting/get-doc —
   // Laravel AccountingController@getDoc (:516-554): COMPANY PROFILE autocomplete
   // (NOT accounting rows). Both Laravel routes share this one handler.
@@ -311,9 +305,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /cms/accounting/{type}/update-status
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async updateStatus(req: Request, res: Response): Promise<void> {
     try {
       const idVal = (req.query.id as string) || req.body.id;
@@ -351,9 +345,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/accounting/{type}/create
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async createForm(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -374,9 +368,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/accounting/{type}/{id}
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async show(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -404,9 +398,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/accounting/{type}/{id}/update
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async edit(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -442,9 +436,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /cms/accounting/{type}/{id}
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async update(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -501,9 +495,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /cms/accounting/{type}
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
@@ -610,9 +604,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/allocation-accounting
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async allocationList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -656,9 +650,9 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /cms/allocation-accounting/store
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async allocationStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
@@ -692,7 +686,7 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/allocation-accounting/get-doc — Laravel routes this to the SAME
   // AccountingController@getDoc as /accounting/get/{type} (cms.php:1505), i.e.
   // CompanyProfile autocomplete. Delegate for exact parity.
@@ -702,8 +696,8 @@ const trash = req.query.trash === '1' || req.query.trash === 'true';
 
 
   // GET /cms/allocation-history
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
+  
   static async allocationHistory(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;

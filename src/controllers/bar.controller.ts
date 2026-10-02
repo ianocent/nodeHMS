@@ -1,15 +1,11 @@
-﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../config/prisma';
+import { Request, Response } from 'express';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
+import { safeOrderBy } from '../utils/querySafety';
 import { getStatusLabel } from '../utils/cmsConfig';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const MENU_ID_BAR = 87;
 const MODULE_BAR = 'bar';
@@ -100,7 +96,7 @@ export class BarController {
         };
       }
 
-const orderBy: any = sortKey === 'id' ? [{ end_date: 'desc' }, { id: 'asc' }] : { [sortKey]: order };
+const orderBy: any = sortKey === 'id' ? [{ end_date: 'desc' }, { id: 'asc' }] : safeOrderBy('rates', sortKey, { id: order });
 
       const businessDate = await getBusinessDate(propertyId!);
 
@@ -129,7 +125,7 @@ const orderBy: any = sortKey === 'id' ? [{ end_date: 'desc' }, { id: 'asc' }] : 
         { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
       ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'rates');
 
       const [bars, total] = await Promise.all([
         prisma.rates.findMany({
@@ -172,7 +168,7 @@ minimum_rate: Number(b.minimum_rate),
         sort: b.sort,
         created_at: b.created_at,
         created_by: b.created_by ? Number(b.created_by) : null,
-        status: getStatusLabel(b.status),
+        status: b.status ?? 0, // raw 0/1 → success() converts to boolean for checkbox display
         is_view: true,
         is_edit: true,
         is_need_approval: false,

@@ -1,15 +1,10 @@
+import { prisma } from '../../config/prisma';
 // Laravel Kernel :44-59 'check.request.status' (everyThirtySeconds) + Jobs/Report parity:
 // pick requests.status=0 -> mark 1 (processing) -> run the mapped report service
 // method -> mark 2 (done). status=3 is a node-extra FAILED marker so broken
 // methods never wedge the queue.
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { reportHandlers } from '../../controllers/report/handlers';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function resolveHandler(method: string | null): ((p: any) => Promise<any[]>) | null {
   if (!method) return null;

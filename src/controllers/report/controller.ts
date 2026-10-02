@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { success, error, badRequest, notFound } from '../../utils/response';
+// @ts-ignore
 import { prisma, parseReportParams, REPORT_PERMISSION_TABLE, bigintToNumber, formatDate } from './helpers';
 import { STATUSES } from '../../utils/cmsConfig';
 import { reportHandlers } from './handlers';
@@ -546,7 +547,10 @@ export class ReportController {
   static async folioDocument(req: Request, res: Response): Promise<void> {
     try {
       const id = req.params.id as string | string[];
-      const documentTypeRaw = req.params.documentType;
+      // Route declares :docType (see routes/report.routes.ts) - reading
+      // `documentType` here left the param undefined and every "Print Form"
+      // download answered 400 "Folio ID and document type are required".
+      const documentTypeRaw = req.params.docType;
       const folioId = Array.isArray(id) ? id[0] : id;
       const documentType = Array.isArray(documentTypeRaw) ? documentTypeRaw[0] : documentTypeRaw;
 

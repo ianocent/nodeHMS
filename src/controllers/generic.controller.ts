@@ -1,14 +1,32 @@
-﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../config/prisma';
+import { Request, Response } from 'express';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { STATUSES } from '../utils/cmsConfig';
 import { TABLES } from '../utils/tableMeta';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { writeAudit, isUnchanged } from '../utils/audit';
 import { AuthController } from './auth.controller';
+import { coerceValue, fieldType, hasField, isIgnoredSearchToken, modelExists, safeOrderBy, searchPredicate } from '../utils/querySafety';
+import { uniqueExtendError } from '../utils/uniqueExtend';
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
 const genericPool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+/**
+ * Soft-delete aware uniqueness for models handled by this generic CRUD. Laravel
+ * declares it inline (ContentRoomController@store:94):
+ *   'room_type_id' => 'required|exists:room_types,id|unique:content_rooms,room_type_id,NULL,id,deleted_at,NULL'
+ * Left unscoped on purpose - a room type belongs to exactly one property, so a global
+ * check cannot reject a legitimate row.
+ */
+const GENERIC_UNIQUE_RULES: Record<string, Array<{ column: string; label: string }>> = {
+  // Key must match the Prisma delegate, not the singular: routes already set
+  // `req.params.model = 'content_rooms'`, and toPlural() passes underscore names through
+  // unchanged, so `content_room` would resolve to a non-existent delegate.
+  content_rooms: [{ column: 'room_type_id', label: 'room type id' }],
+};
 const genericAdapter = new PrismaPg(genericPool);
 const genericPrisma = new PrismaClient({ adapter: genericAdapter });
 
@@ -144,7 +162,13 @@ function sanitizeBody(body: any): any {
       }
       continue;
     }
-    if (v !== null && typeof v === 'object' && Object.keys(v).length === 0) continue;
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      if (Object.keys(v).length === 0) continue;
+      if ('value' in v) {
+        out[k] = v.value;
+        continue;
+      }
+    }
     out[k] = v;
   }
   return out;
@@ -169,6 +193,20 @@ const PROPERTY_SCOPED_MODELS = new Set([
   'hotel_competitor', 'hotel_competitors', 'master_hotel_competitor', 'master_hotel_competitors',
 ]);
 
+/**
+ * Models that reach the property through a relation instead of a local
+ * `property_id` column. `staah_reservations` is property-scoped via its
+ * `staah_interfaces` row (Laravel: StaahReservationController asserts
+ * `$reservation->staah_interfaces->property_id === $user->last_property`).
+ * Adding a local `property_id` filter to these throws
+ * `Unknown argument 'property_id'`, which surfaced as a 500 on the
+ * /cms/staah-reservation list.
+ */
+const PROPERTY_VIA_RELATION: Record<string, string> = {
+  staah_reservation: 'staah_interfaces',
+  staah_reservations: 'staah_interfaces',
+};
+
 // menuId-based permission per generic model (Laravel hasCrudPermission parity).
 const MODEL_MENU: Record<string, number> = {
   staah_reservations: 1184,
@@ -177,6 +215,8 @@ const MODEL_MENU: Record<string, number> = {
   rates: 109,
   yields: 1102,
   holidays: 89,
+  // Laravel MessageController@index -> hasCrudPermission(63, 'add'|'edit')
+  messages: 63,
 };
 
 const TIME_FIELDS = ['time_start', 'time_end', 'overtime_start', 'overtime_end'];
@@ -209,9 +249,9 @@ function parsePagination(query: any) {
 }
 
 export class GenericController {
-  private getPermission(req: Request, model: string): { view: boolean; add: boolean; edit: boolean; delete: boolean } {
+  private getPermission(req: Request, model: string): { view: number; add: number; edit: number; delete: number } {
     const menuId = MODEL_MENU[model];
-    if (!menuId) return { view: true, add: true, edit: true, delete: true };
+    if (!menuId) return { view: 1, add: 1, edit: 1, delete: 1 };
     return getPermissionFlags(req.user as any, menuId);
   }
 
@@ -220,15 +260,80 @@ export class GenericController {
     const cfg = TABLES[model] || TABLES[plural];
     if (!cfg) return null;
     const table = cfg.map((c: any) => ({ ...c }));
-    if (plural === 'yields') {
+    if (plural === 'yields' || plural === 'room_allotments') {
       const roomTypes = await getPrisma().room_types.findMany({
         where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });
-      if (table[3] && table[3].key === 'room_type_id') table[3].options = roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name }));
+      const rtIndex = table.findIndex((t: any) => t.key === 'room_type_id');
+      if (rtIndex >= 0) table[rtIndex].options = roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name }));
+    }
+    
+    if (plural === 'hotel_competitors') {
+      const mhc = await getPrisma().master_hotel_competitors.findMany({
+        where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
+        select: { id: true, name: true },
+        orderBy: { sort: 'asc' },
+      });
+      const rtIndex = table.findIndex((t: any) => t.key === 'master_hotel_competitor_id');
+      if (rtIndex >= 0) table[rtIndex].options = mhc.map((m: any) => ({ value: Number(m.id), label: m.name }));
     }
     return table;
+  }
+
+  /**
+   * Last-resort column list for models with no `TABLES` entry.
+   *
+   * Reads the Prisma DMMF field list for the model, so it is derived from the
+   * SCHEMA and is identical whether or not the query returned rows. Scalars only
+   * (relations are skipped), audit/technical columns filtered out, and never an
+   * empty result — `table-edit` treats a zero-column `table` as "no table".
+   */
+  private modelShapeTable(model: string): any[] {
+    const plural = this.toPlural(model);
+    const keys = this.modelFields(plural);
+
+    const HIDE = new Set([
+      'property_id', 'created_by', 'updated_by', 'deleted_by',
+      'created_at', 'updated_at', 'deleted_at',
+    ]);
+
+    const table = keys
+      .filter((k) => !HIDE.has(k))
+      .map((key) => ({
+        label: key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        key,
+        type: key === 'id' || key.endsWith('_id') || key.endsWith('_by')
+          ? 'none'
+          : key === 'status'
+          ? 'checkbox'
+          : key === 'name' || key === 'code' || key === 'description'
+          ? 'text'
+          : 'string',
+        is_search: key === 'name' || key === 'code' || key === 'description',
+      }));
+
+    if (table.length === 0) {
+      // A model with no scalar fields still needs one renderable column.
+      table.push({ label: 'Id', key: 'id', type: 'none', is_search: false });
+    }
+    table.push({ label: 'Action', key: 'action', type: 'action', is_search: false });
+    return table;
+  }
+
+  /** Scalar field names for a Prisma model, read from the generated DMMF. */
+  private modelFields(plural: string): string[] {
+    try {
+      const dmmf = (require('@prisma/client') as any)?.Prisma?.dmmf;
+      const modelDef = dmmf?.datamodel?.models?.find((m: any) => m.name === plural);
+      if (!modelDef) return [];
+      return modelDef.fields
+        .filter((f: any) => !f.isRelation)
+        .map((f: any) => f.name);
+    } catch {
+      return [];
+    }
   }
 
   private getPrismaModel(modelName: string): any {
@@ -320,7 +425,15 @@ export class GenericController {
     if (this.softDeleteCache.has(model)) return this.softDeleteCache.get(model)!;
     let has = true;
     try {
-      await (getPrisma() as any)[model].findFirst({ where: { deleted_at: null } });
+      // Resolve through toPlural: the route model is often singular ('menu')
+      // while the Prisma delegate is plural ('menus'). Indexing the delegate
+      // with the raw route name would throw a TypeError and silently report
+      // "no soft delete" for every singular-named model.
+      const delegate = (getPrisma() as any)[this.toPlural(model)];
+      if (!delegate) { has = false; }
+      else {
+        await delegate.findFirst({ where: { deleted_at: null } });
+      }
     } catch {
       has = false;
     }
@@ -335,6 +448,7 @@ export class GenericController {
       const { page, limit, search, sort, order, trash } = parsePagination(req.query);
       const modelDelegate = this.getPrismaModel(model);
       console.log('Model delegate:', modelDelegate ? 'found' : 'NOT FOUND');
+      const prismaModel = this.toPlural(model);
       const searchFields = this.parseSearchFields(model, search || '');
       const hasSoftDelete = await this.modelHasSoftDelete(model);
 
@@ -343,10 +457,22 @@ export class GenericController {
         : (hasSoftDelete ? { deleted_at: null } : {});
       for (const [k, v] of Object.entries(req.query)) {
         if (['page', 'limit', 'search', 'sort', 'order', 'trash'].includes(k)) continue;
-        if (k.endsWith('_id') && String(v)) where[k] = BigInt(String(v));
+        if (!k.endsWith('_id') || isIgnoredSearchToken(v)) continue;
+        // Laravel never forwards a request param straight into where(); only
+        // columns that exist on the model may be filtered this way.
+        const columnType = modelExists(prismaModel) ? fieldType(prismaModel, k) : undefined;
+        if (!columnType) continue;
+        const coerced = coerceValue(columnType, v);
+        if (coerced === undefined) continue;
+        where[k] = coerced;
       };
       const pluralForm = this.toPlural(model);
-      if (
+      const viaRelation = PROPERTY_VIA_RELATION[model] || PROPERTY_VIA_RELATION[pluralForm];
+      if (viaRelation) {
+        if (!where[viaRelation] && req.user?.lastProperty) {
+          where[viaRelation] = { property_id: BigInt(req.user.lastProperty) };
+        }
+      } else if (
         (PROPERTY_SCOPED_MODELS.has(model) || PROPERTY_SCOPED_MODELS.has(pluralForm))
         && !where.property_id && req.user?.lastProperty
       ) {
@@ -359,11 +485,17 @@ export class GenericController {
         } catch { /* model has no group column */ }
       }
       if (search && searchFields.length > 0) {
-        where.OR = searchFields.map((f: string) => ({ [f]: { contains: search, mode: 'insensitive' } }));
+        const predicates = searchFields
+          .map((f: string) => searchPredicate(prismaModel, f, search))
+          .filter(Boolean);
+        if (predicates.length) where.OR = predicates;
       }
 
-      const orderBy: any = {};
-      orderBy[sort] = order;
+      const orderBy: any = safeOrderBy(
+        prismaModel,
+        sort,
+        hasField(prismaModel, 'id') ? { id: order === 'desc' ? 'desc' : 'asc' } : undefined
+      );
 
       const [data, total] = await Promise.all([
         modelDelegate.findMany({
@@ -371,26 +503,39 @@ export class GenericController {
           orderBy,
           skip: (page - 1) * limit,
           take: limit,
+          ...(model === 'yield' || model === 'yields' || model === 'room_allotment' || model === 'room_allotments' ? { include: { room_types: { select: { id: true, name: true } } } } : {}),
+          ...(model === 'hotel_competitor' || model === 'hotel_competitors' ? { include: { master_hotel_competitors: { select: { id: true, name: true } } } } : {})
         }),
         modelDelegate.count({ where }),
       ]);
-
-      // Build default table config from first record's keys
-      // (Laravel formatTable parity override when TABLES defines the model)
-      let table = await this.listTable(model, req.user?.lastProperty ?? null);
-      if (!table) {
-        const firstRecord = data[0] || {};
-        table = Object.keys(firstRecord).slice(0, 6).map((key) => ({
-          label: key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-          key,
-          type: key === 'id' || key.endsWith('_id') || key.endsWith('_by') ? 'none' : 'string',
-          is_search: key === 'name' || key === 'code' || key === 'description',
+      
+      let outData = data;
+      if (model === 'yield' || model === 'yields' || model === 'room_allotment' || model === 'room_allotments') {
+        outData = outData.map((d: any) => ({
+          ...d,
+          room_type_id: d.room_types ? { value: Number(d.room_types.id), label: d.room_types.name } : d.room_type_id
         }));
-        if (table.length > 0) table.push({ label: 'Action', key: 'action', type: 'action', is_search: false });
+      }
+      if (model === 'hotel_competitor' || model === 'hotel_competitors') {
+        outData = outData.map((d: any) => ({
+          ...d,
+          master_hotel_competitor_id: d.master_hotel_competitors ? { value: Number(d.master_hotel_competitors.id), label: d.master_hotel_competitors.name } : d.master_hotel_competitor_id
+        }));
+      }
+
+      // Column definitions must be static. Deriving them from the first returned
+      // record (the old `Object.keys(data[0] || {})`) meant an EMPTY result set
+      // produced zero columns, so table-edit rendered a header-less table and the
+      // in-table add row had no inputs at all — the symptom hit by the concierge
+      // phone-book pages. Fall back to the Prisma model shape instead, which is
+      // populated by the schema rather than by the data.
+      let table = await this.listTable(model, req.user?.lastProperty ?? null);
+      if (!table || table.length === 0) {
+        table = this.modelShapeTable(model);
       }
       const permission = this.getPermission(req, model);
 
-      success(res, formatTimeRows(bigintToNumber(data)), 'Success', 200, {
+      success(res, formatTimeRows(bigintToNumber(outData)), 'Success', 200, {
         table,
         permission,
         search_data: [],
@@ -482,11 +627,146 @@ export class GenericController {
           orderBy: { name: 'asc' },
         });
         base.company_guest = companies.map((c: any) => ({ value: `${Number(c.id)}-CompanyProfile`, label: c.name }));
+      } else if (model === 'hotel_competitor') {
+        const masterHotelCompetitors = await prisma.master_hotel_competitors.findMany({
+          where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        base.master_hotel_competitor_id = masterHotelCompetitors.map((m: any) => ({ value: Number(m.id), label: m.name }));
+      } else if (model === 'menu' || model === 'menus') {
+        // Laravel Basic\MenuController@create -> master.menus + master.statuses
+        const menus = await prisma.menus.findMany({
+          where: { deleted_at: null, status: 1 },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        base.menus = menus.map((m: any) => ({ value: Number(m.id), label: m.name }));
       }
       return base;
     } catch (err: any) {
       console.error('Generic buildMaster error for model:', model, err);
       return base;
+    }
+  }
+
+  /**
+   * GET /overbooking — date × room-type matrix.
+   *
+   * The reference (OverbookingController@index) does not return a flat list. It
+   * builds a grid: one row per day between start_date and end_date, one column
+   * per selected room type, and the cell value is that day's `overbooking`
+   * count. The generic list handler returned raw rows instead, so the screen
+   * showed the wrong shape entirely.
+   *
+   * Room types arrive either as `room_type_<id>=1` keys (what Laravel's
+   * `srcstr('room_type_')` reads) or as a comma list in `room_type`.
+   */
+  async overbookingList(req: Request, res: Response): Promise<void> {
+    try {
+      const prisma = getPrisma();
+      const propertyId = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
+      const businessDate = await AuthController.getBusinessDate(propertyId);
+      const today = businessDate || new Date().toISOString().slice(0, 10);
+
+      const startRaw = String(req.query.start_date ?? '').trim();
+      const endRaw = String(req.query.end_date ?? '').trim();
+      const startDate = /^\d{4}-\d{2}-\d{2}$/.test(startRaw) ? startRaw : today;
+      const endDate = /^\d{4}-\d{2}-\d{2}$/.test(endRaw)
+        ? endRaw
+        : new Date(new Date(startDate + 'T00:00:00Z').getTime() + 7 * 86400000)
+            .toISOString()
+            .slice(0, 10);
+
+      // `room_type_<id>=1` is the Laravel contract; `room_type=1,2,3` is what the
+      // node form actually sends, so accept both.
+      const roomTypeIds = new Set<bigint>();
+      for (const [key, value] of Object.entries(req.query)) {
+        const m = /^room_type_(\d+)$/.exec(key);
+        if (!m) continue;
+        const truthy = value === '' || value === '1' || value === 'true';
+        if (truthy) roomTypeIds.add(BigInt(m[1]));
+      }
+      const csv = String(req.query.room_type ?? '').trim();
+      if (csv) {
+        for (const part of csv.split(',')) {
+          const t = part.trim();
+          if (/^\d+$/.test(t)) roomTypeIds.add(BigInt(t));
+        }
+      }
+      if (roomTypeIds.size === 0) {
+        // No selection: fall back to every active room type so the grid is not
+        // blank the moment the page opens.
+        const all = await prisma.room_types.findMany({
+          where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        all.forEach((rt: any) => roomTypeIds.add(BigInt(rt.id)));
+      }
+
+      const [roomTypes, rows] = await Promise.all([
+        prisma.room_types.findMany({
+          where: { id: { in: [...roomTypeIds] }, deleted_at: null },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.overbookings.findMany({
+          where: {
+            deleted_at: null,
+            ...(propertyId ? { property_id: propertyId } : {}),
+            room_type_id: { in: [...roomTypeIds] },
+            date: {
+              gte: new Date(startDate + 'T00:00:00Z'),
+              lte: new Date(endDate + 'T23:59:59.999Z'),
+            },
+          },
+          select: { date: true, room_type_id: true, overbooking: true },
+        }),
+      ]);
+
+      const table: any[] = [
+        { label: 'Date', key: 'date', type: 'date', is_search: false },
+        ...roomTypes.map((rt: any) => ({
+          label: String(rt.name).replace(/\b\w/g, (c: string) => c.toUpperCase()),
+          key: String(rt.id),
+          type: 'number',
+          is_search: false,
+        })),
+      ];
+
+      // date string -> room_type_id -> value
+      const grid = new Map<string, Record<string, number>>();
+      for (const r of rows) {
+        const d = new Date(r.date as any).toISOString().slice(0, 10);
+        if (!grid.has(d)) grid.set(d, {});
+        grid.get(d)![String(r.room_type_id)] = Number(r.overbooking ?? 0);
+      }
+
+      const data: any[] = [];
+      for (let t = Date.parse(startDate + 'T00:00:00Z'); t <= Date.parse(endDate + 'T00:00:00Z'); t += 86400000) {
+        const d = new Date(t).toISOString().slice(0, 10);
+        const row: any = { date: d };
+        for (const rt of roomTypes) row[String(rt.id)] = grid.get(d)?.[String(rt.id)] ?? 0;
+        data.push(row);
+      }
+
+      success(res, data, 'Success', 200, {
+        table,
+        search_data: [],
+        permission: this.getPermission(req, 'overbooking'),
+        pagination: {
+          current_page: 1,
+          per_page: data.length,
+          total: data.length,
+          from: data.length ? 1 : 0,
+          to: data.length,
+          last_page: 1,
+        },
+      });
+    } catch (err: any) {
+      console.error('Overbooking list error:', err);
+      error(res, 'Failed to load overbooking', 500);
     }
   }
 
@@ -496,10 +776,14 @@ export class GenericController {
       const permission = this.getPermission(req, model);
       const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
       const extra: any = { table: [], master, search_data: [], permission };
+      const data: any = { status: 1 };
       if (model === 'overbooking') {
-        extra.business_date = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
+        // Must live inside `data` — success() only copies whitelisted keys out
+        // of `meta`, so anything else passed there is silently dropped and the
+        // search form ended up with no start/end date.
+        data.business_date = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
       }
-      success(res, { status: 1 }, 'Success', 200, extra);
+      success(res, data, 'Success', 200, extra);
     } catch (err: any) {
       error(res, 'Failed to load form data', 500);
     }
@@ -534,7 +818,32 @@ export class GenericController {
           profiles: [],
         };
       }
-      success(res, formatTimeRows(bigintToNumber(out)), 'Success', 200, { table: [], master, search_data: [], permission });
+      
+      out = bigintToNumber(out);
+      const plural = model.endsWith('y') ? model.slice(0, -1) + 'ies' : model + 's';
+      const cfg = (TABLES as any)[model] || (TABLES as any)[plural];
+      if (cfg) {
+        for (const col of cfg) {
+          if ((col.type === 'select' || col.type === 'checkbox') && col.key) {
+            const key = col.key;
+            if (out[key] !== null && out[key] !== undefined && typeof out[key] !== 'object') {
+              let label = String(out[key]);
+              if (col.options && Array.isArray(col.options)) {
+                const opt = col.options.find((o: any) => String(o.value) === String(out[key]));
+                if (opt) label = opt.label;
+              } else if (master[key] && Array.isArray(master[key])) {
+                const opt = master[key].find((o: any) => String(o.value) === String(out[key]));
+                if (opt) label = opt.label;
+              } else if (col.type === 'checkbox') {
+                 label = out[key] ? 'Yes' : 'No';
+              }
+              out[key] = { value: out[key], label };
+            }
+          }
+        }
+      }
+      
+      success(res, formatTimeRows(out), 'Success', 200, { table: [], master, search_data: [], permission });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic edit form error:', err); error(res, 'Failed to load', 500); }
@@ -545,6 +854,17 @@ export class GenericController {
     try {
       const model = String(req.params.model);
       const modelDelegate = this.getPrismaModel(model);
+
+      for (const rule of GENERIC_UNIQUE_RULES[model] ?? []) {
+        const msg = await uniqueExtendError(
+          getPrisma(),
+          this.toPlural(model),
+          rule.column,
+          rule.label,
+          (req.body as any)?.[rule.column]
+        );
+        if (msg) { badRequest(res, msg); return; }
+      }
 
       // Laravel ShiftRosterController@store validation parity
       if (model === 'shift_roster') {
@@ -572,6 +892,12 @@ export class GenericController {
         }
       }
       const permission = this.getPermission(req, model);
+      await writeAudit(getPrisma(), req, {
+        table: this.toPlural(model),
+        event: 'created',
+        subjectId: (record as any)?.id,
+        attributes: record,
+      });
       success(res, bigintToNumber(record), 'Created', 200, { table: [], search_data: [], permission });
     } catch (err: any) {
       console.error('Generic create error:', err);
@@ -603,6 +929,15 @@ async update(req: Request, res: Response): Promise<void> {
       const data = model === 'allotment' ? allotmentBody(sanitizeBody(req.body)) : sanitizeBody(req.body);
       data.updated_at = new Date();
       const record = await modelDelegate.update({ where: { id: parsedId }, data });
+      await writeAudit(getPrisma(), req, {
+        table: this.toPlural(model),
+        event: 'updated',
+        subjectId: parsedId,
+        attributes: record,
+        old: existing,
+        // Laravel `logOnlyDirty()`: a save that changed nothing is not logged.
+        unchanged: isUnchanged(existing, record),
+      });
       success(res, bigintToNumber(record), 'Updated');
     } catch (err: any) {
       console.error('Generic update error:', err);
@@ -625,6 +960,13 @@ async update(req: Request, res: Response): Promise<void> {
       } else {
         await modelDelegate.delete({ where: { id: parsedId } });
       }
+      await writeAudit(getPrisma(), req, {
+        table: this.toPlural(model),
+        event: 'deleted',
+        subjectId: parsedId,
+        attributes: existing,
+        old: existing,
+      });
       success(res, null, 'Deleted');
     } catch (err: any) {
       console.error('Generic destroy error:', err);
@@ -644,6 +986,13 @@ async update(req: Request, res: Response): Promise<void> {
       const existing = await modelDelegate.findUnique({ where: { id: parsedId } });
       if (!existing) { notFound(res, 'Record not found'); return; }
       await modelDelegate.update({ where: { id: parsedId }, data: { deleted_at: null } });
+      await writeAudit(getPrisma(), req, {
+        table: this.toPlural(model),
+        event: 'restored',
+        subjectId: parsedId,
+        attributes: existing,
+        old: existing,
+      });
       success(res, null, 'Restored');
     } catch (err: any) {
       console.error('Generic restore error:', err);

@@ -1,18 +1,13 @@
+import { prisma } from '../../config/prisma';
 // Folio documents ×9 — port of Laravel Report/Batch/Folio/*Controller (SnappyPDF
 // + blade views) rendered via puppeteer renderPdf. Each builder mirrors the
 // standard blade layout sections; property 1002/1003 "-olive" variants share the
 // same data with minor label differences folded into the standard layout.
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, notFound, badRequest } from '../../utils/response';
 import { renderPdf } from './excel';
 import { AuthController } from '../auth.controller';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 export const FOLIO_DOCUMENT_TYPES = [
   'pre-registration',

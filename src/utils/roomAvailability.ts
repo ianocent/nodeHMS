@@ -3,7 +3,16 @@
 //  - it has a room_availabilities hold overlapping the date
 //  - it has an active work order covering the date
 //  - another folio's reservation (check_in / reservation status) occupies it
+//  - it is out_of_order(4) or blocked(3)
 import { PrismaClient } from '@prisma/client';
+import { ROOM_STATUSES } from './cmsStatus';
+
+// Unsellable room states. Only checking out_of_order let a room the grid shows
+// as Blocked be assigned to a guest through any path that used this helper.
+const UNSELLABLE_ROOM_STATUSES: number[] = [
+  ROOM_STATUSES.out_of_order.id,
+  ROOM_STATUSES.block.id,
+];
 
 export async function availableRoom(
   prisma: PrismaClient,
@@ -14,7 +23,7 @@ export async function availableRoom(
 ): Promise<boolean> {
   const end = dateEnd ?? new Date(dateStart.getTime() + 86400000);
   const room = await prisma.rooms.findUnique({ where: { id: roomId }, select: { deleted_at: true, room_status: true } });
-  if (!room || room.deleted_at || room.room_status === 4) return false;
+  if (!room || room.deleted_at || UNSELLABLE_ROOM_STATUSES.includes(room.room_status)) return false;
 
   const [holds, workOrders, overlapping] = await Promise.all([
     prisma.room_availabilities.count({

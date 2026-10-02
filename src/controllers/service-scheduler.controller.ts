@@ -1,12 +1,8 @@
+import { prisma } from '../config/prisma';
+import { activeWhere } from '../utils/querySafety';
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success } from '../utils/response';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -122,7 +118,7 @@ export class ServiceSchedulerController {
     const roomTypeIds = [...new Set(rooms.map((r: any) => r.room_type_id).filter((v: any) => v !== null && v !== undefined))];
     const floorTypes = roomTypeIds.length
       ? await prisma.types.findMany({
-          where: { id: { in: roomTypeIds }, group: 'floor' },
+          where: { id: { in: roomTypeIds }, group: 'floor', ...activeWhere('types') },
           select: { id: true, name: true },
         })
       : [];

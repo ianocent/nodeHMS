@@ -23,12 +23,33 @@ router.put('/phone-book-group/:id', authMiddleware, ConciergeController.phoneBoo
 router.delete('/phone-book-group/:id', authMiddleware, ConciergeController.phoneBookGroupDestroy);
 
 // Frontend /cms/concierge/phone-book-group-{1,2,3} aliases
-router.get('/concierge/phone-book-group-1', authMiddleware, ConciergeController.phoneBookGroupList);
-router.get('/concierge/phone-book-group-2', authMiddleware, ConciergeController.phoneBookGroupList);
-router.get('/concierge/phone-book-group-3', authMiddleware, ConciergeController.phoneBookGroupList);
-router.post('/concierge/phone-book-group-1', authMiddleware, ConciergeController.phoneBookGroupStore);
-router.post('/concierge/phone-book-group-2', authMiddleware, ConciergeController.phoneBookGroupStore);
-router.post('/concierge/phone-book-group-3', authMiddleware, ConciergeController.phoneBookGroupStore);
+//
+// The level has to reach the controller: base scopes each list with
+// `PhoneBookGroup<N>::where('group', N)` and gives level 2/3 a Parent Group
+// select built from level N-1. All three routes used to hit the same
+// unparameterised handler, so every tab listed all three levels.
+const phoneBookGroupList = (level: number) => (req: any, res: any) => {
+  req.params.groupLevel = String(level);
+  return ConciergeController.phoneBookGroupList(req, res);
+};
+// The store/update/destroy routes need the level for the same reason: the list reads
+// `group = N`, so a row saved without `group` lands on the schema default 0 and is
+// invisible in all three tabs. Laravel pins it (`'group' => 1` in
+// PhoneBookGroup1Controller@store).
+const phoneBookGroupStore = (level: number) => (req: any, res: any) => {
+  req.params.groupLevel = String(level);
+  return ConciergeController.phoneBookGroupStore(req, res);
+};
+const phoneBookGroupUpdate = (level: number) => (req: any, res: any) => {
+  req.params.groupLevel = String(level);
+  return ConciergeController.phoneBookGroupUpdate(req, res);
+};
+router.get('/concierge/phone-book-group-1', authMiddleware, phoneBookGroupList(1));
+router.get('/concierge/phone-book-group-2', authMiddleware, phoneBookGroupList(2));
+router.get('/concierge/phone-book-group-3', authMiddleware, phoneBookGroupList(3));
+router.post('/concierge/phone-book-group-1', authMiddleware, phoneBookGroupStore(1));
+router.post('/concierge/phone-book-group-2', authMiddleware, phoneBookGroupStore(2));
+router.post('/concierge/phone-book-group-3', authMiddleware, phoneBookGroupStore(3));
 router.get('/concierge/phone-book-group-1/create', authMiddleware, ConciergeController.phoneBookGroupForm);
 router.get('/concierge/phone-book-group-2/create', authMiddleware, ConciergeController.phoneBookGroupForm);
 router.get('/concierge/phone-book-group-3/create', authMiddleware, ConciergeController.phoneBookGroupForm);
@@ -36,11 +57,14 @@ router.get('/concierge/phone-book-group-1/:id', authMiddleware, ConciergeControl
 router.get('/concierge/phone-book-group-2/:id', authMiddleware, ConciergeController.phoneBookGroupForm);
 router.get('/concierge/phone-book-group-3/:id', authMiddleware, ConciergeController.phoneBookGroupForm);
 router.get('/concierge/phone-book-group-1/:id/update', authMiddleware, ConciergeController.phoneBookGroupForm);
+router.get('/concierge/phone-book-group-1/:id/edit', authMiddleware, ConciergeController.phoneBookGroupForm);
 router.get('/concierge/phone-book-group-2/:id/update', authMiddleware, ConciergeController.phoneBookGroupForm);
+router.get('/concierge/phone-book-group-2/:id/edit', authMiddleware, ConciergeController.phoneBookGroupForm);
 router.get('/concierge/phone-book-group-3/:id/update', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.put('/concierge/phone-book-group-1/:id', authMiddleware, ConciergeController.phoneBookGroupUpdate);
-router.put('/concierge/phone-book-group-2/:id', authMiddleware, ConciergeController.phoneBookGroupUpdate);
-router.put('/concierge/phone-book-group-3/:id', authMiddleware, ConciergeController.phoneBookGroupUpdate);
+router.get('/concierge/phone-book-group-3/:id/edit', authMiddleware, ConciergeController.phoneBookGroupForm);
+router.put('/concierge/phone-book-group-1/:id', authMiddleware, phoneBookGroupUpdate(1));
+router.put('/concierge/phone-book-group-2/:id', authMiddleware, phoneBookGroupUpdate(2));
+router.put('/concierge/phone-book-group-3/:id', authMiddleware, phoneBookGroupUpdate(3));
 router.delete('/concierge/phone-book-group-1/:id', authMiddleware, ConciergeController.phoneBookGroupDestroy);
 router.delete('/concierge/phone-book-group-2/:id', authMiddleware, ConciergeController.phoneBookGroupDestroy);
 router.delete('/concierge/phone-book-group-3/:id', authMiddleware, ConciergeController.phoneBookGroupDestroy);
@@ -84,6 +108,7 @@ router.delete('/concierge/baggage/:id', authMiddleware, ConciergeController.bagg
 router.get('/concierge/baggage/create', authMiddleware, ConciergeController.baggageForm);
 router.get('/concierge/baggage/:id', authMiddleware, ConciergeController.baggageForm);
 router.get('/concierge/baggage/:id/update', authMiddleware, ConciergeController.baggageForm);
+router.get('/concierge/baggage/:id/edit', authMiddleware, ConciergeController.baggageForm);
 
 // Car Park
 router.get('/car-parks', authMiddleware, ConciergeController.carParkList);
@@ -113,6 +138,7 @@ router.delete('/lost-and-found/:id', authMiddleware, ConciergeController.lostFou
 router.get('/concierge/lostfound', authMiddleware, ConciergeController.lostFoundList);
 router.get('/concierge/lostfound/create', authMiddleware, ConciergeController.lostFoundForm);
 router.get('/concierge/lostfound/:id/update', authMiddleware, ConciergeController.lostFoundForm);
+router.get('/concierge/lostfound/:id/edit', authMiddleware, ConciergeController.lostFoundForm);
 router.post('/concierge/lostfound', authMiddleware, ConciergeController.lostFoundStore);
 router.put('/concierge/lostfound/:id', authMiddleware, ConciergeController.lostFoundUpdate);
 router.delete('/concierge/lostfound/:id', authMiddleware, ConciergeController.lostFoundDestroy);
@@ -125,6 +151,7 @@ router.delete('/concierge/car-park/:id', authMiddleware, ConciergeController.car
 router.get('/concierge/car-park/create', authMiddleware, ConciergeController.carParkForm);
 router.get('/concierge/car-park/:id', authMiddleware, ConciergeController.carParkForm);
 router.get('/concierge/car-park/:id/update', authMiddleware, ConciergeController.carParkForm);
+router.get('/concierge/car-park/:id/edit', authMiddleware, ConciergeController.carParkForm);
 
 // Frontend /cms/concierge/lostfound show
 router.get('/concierge/lostfound/:id', authMiddleware, ConciergeController.lostFoundForm);

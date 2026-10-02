@@ -1,16 +1,11 @@
+import { prisma } from '../config/prisma';
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { dataSearch, applySearchField } from '../utils/search';
 import { getStatusLabel } from '../utils/cmsConfig';
-import crypto from 'crypto';
+import { badRequest, error, notFound, success, validationError } from '../utils/response';
+import { applySearchField, dataSearch } from '../utils/search';
+import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const MENU_ID = 88;
 const STATUSES = [
@@ -22,6 +17,19 @@ function generatePromotionCode(): string {
   return Array.from({ length: 8 }, () =>
     'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]
   ).join('');
+}
+
+// Laravel defines CurrentgeneratePromotionCode() INSIDE create(): it loops until it
+// draws a code that no promotion is already using. Without the retry the Add form can
+// hand out a code that store() then rejects as "already taken".
+async function currentGeneratePromotionCode(attempt = 0): Promise<string> {
+  const code = generatePromotionCode();
+  if (attempt > 20) return code;
+  const existing = await prisma.promotions.findFirst({
+    where: { promotion_code: code },
+    select: { id: true },
+  });
+  return existing ? currentGeneratePromotionCode(attempt + 1) : code;
 }
 
 function bigintToNumber(val: any): any {
@@ -83,6 +91,7 @@ export class PromotionController {
 
       const trash = req.query.trash === '1' || req.query.trash === 'true';
       const where: any = { deleted_at: trash ? { not: null } : null };
+      applyStatusScope(where, req, 'promotions');
 
       if (search) {
         where.OR = [
@@ -124,12 +133,12 @@ export class PromotionController {
         { label: 'Description', key: 'description', type: 'text', is_search: true },
       ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'promotions');
 
       const [promotions, total] = await Promise.all([
         prisma.promotions.findMany({
           where,
-          orderBy: { [sort]: order },
+          orderBy: safeOrderBy('promotions', sort, { id: order }),
           skip: (page - 1) * limit,
           take: limit
         }),
@@ -191,7 +200,7 @@ export class PromotionController {
     }
   }
 
-  // â”€â”€ RateRelationController::promotion parity (/rate/promotion) â”€â”€
+  //  RateRelationController::promotion parity (/rate/promotion) 
   static async ratePromotionList(req: Request, res: Response): Promise<void> {
     try {
       const rateId = String(req.query.rate_id ?? '');
@@ -256,13 +265,16 @@ export class PromotionController {
    * GET /api/promotions/create
    * Get master data for promotion creation form
    */
-  static async create(req: Request, res: Response): Promise<void> {    try {
-      const master = {
-        statuses: STATUSES,
-        promotion_code: generatePromotionCode()
-      };
+  static async create(req: Request, res: Response): Promise<void> {
+    try {
+      // Laravel PromotionController::create returns `master` as a SIBLING of data:
+      //   additional(['master' => ['statuses' => $status, 'code' => CurrentgeneratePromotionCode()]])
+      // The port returned that object as `data` and called the key `promotion_code`, so the
+      // Promotion Code input stayed empty on the Add form (it reads `master.code`).
+      const code = await currentGeneratePromotionCode();
+      const master = { statuses: STATUSES, code };
 
-      success(res, master, 'Success');
+      success(res, [], 'Success', 200, { master });
     } catch (err: any) {
       console.error('Promotion create form error:', err);
       error(res, 'Failed to load form data', 500);
@@ -387,7 +399,10 @@ property_id: req.user?.lastProperty ? BigInt(req.user.lastProperty) : null,
         statuses: STATUSES
       };
 
-      success(res, { ...bigintToNumber(promotion), master }, 'Success');
+      // Laravel passes master through `additional()`, i.e. a sibling of `data`. The port
+      // spread it INTO data, so the form's `datauser.master.*` option reads came back
+      // undefined on every edit.
+      success(res, bigintToNumber(promotion), 'Success', 200, { master });
     } catch (err: any) {
       console.error('Promotion edit error:', err);
       error(res, 'Failed to load edit data', 500);

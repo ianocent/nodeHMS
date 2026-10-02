@@ -1,17 +1,13 @@
+import { prisma } from '../config/prisma';
 ﻿import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
+import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
 import { getStatusLabel } from '../utils/cmsConfig';
 import { TABLES } from '../utils/tableMeta';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -52,6 +48,7 @@ export class UserController {
       const propertyId = req.user?.lastProperty;
 
       const where: any = { deleted_at: null };
+      applyStatusScope(where, req, 'users');
 
       if (search) {
         where.OR = [
@@ -61,14 +58,27 @@ export class UserController {
         ];
       }
 
-      // Laravel: whereHas('properties', id = last_property); dev/anyaman roles bypass scope
+      // Laravel UserController@index:45-53 — the listed set is always the users
+      // linked to the current last_property. When the viewer holds developer or
+      // anyaman, it widens to include every user who holds those same roles.
       const isSuperUser = req.user?.superUser || false;
-      if (!isSuperUser && propertyId) {
+      if (propertyId) {
         const links = await prisma.model_has_properties.findMany({
           where: { property_id: propertyId, model_type: 'App\\Models\\User' },
           select: { model_id: true }
         });
-        where.id = { in: links.map((l: any) => l.model_id) };
+        const ids: any[] = links.map((l: any) => l.model_id);
+        if (isSuperUser) {
+          const superRoleUsers = await prisma.model_has_roles.findMany({
+            where: {
+              model_type: 'App\\Models\\User',
+              roles: { name: { in: ['developer', 'anyaman'] } }
+            },
+            select: { model_id: true }
+          });
+          superRoleUsers.forEach((r: any) => { if (!ids.includes(r.model_id)) ids.push(r.model_id); });
+        }
+        where.id = { in: ids };
       }
 
       const permFlags = getPermissionFlags(req.user, 1116);
@@ -79,12 +89,12 @@ export class UserController {
       };
 
       const table = TABLES.user;
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'users');
 
       const [users, total] = await Promise.all([
         prisma.users.findMany({
           where,
-          orderBy: { [sort]: order },
+          orderBy: safeOrderBy('users', sort, { id: order }),
           skip: (page - 1) * limit,
           take: limit
         }),
@@ -194,23 +204,44 @@ export class UserController {
   static async create(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const [propLinks, properties, roles] = await Promise.all([
-        // Laravel: Company::onlyActive()->where('id', $Currentproperty->companies->first()->id)
+      const [propLinks, roles] = await Promise.all([
         prisma.model_has_companies.findMany({
           where: { model_id: pid, model_type: 'App\\Models\\Property' },
           select: { company_id: true }
         }),
-        prisma.properties.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
         prisma.roles.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } })
       ]);
+      const companyIds = propLinks.map((l: any) => l.company_id);
       const propCompanies = await prisma.companies.findMany({
-        where: { id: { in: propLinks.map((l: any) => l.company_id) }, status: 1, deleted_at: null },
+        where: { id: { in: companyIds }, status: 1, deleted_at: null },
         select: { id: true, name: true }
+      });
+
+      // Laravel UserController@create uses `Property::onlyActive()->get()` with no
+      // company scoping, so the dropdown leaked every hotel in the system. Scoped to
+      // the companies the current property belongs to, and each option carries its
+      // company_id so the form can narrow the list to the selected company.
+      const propertyCompanyLinks = await prisma.model_has_companies.findMany({
+        where: { model_type: 'App\\Models\\Property', company_id: { in: companyIds } },
+        select: { model_id: true, company_id: true }
+      });
+      const companyByProperty = new Map<string, number>();
+      for (const l of propertyCompanyLinks) {
+        const key = String(l.model_id);
+        if (!companyByProperty.has(key)) companyByProperty.set(key, Number(l.company_id));
+      }
+      const properties = await prisma.properties.findMany({
+        where: { id: { in: propertyCompanyLinks.map((l: any) => l.model_id) }, status: 1, deleted_at: null },
+        select: { id: true, name: true },
       });
 
       const master = {
         companies: propCompanies.map((c: any) => ({ value: Number(c.id), label: c.name })),
-        properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
+        properties: properties.map((p: any) => ({
+          value: Number(p.id),
+          label: p.name,
+          company_id: companyByProperty.get(String(p.id)) ?? null,
+        })),
         roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
           { value: 1, label: 'Active' },
@@ -373,15 +404,17 @@ export class UserController {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const [user, propLinks, properties, roles, modelRoles, userProps, userCompanies] = await Promise.all([
+      const [user, propLinks, roles, modelRoles, userProps, userCompanies] = await Promise.all([
         prisma.users.findUnique({ where: { id } }),
         // Laravel: Company::onlyActive()->where('id', $Currentproperty->companies->first()->id)
         prisma.model_has_companies.findMany({
           where: { model_id: pid, model_type: 'App\\Models\\Property' },
           select: { company_id: true }
         }),
-        prisma.properties.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.roles.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
+        // Role uses Laravel's HasProperties trait, whose global scope pins
+        // property_id to the current last_property — so the dropdown must only
+        // offer roles belonging to the property being edited under.
+        prisma.roles.findMany({ where: { status: 1, deleted_at: null, property_id: pid }, select: { id: true, name: true } }),
         prisma.model_has_roles.findMany({
           where: { model_id: id, model_type: 'App\\Models\\User' },
           include: { roles: true }
@@ -400,6 +433,22 @@ export class UserController {
         select: { id: true, name: true }
       });
 
+      // Same company scoping as the create endpoint - see the note there.
+      const companyIds = propLinks.map((l: any) => l.company_id);
+      const propertyCompanyLinks = await prisma.model_has_companies.findMany({
+        where: { model_type: 'App\\Models\\Property', company_id: { in: companyIds } },
+        select: { model_id: true, company_id: true }
+      });
+      const companyByProperty = new Map<string, number>();
+      for (const l of propertyCompanyLinks) {
+        const key = String(l.model_id);
+        if (!companyByProperty.has(key)) companyByProperty.set(key, Number(l.company_id));
+      }
+      const properties = await prisma.properties.findMany({
+        where: { id: { in: propertyCompanyLinks.map((l: any) => l.model_id) }, status: 1, deleted_at: null },
+        select: { id: true, name: true },
+      });
+
       if (!user || user.deleted_at) {
         notFound(res, 'User not found');
         return;
@@ -407,7 +456,11 @@ export class UserController {
 
       const master = {
         companies: propCompanies.map((c: any) => ({ value: Number(c.id), label: c.name })),
-        properties: properties.map((p: any) => ({ value: Number(p.id), label: p.name })),
+        properties: properties.map((p: any) => ({
+          value: Number(p.id),
+          label: p.name,
+          company_id: companyByProperty.get(String(p.id)) ?? null,
+        })),
         roles: roles.map((r: any) => ({ value: Number(r.id), label: r.name })),
         statuses: [
           { value: 1, label: 'Active' },

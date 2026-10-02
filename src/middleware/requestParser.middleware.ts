@@ -60,7 +60,28 @@ export function requestParser(
     }
   }
 
-  // Normalize query params: string "null" → null, string "undefined" → undefined
+  // Express 5 (>=5.0) defines `req.query` as a prototype getter that re-parses the
+  // query string on EVERY access, so `req.query.foo = 'bar'` mutates a throwaway
+  // object and is silently discarded. That broke every route/controller in this
+  // codebase that merges params into the query — rate.routes.ts `gridQuery()`
+  // (POST body -> `room_type_*` / `fields_*` / `days_*` / start_date), the
+  // `req.query.rate_id = rateIdFromQuery(req)` alias, content.routes.ts
+  // `req.query.keyword`, front-desk.controller `req.query.folio_id` — and also
+  // made the "null"/"undefined" normalisation below a no-op.
+  //
+  // Snapshot the parsed query into a real own property on the request instance.
+  // Own properties shadow the prototype getter and the values are identical, so
+  // plain reads (`req.query.page`) keep working unchanged.
+  const parsedQuery: Record<string, any> =
+    req.query && typeof req.query === 'object' ? { ...(req.query as any) } : {};
+  Object.defineProperty(req, 'query', {
+    value: parsedQuery,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+
+  // Normalize query params: string "null" -> null, string "undefined" -> undefined
   for (const key of Object.keys(req.query)) {
     const val = req.query[key];
     if (typeof val === 'string') {

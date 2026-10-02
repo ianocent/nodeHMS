@@ -1,13 +1,9 @@
+import { prisma } from '../config/prisma';
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { activeWhere } from '../utils/querySafety';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const MENU_ID = 69;
 
@@ -244,7 +240,7 @@ export class ContentController {
   static async cancelationRuleForm(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-      const roomTypes = await prisma.room_types.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
+      const roomTypes = await prisma.room_types.findMany({ where: activeWhere('room_types', {}, req.user?.lastProperty), select: { id: true, name: true }, orderBy: { name: 'asc' } });
       const master = { room_types: roomTypes.map(r => ({ value: Number(r.id), label: r.name })) };
       if (idRaw && /^\d+$/.test(idRaw)) {
         const data = await prisma.cancelation_rules.findUnique({ where: { id: BigInt(idRaw) } });

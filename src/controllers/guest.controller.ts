@@ -1,18 +1,20 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { getStatusLabel } from '../utils/cmsConfig';
 import { dataSearch } from '../utils/search';
+import { activeWhere, applyStatusScope, pushCondition, safeOrderBy, searchPredicate } from '../utils/querySafety';
+import {
+  MANDATORY_FIELD_LABELS,
+  mandatoryCheckInBlock,
+  readPropertyMandatory,
+} from '../utils/guestMandatory';
 import { saveBase64Image, saveDocumentFromDataUri, storageRoot } from '../utils/storage';
+import { TABLES } from '../utils/tableMeta';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // Static config values (from Laravel config/cms.php)
 const STATUSES = [
@@ -110,6 +112,7 @@ export class GuestController {
 
       // Laravel GuestProfileController@index ignores trash param; always active scope
       const where: any = { deleted_at: null, property_id: BigInt(req.user?.lastProperty ?? 0) };
+      applyStatusScope(where, req, 'guest_profiles');
 
       if (search) {
         where.OR = [
@@ -124,7 +127,7 @@ export class GuestController {
       }
 
       if (searchField && searchValue) {
-        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+        pushCondition(where, searchPredicate('guest_profiles', searchField, searchValue));
       }
 
       if (status) {
@@ -138,7 +141,7 @@ export class GuestController {
       const [guests, total] = await Promise.all([
         prisma.guest_profiles.findMany({
           where,
-          orderBy: { [sort]: order },
+          orderBy: safeOrderBy('guest_profiles', sort, { account: order }),
           skip: (page - 1) * limit,
           take: limit
         }),
@@ -299,11 +302,16 @@ export class GuestController {
    */
   static async create(req: Request, res: Response): Promise<void> {
     try {
-      const [titles, statusGuest, blackList, countries] = await Promise.all([
-        prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } })
+      // Type lookups are property-scoped (Laravel Type uses the HasProperties
+      // global scope), otherwise the status dropdown lists every property's rows
+      // — including several near-duplicate "normal"/"NORMAL" entries.
+      const tp = req.user?.lastProperty ?? 0;
+      const [titles, statusGuest, blackList, countries, mandatory] = await Promise.all([
+        prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
+        prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
+        prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
+        prisma.countries.findMany({ where: activeWhere('countries'), orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+        readPropertyMandatory(prisma, tp),
       ]);
 
       const normal = statusGuest.filter((s: any) => s.name.toLowerCase().includes('normal'));
@@ -416,6 +424,17 @@ export class GuestController {
       if (status_profile !== undefined) data.status_profile = Number(status_profile) || 0;
       if (blacklist !== undefined) data.blacklist = Number(blacklist) || 0;
       if (is_subscribe !== undefined) data.is_subscribe = is_subscribe === true || is_subscribe === 1 || is_subscribe === '1';
+      // `guest_profiles.status_profile` IS the guest status column in the
+      // reference — GuestProfileController@update writes it in `only([...])`
+      // and GuestProfile's accessor resolves the label from it. The form posts
+      // the selection as `guest_status`, so mirror it into the column as well
+      // as the pivot; leaving it at its 0 default makes the list/search show
+      // "Unknown" for every guest.
+      const statusPick = guest_status ?? status_profile;
+      if (statusPick !== undefined && statusPick !== null && statusPick !== '') {
+        const statusId = Number(statusPick?.value ?? statusPick);
+        if (!Number.isNaN(statusId)) data.status_profile = statusId;
+      }
       if (card_type && card_number) {
         data.card_type = card_type;
         data.card_number = card_number;
@@ -429,6 +448,22 @@ export class GuestController {
       // Sync types via model_has_types
       const guestTitleId = guest_title?.value ?? guest_title;
       const guestStatusId = guest_status?.value ?? guest_status;
+      // Validate before writing: a stale type id raised a foreign-key error after
+      // the guest row already existed, leaving an orphan profile behind.
+      for (const raw of [guestTitleId, guestStatusId]) {
+        if (raw === undefined || raw === null || raw === '') continue;
+        if (!/^\d+$/.test(String(raw))) {
+          await prisma.guest_profiles.delete({ where: { id: guest.id } });
+          badRequest(res, 'Invalid type id: ' + raw);
+          return;
+        }
+        const exists = await prisma.types.findUnique({ where: { id: BigInt(String(raw)) }, select: { id: true } });
+        if (!exists) {
+          await prisma.guest_profiles.delete({ where: { id: guest.id } });
+          badRequest(res, 'Invalid type id: ' + raw);
+          return;
+        }
+      }
       if (guestTitleId) {
         await prisma.model_has_types.create({
           data: { model_id: guest.id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestTitleId) }
@@ -441,7 +476,22 @@ export class GuestController {
       }
 
       const fullGuest = await this.getGuestWithRelations(guest.id);
-      success(res, GuestController.formatGuest(fullGuest), 'Profile created successfully');
+      // Quick-create from a reservation only fills title/first/last, so hand the
+      // caller exactly what check-in will still ask for. The popup shows this
+      // as "incomplete" plus a link to the full profile form.
+      //
+      // The relational ids (guest_title / guest_status) must come back as
+      // `{ value, label }` like GET edit does: the reservation form writes the
+      // whole response straight into its guest_status select, and a bare number
+      // leaves that dropdown blank after a quick save.
+      success(res, {
+        ...GuestController.formatGuest(fullGuest),
+        ...GuestController.relationOptions(fullGuest),
+        mandatory_check_in: mandatoryCheckInBlock(
+          fullGuest,
+          await readPropertyMandatory(prisma, propertyId),
+        ),
+      }, 'Profile created successfully');
     } catch (err: any) {
       console.error('Guest store error:', err);
       if (err.code === 'P2002') {
@@ -486,13 +536,15 @@ export class GuestController {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
-      const [guest, titles, statusGuest, blackList, types, countries] = await Promise.all([
+      const tp = req.user?.lastProperty ?? 0;
+      const [guest, titles, statusGuest, blackList, types, countries, mandatory] = await Promise.all([
         this.getGuestWithRelations(id),
-        prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null }, select: { id: true, name: true } }),
+        prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
+        prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
+        prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
         prisma.model_has_types.findMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' }, include: { types: true } }),
-        prisma.countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } })
+        prisma.countries.findMany({ where: activeWhere('countries'), orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+        readPropertyMandatory(prisma, tp),
       ]);
 
       if (!guest || guest.deleted_at) {
@@ -515,10 +567,49 @@ export class GuestController {
         regions: REGIONS.map(r => ({ value: r.name, label: r.name })),
         countries: countries.map(c => ({ value: Number(c.id), label: c.name })),
         cities: [],
-        statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name }))
+        statusBlacklist: blackList.map(b => ({ value: Number(b.id), label: b.name })),
+        // Same list as GET create so the wizard and the profile page agree on
+        // what "complete" means.
+        mandatory_check_in: mandatory.map(field => ({
+          value: field,
+          label: MANDATORY_FIELD_LABELS[field] ?? field,
+        })),
       };
 
-      success(res, { ...GuestController.formatGuest(guest), guest_title: guestTitle ? { value: Number(guestTitle.id), label: guestTitle.name } : null, guest_status: guestStatus ? { value: Number(guestStatus.id), label: guestStatus.name } : null, master }, 'Success');
+      const fmt = GuestController.formatGuest(guest);
+
+      // City label needs its own lookup — the form renders a `{value,label}`
+      // pair and a bare id would show as "12345" in the dropdown.
+      const cityRow = fmt.city_id
+        ? await prisma.cities.findUnique({ where: { id: BigInt(fmt.city_id) }, select: { name: true } }).catch(() => null)
+        : null;
+
+      // `!= null` instead of a truthy test: id 0 is a legal value and a plain
+      // `? :` would silently blank the field.
+      // Note these stay in their native type — `card_type` and `gender` are
+      // strings ('NRIC', 'Male'), so Number() would yield NaN and break the
+      // option match in the select.
+      const opt = (v: any, label?: string | null) =>
+        v !== null && v !== undefined ? { value: v, label: label ?? String(v) } : null;
+
+      const guestObj = {
+        ...fmt,
+        guest_title: guestTitle ? { value: Number(guestTitle.id), label: guestTitle.name } : null,
+        guest_status: guestStatus ? { value: Number(guestStatus.id), label: guestStatus.name } : null,
+        gender: opt(fmt.gender, fmt.gender),
+        region: opt(fmt.region, fmt.region),
+        card_type: opt(fmt.card_type, fmt.card_type),
+        nationality_id: opt(fmt.nationality_id, guest.nationality?.name ?? null),
+        country_id: opt(fmt.country_id, countries.find(c => Number(c.id) === fmt.country_id)?.name ?? null),
+        city_id: opt(fmt.city_id, cityRow?.name ?? null),
+        status: fmt.status !== null ? { value: fmt.status, label: STATUSES.find(s => s.id === fmt.status)?.name || String(fmt.status) } : null,
+      };
+      // `master` must travel as response meta, exactly like GET create does.
+      // Nesting it inside the data payload put it at `resp.data.master` while
+      // the form reads `resp.master`, so every master-driven dropdown (region,
+      // nric, gender, guest status, nationality) came up empty on edit while
+      // add worked.
+      success(res, guestObj, 'Success', 200, { master });
     } catch (err: any) {
       console.error('Guest edit error:', err);
       error(res, 'Failed to load edit data', 500);
@@ -537,7 +628,7 @@ export class GuestController {
         short_code, first_name, last_name, region, nationality_id, city_id, country_id,
         telp, mobile_phone, card_type, card_number, card_expiry, email,
         gender, birth_of_date, fax, address, postal_code, car_reg_number,
-        guest_status, guest_title, status, image
+        guest_status, guest_title, status, status_profile, blacklist, is_subscribe, image
       } = req.body;
 
       const guest = await prisma.guest_profiles.findUnique({ where: { id } });
@@ -602,34 +693,147 @@ export class GuestController {
         image: imagePath
       };
 
+      // The card fields are written here rather than in a second update after the
+      // transaction. They used to be applied by a follow-up `guest_profiles.update`
+      // outside the transaction, which meant the guest row could be committed with
+      // the new name/address while the card columns still held the old values if
+      // that second write failed -- and the folio mirror inside the transaction had
+      // already copied the NEW card, so the three copies drifted apart.
+      if (card_type) data.card_type = card_type;
+      if (card_number) data.card_number = card_number;
+      if (card_expiry !== undefined) data.card_expiry = card_expiry || null;
+
+      // Same as store: `status_profile` is the guest-status column in the
+      // reference, and the form posts the selection as `guest_status`.
+      const statusPick = guest_status ?? status_profile;
+      if (statusPick !== undefined && statusPick !== null && statusPick !== '') {
+        const statusId = Number(statusPick?.value ?? statusPick);
+        if (!Number.isNaN(statusId)) data.status_profile = statusId;
+      }
+
+      // `blacklist` / `is_subscribe` were destructured but never applied, so
+      // toggling them on the profile form silently did nothing.
+      if (blacklist !== undefined) {
+        data.blacklist = blacklist === true || blacklist === 1 || blacklist === '1' ? 1 : 0;
+      }
+      if (is_subscribe !== undefined) {
+        data.is_subscribe = is_subscribe === true || is_subscribe === 1 || is_subscribe === '1';
+      }
+
+      // `status` must be an explicit 0/1. An untouched checkbox can still carry
+      // the `{ value, label }` pair the edit endpoint returned, and passing that
+      // object to an Int column silently lands on 0 (inactive).
+      if (data.status !== undefined && typeof data.status === 'object') {
+        data.status = data.status?.value ? 1 : 0;
+      }
+
       Object.keys(data).forEach(k => data[k] === undefined && delete data[k]);
 
-      await prisma.guest_profiles.update({ where: { id }, data });
-
-      if (card_type && card_number) {
-        await prisma.guest_profiles.update({
-          where: { id },
-          data: { card_type, card_number, card_expiry: card_expiry || null }
-        });
-      }
-
-      // Sync types
-      await prisma.model_has_types.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' } });
+      // Sync types.
+      //
+      // This used to `deleteMany` the pivot unconditionally and only re-create
+      // rows for the values that happened to be in the payload. A caller that
+      // sent `guest_status` without `guest_title` (the reservation screen does
+      // exactly this) therefore wiped the guest's title for good, and an id that
+      // no longer existed produced a foreign-key 500 after the column updates had
+      // already been written. Resolve both ids first, validate them, then
+      // replace the pivot inside a transaction with the row update.
       const guestTitleId = guest_title?.value ?? guest_title;
       const guestStatusId = guest_status?.value ?? guest_status;
-      if (guestTitleId) {
-        await prisma.model_has_types.create({
-          data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestTitleId) }
-        });
-      }
-      if (guestStatusId) {
-        await prisma.model_has_types.create({
-          data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(guestStatusId) }
-        });
+      const validTypeIds: bigint[] = [];
+      for (const raw of [guestTitleId, guestStatusId]) {
+        if (raw === undefined || raw === null || raw === '') continue;
+        const tid = BigInt(String(raw));
+        if (!/^\d+$/.test(String(raw))) throw new Error('Invalid type id: ' + raw);
+        const exists = await prisma.types.findUnique({ where: { id: tid }, select: { id: true } });
+        if (!exists) {
+          badRequest(res, 'Invalid type id: ' + raw);
+          return;
+        }
+        validTypeIds.push(tid);
       }
 
+      await prisma.$transaction(async (tx) => {
+        await tx.guest_profiles.update({ where: { id }, data });
+
+        // Mirror the guest fields back onto every folio that belongs to this
+        // guest.
+        //
+        // The folio keeps its own copy of the guest details, and the reservation
+        // side already mirrors folio -> guest (see ReservationController.update).
+        // Without this leg, saving a change on the Guest Profile page updated
+        // `guest_profiles` and left the folio showing the old name / phone /
+        // address, so the two screens disagreed -- editing one then the other
+        // looked like the save "did not stick".
+        //
+        // Only the fields present in the payload are written, so this is a no-op
+        // for partial callers (the reservation screen sends guest_status without
+        // the profile fields).
+        const folioPatch: any = {};
+        if (first_name !== undefined) folioPatch.first_name = first_name;
+        if (last_name !== undefined) folioPatch.last_name = last_name;
+        if (email !== undefined) folioPatch.email = email;
+        if (telp !== undefined) folioPatch.telp = telp;
+        if (mobile_phone !== undefined) folioPatch.mobile_phone = mobile_phone;
+        if (address !== undefined) folioPatch.address = address;
+        if (postal_code !== undefined) folioPatch.postal_code = postal_code;
+        if (city_id !== undefined && city_id !== null && city_id !== '') folioPatch.city_id = Number(city_id);
+        if (country_id !== undefined && country_id !== null && country_id !== '') folioPatch.country_id = Number(country_id);
+        if (nationality_id !== undefined && nationality_id !== null && nationality_id !== '') folioPatch.nationality_id = Number(nationality_id);
+        if (gender !== undefined && gender !== null && gender !== '') folioPatch.gender = gender;
+        if (birth_of_date !== undefined) folioPatch.birth_of_date = birth_of_date ? new Date(birth_of_date) : null;
+        // Card Type / NRIC / expiry live on both tables. guest_profiles is the
+        // master copy, so a change made here has to reach the folio too -- the
+        // reservation detail form reads these off the folio and otherwise showed
+        // a stale (or empty) card next to the profile's current one.
+        if (card_type !== undefined) folioPatch.card_type = card_type;
+        if (card_number !== undefined) folioPatch.card_number = card_number;
+        if (card_expiry !== undefined) folioPatch.card_expiry = card_expiry || null;
+
+        if (Object.keys(folioPatch).length > 0) {
+          folioPatch.updated_at = new Date();
+          folioPatch.updated_by = req.user?.id ? BigInt(req.user.id) : undefined;
+          await tx.folios.updateMany({
+            where: { guest_profile_id: id, deleted_at: null },
+            data: folioPatch,
+          });
+        }
+
+        // Resolve which groups are being replaced. A group with no replacement
+        // in the payload is left alone, so a partial update (reservation screen
+        // sends `guest_status` but no `guest_title`) cannot erase the title.
+        const titleId = guestTitleId !== undefined && guestTitleId !== null && guestTitleId !== ''
+          ? BigInt(String(guestTitleId)) : null;
+        const statusId = guestStatusId !== undefined && guestStatusId !== null && guestStatusId !== ''
+          ? BigInt(String(guestStatusId)) : null;
+
+        if (titleId) {
+          await tx.model_has_types.deleteMany({
+            where: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: { not: titleId } },
+          });
+          await tx.model_has_types.create({
+            data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: titleId },
+          });
+        }
+        if (statusId) {
+          await tx.model_has_types.deleteMany({
+            where: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: { not: statusId } },
+          });
+          await tx.model_has_types.create({
+            data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: statusId },
+          });
+        }
+      });
+
       const updated = await this.getGuestWithRelations(id);
-      success(res, GuestController.formatGuest(updated), 'Success');
+      success(res, {
+        ...GuestController.formatGuest(updated),
+        ...GuestController.relationOptions(updated),
+        mandatory_check_in: mandatoryCheckInBlock(
+          updated,
+          await readPropertyMandatory(prisma, req.user?.lastProperty),
+        ),
+      }, 'Success');
     } catch (err: any) {
       console.error('Guest update error:', err);
       error(res, 'Failed to update guest', 500);
@@ -711,7 +915,7 @@ export class GuestController {
         ];
       }
       if (searchField && searchValue) {
-        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+        pushCondition(where, searchPredicate('guest_profiles', searchField, searchValue));
       }
 
       const guests = await prisma.guest_profiles.findMany({
@@ -789,6 +993,7 @@ export class GuestController {
   static async countries(req: Request, res: Response): Promise<void> {
     try {
       const countries = await prisma.countries.findMany({
+        where: activeWhere('countries'),
         select: { id: true, name: true },
         orderBy: { name: 'asc' }
       });
@@ -812,7 +1017,7 @@ export class GuestController {
       if (countryId) where.country_id = countryId;
 
       const cities = await prisma.cities.findMany({
-        where,
+        where: activeWhere('cities', where),
         select: { id: true, name: true },
         orderBy: { name: 'asc' }
       });
@@ -862,6 +1067,7 @@ export class GuestController {
         prisma.folios.count({ where }),
       ]);
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: TABLES.guestFolio,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Guest folio list error:', err); error(res, 'Failed to list folios', 500); }
@@ -889,7 +1095,7 @@ export class GuestController {
       if (company_profile_id !== undefined) {
         data.company_profile_id = BigInt(company_profile_id);
       } else {
-        data.company_profile_id = (await prisma.company_profiles.findFirst({ where: { deleted_at: null }, orderBy: { id: 'asc' }, select: { id: true } }))?.id;
+        data.company_profile_id = (await prisma.company_profiles.findFirst({ where: activeWhere('company_profiles', req.user?.lastProperty ? { property_id: req.user.lastProperty } : {}, req.user?.lastProperty), orderBy: { id: 'asc' }, select: { id: true } }))?.id;
       }
       if (data.company_profile_id === undefined) { badRequest(res, 'company_profile_id is required'); return; }
       const record = await prisma.folios.create({ data });
@@ -921,6 +1127,7 @@ export class GuestController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
+        table: TABLES.guestDocument,
         permission: getPermissionFlags(req.user, 84),
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -1249,6 +1456,32 @@ export class GuestController {
   /**
    * Format guest data to match Laravel formatData()
    */
+  /**
+   * Shape the pivot-backed ids as `{ value, label }`.
+   *
+   * `guest_title` and `guest_status` live in `model_has_types`, not as columns,
+   * so `formatGuest` can only return the raw id. Selects on the client expect
+   * `{ value, label }` — GET edit builds them here too, and without this the
+   * reservation form's Guest Status select goes blank right after a quick save.
+   */
+  private static relationOptions(guest: any): Record<string, { value: any; label: string } | null> {
+    const types: any[] = Array.isArray(guest?.types) ? guest.types : [];
+    const pick = (group: string) => {
+      const hit = types.find((t: any) => t?.group === group);
+      return hit ? { value: Number(hit.id), label: hit.name } : null;
+    };
+    // These two are stored as columns and keep their native type — card_type
+    // and gender are strings ('NRIC', 'Male'), not ids.
+    const plain = (v: any) => (v !== null && v !== undefined ? { value: v, label: String(v) } : null);
+    return {
+      guest_title: pick('guest-title'),
+      guest_status: pick('guest-status'),
+      card_type: plain(guest?.card_type),
+      gender: plain(guest?.gender),
+      region: plain(guest?.region),
+    };
+  }
+
   private static formatGuest(guest: any, nationalityMap?: Map<any, any>, typesMap?: Map<any, any>, foliosMap?: Map<any, any>): any {
     // If guest already has relations from getGuestWithRelations
     const nationality = guest.nationality || (guest.nationality_id && nationalityMap ? nationalityMap.get(guest.nationality_id) : null);
@@ -1281,6 +1514,9 @@ export class GuestController {
       car_reg_number: guest.car_reg_number,
       guest_status: guest.guest_status !== null && guest.guest_status !== undefined ? Number(guest.guest_status) : null,
       guest_title: guest.guest_title !== null && guest.guest_title !== undefined ? Number(guest.guest_title) : null,
+      // `status_profile` is the guest-status column; surface it under the name
+      // the reference uses so the list/search columns keep working.
+      status_profile: guest.status_profile !== null && guest.status_profile !== undefined ? Number(guest.status_profile) : null,
       status: guest.status !== null && guest.status !== undefined ? Number(guest.status) : null,
       image: guest.image,
       property_id: guest.property_id !== null && guest.property_id !== undefined ? Number(guest.property_id) : null,
@@ -1571,7 +1807,7 @@ export class GuestController {
       const searchValue = String(req.query.search_value ?? '');
       const where: any = { guest_profile_id: BigInt(guestId), property_id: pid, deleted_at: null };
       if (searchField && searchValue && ['relationship', 'status'].includes(searchField)) {
-        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+        pushCondition(where, searchPredicate('guest_profile_family_members', searchField, searchValue));
       }
       const [data, total] = await Promise.all([
         prisma.guest_profile_family_members.findMany({ where, orderBy: { updated_at: 'desc' }, skip: (page - 1) * limit, take: limit }),

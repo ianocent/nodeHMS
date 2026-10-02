@@ -70,6 +70,22 @@ export const IS_TAX_EXCLUDE_RESTAURANTS: OptionItem[] = [
   { value: false, label: 'No' },
 ];
 
+/**
+ * Marker written into `transactions.reference` for a deposit leg:
+ * `DEPOSIT:<deposit_payments.id>`.
+ *
+ * A deposit spans two tables — the header row lives in `deposit_payments`, but
+ * the money has to exist as a folio transaction or it never nets against the
+ * balance. This marker is the only link between them, so update/delete stay in
+ * sync and the balance can tell a linked deposit from a legacy orphan instead
+ * of counting it twice.
+ *
+ * Lives here rather than on a controller so `front-desk.controller` can read it
+ * without importing `front-desk-extras.controller` (which would open a second
+ * connection pool just for a string).
+ */
+export const DEPOSIT_REFERENCE_PREFIX = 'DEPOSIT:';
+
 export const DASHBOARDS: OptionItem[] = [
   { value: 'total_room', label: 'Total Room' },
   { value: 'chart_room', label: 'Chart Room' },

@@ -134,6 +134,10 @@ router.delete('/profile/guest-family-member/:id', authMiddleware, requirePermiss
 router.get('/profile/guest-folio', authMiddleware, requirePermission(82, 'view'), GuestController.folioList);
 router.post('/profile/guest-folio', authMiddleware, requirePermission(82, 'add'), GuestController.folioStore);
 router.delete('/profile/guest-folio/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.folioDestroy);
+
+router.get('/profile/guest-reservation', authMiddleware, requirePermission(82, 'view'), GuestController.folioList);
+router.post('/profile/guest-reservation', authMiddleware, requirePermission(82, 'add'), GuestController.folioStore);
+router.delete('/profile/guest-reservation/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.folioDestroy);
 router.get('/profile/guest-document', authMiddleware, requirePermission(82, 'view'), (req, res) => { guestIdFromQuery(req); GuestController.documentList(req, res); });
 router.post('/profile/guest-document', authMiddleware, requirePermission(82, 'add'), (req, res) => { guestIdFromQuery(req); GuestController.documentStore(req, res); });
 router.delete('/profile/guest-document/:id', authMiddleware, requirePermission(82, 'delete'), GuestController.documentDestroy);

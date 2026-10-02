@@ -1,25 +1,20 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error } from '../utils/response';
-import { AuthController } from './auth.controller';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import {
-  ROOM_STATUSES,
-  MAID_STATUSES,
-  STATUS_RESERVATION_MAP,
-  getColorRoom,
-  getColorMaid,
-  getColorReservation,
-  dashLabel,
+    MAID_STATUSES,
+    ROOM_STATUSES,
+    STATUS_RESERVATION_MAP,
+    dashLabel,
+    getColorMaid,
+    getColorReservation,
+    getColorRoom,
 } from '../utils/cmsStatus';
-import { laravelPaging } from '../utils/tableMeta';
 import { priceNight } from '../utils/reservationPricing';
+import { error, success } from '../utils/response';
+import { laravelPaging } from '../utils/tableMeta';
+import { AuthController } from './auth.controller';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // saveReservation-lite for drag rebuild — priced per-night row creation against an arbitrary tx client.
 async function priceNightPublic(tx: any, opts: {
@@ -580,12 +575,12 @@ export class StatisticController {
           orderBy: { name: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: 1, group: 'room-configuration' },
+          where: { deleted_at: null, status: 1, group: 'room-configuration', ...(pid ? { property_id: pid } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: 1, group: 'room-type-grouping' },
+          where: { deleted_at: null, status: 1, group: 'room-type-grouping', ...(pid ? { property_id: pid } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
@@ -632,7 +627,7 @@ export class StatisticController {
         days.push(d.toISOString().split('T')[0]);
       }
 
-      // â”€â”€ Table (Laravel statisticsRoomType parity) â”€â”€
+      //  Table (Laravel statisticsRoomType parity) 
       const doubleClick = [
         {
           id: 0, type: 'form', key: 'daily_rate_code', label: 'Daily Rate Code',
@@ -662,7 +657,7 @@ export class StatisticController {
         });
       }
 
-      // â”€â”€ Data sources â”€â”€
+      //  Data sources 
       const [roomTypes, messages, rateCodes, overbookingRows, availRows, workOrderRows, reservationRows] = await Promise.all([
         prisma.room_types.findMany({ where: { property_id: Number(pid) }, orderBy: { sort: 'asc' } }),
         prisma.statistic_messages.findMany({ where: { property_id: Number(pid), date: { gte: start, lte: end } } }),
@@ -715,7 +710,7 @@ export class StatisticController {
         soldByDate.set(key, c);
       }
 
-      // â”€â”€ Rows â”€â”€
+      //  Rows 
       const data: any[] = [];
       const push = (row: any) => data.push({ id: 0, name: '', total: '', ...row });
 

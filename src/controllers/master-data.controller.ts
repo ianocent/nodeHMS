@@ -1,15 +1,12 @@
+import { prisma } from '../config/prisma';
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES, STATUS_OPTIONS, laravelPaging, listPermission } from '../utils/tableMeta';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { dataSearch, applySearchField } from '../utils/search';
+import { activeWhere, applyStatusScope, currentPropertyId } from '../utils/querySafety';
+import { uniqueExtendError } from '../utils/uniqueExtend';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -128,9 +125,9 @@ export class MasterDataController {
       const master: Record<string, any> = {};
       try {
         const [codePosts, codeBillings, codeGls] = await Promise.all([
-          prisma.code_posts.findMany({ where: { deleted_at: null }, select: { id: true, name: true, type: true }, orderBy: { name: 'asc' } }),
-          prisma.code_billings.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
-          prisma.code_gls.findMany({ where: { deleted_at: null }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+          prisma.code_posts.findMany({ where: activeWhere('code_posts', {}, req.user?.lastProperty), select: { id: true, name: true, type: true }, orderBy: { name: 'asc' } }),
+          prisma.code_billings.findMany({ where: activeWhere('code_billings', {}, req.user?.lastProperty), select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+          prisma.code_gls.findMany({ where: activeWhere('code_gls', {}, req.user?.lastProperty), select: { id: true, name: true }, orderBy: { name: 'asc' } }),
         ]);
         master.code_posts = codePosts.map(c => ({ value: Number(c.id), label: `${c.name}${c.type ? ` (${c.type})` : ''}` }));
         master.code_billings = codeBillings.map(c => ({ value: Number(c.id), label: c.name }));
@@ -157,10 +154,11 @@ export class MasterDataController {
       const limit = parseInt(req.query.limit as string) || 10;
 
       const where: any = { property_id: pid, deleted_at: null };
+      applyStatusScope(where, req, 'code_posts');
 
       const [codeBillings, codeGls] = await Promise.all([
-        prisma.code_billings.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
-        prisma.code_gls.findMany({ where: { property_id: pid, deleted_at: null }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+        prisma.code_billings.findMany({ where: activeWhere('code_billings', { property_id: pid }, pid), select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+        prisma.code_gls.findMany({ where: activeWhere('code_gls', { property_id: pid }, pid), select: { id: true, name: true }, orderBy: { id: 'asc' } }),
       ]);
 
       const billingOptions = codeBillings.map((c: any) => ({ value: Number(c.id), label: c.name }));
@@ -216,7 +214,7 @@ export class MasterDataController {
         { label: 'GL Description', key: 'code_gl_description', type: 'none', is_search: false },
       ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'code_posts');
 
       const [data, total] = await Promise.all([
         prisma.code_posts.findMany({
@@ -278,6 +276,16 @@ export class MasterDataController {
 
       if (!name) { badRequest(res, 'name is required'); return; }
 
+      // Laravel CodePostController@store:134 unique_extend (soft-delete aware). The
+      // update path already enforced this property-scoped; the create path did not,
+      // which is how duplicate code posts could slip in. Property-scoped because the
+      // table is multi-tenant (151 distinct names, 39 duplicated globally, 0 within a
+      // property in this dataset).
+      const dupName = await uniqueExtendError(prisma, 'code_posts', 'name', 'name', name, null, {
+        property_id: pid,
+      });
+      if (dupName) { badRequest(res, dupName); return; }
+
       const result = await prisma.code_posts.create({
         data: {
           property_id: pid,
@@ -311,8 +319,8 @@ export class MasterDataController {
 
   private static async codePostMaster(pid?: bigint) {
     const [codeBillings, codeGls] = await Promise.all([
-      prisma.code_billings.findMany({ select: { id: true, name: true }, orderBy: { id: 'asc' } }),
-      prisma.code_gls.findMany({ select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+      prisma.code_billings.findMany({ where: activeWhere('code_billings', {}, pid ?? null), select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+      prisma.code_gls.findMany({ where: activeWhere('code_gls', {}, pid ?? null), select: { id: true, name: true }, orderBy: { id: 'asc' } }),
     ]);
     return {
       statuses: STATUS_OPTIONS,
@@ -556,6 +564,7 @@ export class MasterDataController {
       const codePostId = String(req.query.code_post_id ?? '');
       const search = String(req.query.search ?? '');
       const where: any = { deleted_at: null, status: 1 };
+      applyStatusScope(where, req, 'type_payments');
       if (/^\d+$/.test(codePostId)) where.code_post_id = BigInt(codePostId);
       if (search) where.name = { contains: search, mode: 'insensitive' };
       const items = await prisma.code_items.findMany({ where, orderBy: { name: 'asc' } });
@@ -573,6 +582,7 @@ export class MasterDataController {
       const limit = parseInt(req.query.limit as string) || 10;
 
       const where: any = { property_id: pid, deleted_at: null };
+      applyStatusScope(where, req, 'code_items');
 
       const [data, total, codePosts] = await Promise.all([
         prisma.code_items.findMany({
@@ -624,6 +634,13 @@ export class MasterDataController {
       if (!name) { badRequest(res, 'name is required'); return; }
       if (!process_on) { badRequest(res, 'process_on is required'); return; }
       if (!calculator) { badRequest(res, 'calculator is required'); return; }
+
+      // Laravel CodeItemController@store:150 unique_extend (soft-delete aware).
+      // Property-scoped: code_items is multi-tenant, same reason as code_billings.
+      const dupName = await uniqueExtendError(prisma, 'code_items', 'name', 'name', name, null, {
+        property_id: pid,
+      });
+      if (dupName) { badRequest(res, dupName); return; }
 
       const result = await prisma.code_items.create({
         data: {
@@ -693,6 +710,14 @@ export class MasterDataController {
       const existing = await prisma.code_items.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Code item not found'); return; }
 
+      // Laravel CodeItemController@update:262 (own id excluded).
+      if (name !== undefined) {
+        const dupName = await uniqueExtendError(prisma, 'code_items', 'name', 'name', name, id, {
+          property_id: existing.property_id,
+        });
+        if (dupName) { badRequest(res, dupName); return; }
+      }
+
       const data: any = { updated_at: new Date() };
       if (code_post_id) data.code_post_id = BigInt(code_post_id);
       if (name !== undefined) data.name = name;
@@ -733,6 +758,7 @@ export class MasterDataController {
       const limit = parseInt(req.query.limit as string) || 10;
 
       const where: any = { property_id: pid, deleted_at: null };
+      applyStatusScope(where, req, 'code_billings');
 
       const [data, total] = await Promise.all([
         prisma.code_billings.findMany({
@@ -762,6 +788,17 @@ export class MasterDataController {
       const { name, description, isPOS, sort, status } = req.body;
 
       if (!name) { badRequest(res, 'name is required'); return; }
+
+      // Laravel CodeBillingController@store:96 declares
+      // 'unique_extend:code_billings,name,NULL,id,deleted_at,NULL' — soft-delete aware.
+      // Scoped to property here rather than taken literally: code_billings is a
+      // multi-tenant table (every property keeps its own "PAYMENT" / "ROOM REVENUE"
+      // rows), and this dataset has 7 name groups duplicated globally while having
+      // zero duplicates within a property. A global check would reject valid rows.
+      const dupName = await uniqueExtendError(prisma, 'code_billings', 'name', 'name', name, null, {
+        property_id: pid,
+      });
+      if (dupName) { badRequest(res, dupName); return; }
 
       const result = await prisma.code_billings.create({
         data: {
@@ -813,6 +850,15 @@ export class MasterDataController {
       const existing = await prisma.code_billings.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Code billing not found'); return; }
 
+      // Laravel CodeBillingController@update:189 (own id excluded). Property-scoped for
+      // the same multi-tenant reason as the create path above.
+      if (name !== undefined) {
+        const dupName = await uniqueExtendError(prisma, 'code_billings', 'name', 'name', name, id, {
+          property_id: existing.property_id,
+        });
+        if (dupName) { badRequest(res, dupName); return; }
+      }
+
       const data: any = { updated_at: new Date() };
       if (name !== undefined) data.name = name;
       if (description !== undefined) data.description = description;
@@ -846,6 +892,7 @@ export class MasterDataController {
       const limit = parseInt(req.query.limit as string) || 10;
 
       const where: any = { property_id: pid, deleted_at: null };
+      applyStatusScope(where, req, 'code_gls');
 
       const [data, total] = await Promise.all([
         prisma.code_gls.findMany({
@@ -1013,6 +1060,7 @@ export class MasterDataController {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const { page, limit, search } = parsePagination(req.query);
       const where: any = { property_id: pid, deleted_at: null };
+      applyStatusScope(where, req, 'type_payments');
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       const [data, total, codePosts, companies] = await Promise.all([
@@ -1024,8 +1072,8 @@ export class MasterDataController {
           include: { code_posts: { select: { id: true, name: true } } },
         }),
         prisma.type_payments.count({ where }),
-        prisma.code_posts.findMany({ where: { property_id: pid, deleted_at: null, type: 'IS_PAYMENT' }, select: { id: true, name: true }, orderBy: { id: 'asc' } }),
-        prisma.companies.findMany({ where: { deleted_at: null }, select: { id: true, name: true } }),
+        prisma.code_posts.findMany({ where: activeWhere('code_posts', { property_id: pid, type: 'IS_PAYMENT' }, pid), select: { id: true, name: true }, orderBy: { id: 'asc' } }),
+        prisma.companies.findMany({ where: activeWhere('companies'), select: { id: true, name: true } }),
       ]);
 
       const companyMap = new Map(companies.map((c: any) => [Number(c.id), c.name]));
@@ -1066,6 +1114,17 @@ export class MasterDataController {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0); const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status, company_id, is_company_ar, is_payment_ar, card_no, card_name, voucher } = req.body;
       if (!name) { badRequest(res, 'name required'); return; }
+
+      // Payment Type was the only one of these master lists with no uniqueness
+      // guard at all, so the same "Cash FO" could be saved any number of times —
+      // and duplicate ids then leaked into accounting/payment dropdowns.
+      // Soft-delete aware + property-scoped, matching code_billings / code_posts
+      // / code_items / room_types / rooms.
+      const dupName = await uniqueExtendError(prisma, 'type_payments', 'name', 'name', name, null, {
+        property_id: pid,
+      });
+      if (dupName) { badRequest(res, dupName); return; }
+
       const d = await prisma.type_payments.create({ data: { property_id: pid, code_post_id: BigInt(code_post_id), code_billing_id: code_billing_id ? BigInt(code_billing_id) : null, name, pos: num(pos), front_office: num(front_office), surcharge_type: num(surcharge_type), surcharge: num(surcharge), status: num(status, 1), company_id: company_id != null ? Number(company_id) : null, is_company_ar: bool(is_company_ar), is_payment_ar: bool(is_payment_ar), card_no: bool(card_no), card_name: bool(card_name), voucher: bool(voucher), created_at: new Date(), updated_at: new Date() } });
       success(res, bigintToNumber(d), 'Created');
     } catch (err: any) { error(res, 'Failed to create', 500); }
@@ -1076,8 +1135,15 @@ export class MasterDataController {
       if (!existing) { notFound(res); return; }
       const { code_post_id, code_billing_id, name, pos, front_office, surcharge_type, surcharge, status, company_id, is_company_ar, is_payment_ar, card_no, card_name, voucher } = req.body;
       const data: any = { updated_at: new Date() };
+      // Exclude this row so saving without a rename still passes.
+      if (name !== undefined) {
+        const pid = BigInt(req.user?.lastProperty ?? 0);
+        const dupName = await uniqueExtendError(prisma, 'type_payments', 'name', 'name', name, id, { property_id: pid });
+        if (dupName) { badRequest(res, dupName); return; }
+        data.name = name;
+      }
       if (code_post_id !== undefined) data.code_post_id = BigInt(code_post_id); if (code_billing_id !== undefined) data.code_billing_id = code_billing_id ? BigInt(code_billing_id) : null;
-      if (name !== undefined) data.name = name; if (pos !== undefined) data.pos = num(pos); if (front_office !== undefined) data.front_office = num(front_office);
+      if (pos !== undefined) data.pos = num(pos); if (front_office !== undefined) data.front_office = num(front_office);
       if (surcharge_type !== undefined) data.surcharge_type = num(surcharge_type); if (surcharge !== undefined) data.surcharge = num(surcharge); if (status !== undefined) data.status = num(status);
       if (company_id !== undefined) data.company_id = company_id != null ? Number(company_id) : null;
       if (is_company_ar !== undefined) data.is_company_ar = bool(is_company_ar);
@@ -1099,6 +1165,7 @@ export class MasterDataController {
     try {
       const { page, limit, search } = parsePagination(req.query);
       const where: any = {};
+      applyStatusScope(where, req, 'countries');
       if (search) where.name = { contains: search, mode: 'insensitive' };
       const [data, total] = await Promise.all([
         prisma.countries.findMany({ where, orderBy: { name: 'asc' }, skip: (page - 1) * limit, take: limit }),
@@ -1125,6 +1192,7 @@ export class MasterDataController {
     try {
       const { page, limit, search } = parsePagination(req.query);
       const where: any = {};
+      applyStatusScope(where, req, 'cities');
       if (search) where.name = { contains: search, mode: 'insensitive' };
       const [data, total] = await Promise.all([
         prisma.cities.findMany({ where, orderBy: { name: 'asc' }, skip: (page - 1) * limit, take: limit, include: { countries: { select: { id: true, name: true } } } }),

@@ -1,17 +1,11 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
-import { getPermissionFlags } from '../middleware/permission.middleware';
-import { dataSearch, applySearchField } from '../utils/search';
-import { getStatusLabel } from '../utils/cmsConfig';
 import { enqueueJob } from '../config/queue';
-import { processSyncStaahAvailability } from '../queue/jobs/syncStaahAvailability';
+import { getPermissionFlags } from '../middleware/permission.middleware';
+import { badRequest, error, notFound, success, validationError } from '../utils/response';
+import { applySearchField, dataSearch } from '../utils/search';
+import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const STATUS_ACTIVE = 1;
 const MODULE_BAR = 'bar';
@@ -38,6 +32,22 @@ function gridFieldLabel(field: string): string {
 
 function gridFieldType(field: string): string {
   return GRID_FIELD_TYPES[field] ?? 'number';
+}
+
+/**
+ * Truthiness test for the `days_<n>` / `room_type_<id>` / `fields_<code>` grid
+ * pickers.
+ *
+ * Laravel reads them with `Collection::srcstr($prefix)` (AppServiceProvider),
+ * which keeps ANY truthy value. The grid pages send them as real JSON booleans
+ * (`{ ["fields_one_adult"]: true }` in rate-bar/rate-rate forms), so a strict
+ * `=== '1' || === 'true'` string compare silently dropped every selection and
+ * the grid fell back to its unfiltered defaults.
+ */
+function isGridFlagSet(value: any): boolean {
+  if (Array.isArray(value)) return isGridFlagSet(value[0]);
+  if (typeof value === 'string') return value === '1' || value === 'true';
+  return value === true || value === 1;
 }
 
 // parity RateRateController@index table: Dates row + room-type header (row 1, colspan=fields)
@@ -256,10 +266,16 @@ function getDatesInRange(start: Date, end: Date): Date[] {
 }
 
 // Laravel BarRate/RateRate store/index parse flat checkbox keys: days_*, room_type_*, fields_*
+/**
+ * Laravel `Collection::srcstr($prefix)` (AppServiceProvider:390-396) keeps the keys
+ * that start with `$prefix` **and whose value is truthy**, then strips the prefix.
+ * Key-name matching alone would treat an unchecked picker as selected, so the grid
+ * store/apply would write more room types, dates and fields than the user picked.
+ */
 function getPrefixedKeys(obj: any, prefix: string): string[] {
   if (!obj || typeof obj !== 'object') return [];
   return Object.keys(obj)
-    .filter((k) => k.startsWith(prefix))
+    .filter((k) => k.startsWith(prefix) && isGridFlagSet(obj[k]))
     .map((k) => k.slice(prefix.length))
     .filter((v) => v !== '');
 }
@@ -287,9 +303,9 @@ function getDayName(date: Date): string {
 }
 
 export class RateController {
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async list(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -301,6 +317,7 @@ export class RateController {
 
       const trash = req.query.trash === '1' || req.query.trash === 'true';
       const where: any = { deleted_at: trash ? { not: null } : null, module: 'rate' };
+      applyStatusScope(where, req, 'rates');
 
       if (propertyId) where.property_id = propertyId;
       if (search) {
@@ -310,8 +327,12 @@ export class RateController {
         ];
       }
 
-const allCodePosts = await prisma.code_posts.findMany({
-        where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
+      const allCodePosts = await prisma.code_posts.findMany({
+        // type DEFAULT only - Laravel RateController@index:62 uses
+        // `CodePost::onlyActive()->where('type','DEFAULT')`. Without the filter the
+        // Postcode dropdown also listed payment methods (property 999 has 45 DEFAULT +
+        // 24 IS_PAYMENT rows, so "BANK TRANSFER" / "cash" / "cityledger" showed up).
+        where: { deleted_at: null, status: STATUS_ACTIVE, type: 'DEFAULT', ...(propertyId ? { property_id: propertyId } : {}) },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });
@@ -339,7 +360,7 @@ const allCodePosts = await prisma.code_posts.findMany({
         { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', options: codePostOptions, is_search: true },
       ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'rates');
 
       // Laravel RateController@index rate_id branch (:68-127): exclude the queried
       // rate and prepend a synthetic BAR row (id 0) built from the first active bar.
@@ -351,7 +372,7 @@ const allCodePosts = await prisma.code_posts.findMany({
       const [rates, total] = await Promise.all([
         prisma.rates.findMany({
           where,
-          orderBy: { [sort]: order },
+          orderBy: safeOrderBy('rates', sort, { id: order }),
           skip: (page - 1) * limit,
           take: limit,
         }),
@@ -443,7 +464,7 @@ const allCodePosts = await prisma.code_posts.findMany({
           label: codePostById.get(r.code_post_extra_bed_id) || '',
         },
         sort: r.sort,
-        status: getStatusLabel(r.status),
+        status: r.status ?? 0, // raw 0/1 → success() converts to boolean for checkbox
         created_at: r.created_at,
         updated_at: r.updated_at,
         is_view: permFlags.view,
@@ -467,7 +488,7 @@ const allCodePosts = await prisma.code_posts.findMany({
             ...syntheticBar,
             start_date: syntheticBar.start_date ? formatDate(syntheticBar.start_date) : null,
             end_date: syntheticBar.end_date ? formatDate(syntheticBar.end_date) : null,
-            status: getStatusLabel(STATUS_ACTIVE),
+            status: STATUS_ACTIVE, // raw 1 → success() converts to boolean
             is_view: permFlags.view,
             is_edit: permFlags.edit,
             is_need_approval: false,
@@ -495,9 +516,9 @@ const allCodePosts = await prisma.code_posts.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates/create
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async create(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -509,11 +530,13 @@ const allCodePosts = await prisma.code_posts.findMany({
           orderBy: { name: 'asc' },
         }),
         prisma.code_posts.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
+          // DEFAULT only - this feeds the "Post Code" and "Post Code Extra Bed" selects
+          // in the rate form, neither of which is a payment/posting field.
+          where: { deleted_at: null, status: STATUS_ACTIVE, type: 'DEFAULT', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
-prisma.types.findMany({
+        prisma.types.findMany({
           where: { deleted_at: null, status: STATUS_ACTIVE, group: 'company-type', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
@@ -543,14 +566,14 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/rates
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
-      const { name, code, start_date, end_date, code_post_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, status } = req.body;
+      const { name, code, start_date, end_date, code_post_id, code_post_extra_bed_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, company_type, status } = req.body;
 
       const errors: Record<string, string[]> = {};
       if (!name) errors.name = ['The name field is required.'];
@@ -579,6 +602,7 @@ prisma.types.findMany({
         data: {
           property_id: propertyId!,
           code_post_id: BigInt(code_post_id),
+          code_post_extra_bed_id: code_post_extra_bed_id ? BigInt(code_post_extra_bed_id) : null,
           name,
           code,
           start_date: new Date(start_date),
@@ -586,7 +610,7 @@ prisma.types.findMany({
           description: description || null,
           rate_type: rate_type || null,
           term_condition: term_condition || null,
-          cancellation_policy: cancellation_policy || null,
+          cancellation_policy: cancellation_policy ? String(cancellation_policy) : null,
           notes: notes || null,
           online: online ? 1 : 0,
           staah: staah === true || staah === 'true' || staah === 1,
@@ -595,7 +619,7 @@ prisma.types.findMany({
           min_advance_booking: min_advance_booking || 0,
           max_advance_booking: max_advance_booking || 0,
           minimum_rate: minimum_rate || 0,
-grouping: grouping || null,
+          grouping: company_type ? String(company_type) : (grouping ? String(grouping) : null),
           status: status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : (status ?? STATUS_ACTIVE)),
           created_by: userId,
         },
@@ -617,9 +641,9 @@ grouping: grouping || null,
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async show(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -646,7 +670,7 @@ grouping: grouping || null,
       const roomTypeIds = rate.rate_rates.map((rr) => rr.room_type_id);
       const roomTypes = roomTypeIds.length > 0
         ? await prisma.room_types.findMany({
-            where: { id: { in: roomTypeIds }, deleted_at: null },
+            where: { id: { in: roomTypeIds }, deleted_at: null, status: 1 },
             select: { id: true, name: true },
           })
         : [];
@@ -675,9 +699,9 @@ const result = {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates/:id/edit
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
 static async edit(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -695,7 +719,8 @@ prisma.room_types.findMany({
           orderBy: { name: 'asc' },
         }),
         prisma.code_posts.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: propertyId } : {}) },
+          // DEFAULT only - same reason as the create-form master above.
+          where: { deleted_at: null, status: STATUS_ACTIVE, type: 'DEFAULT', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -727,20 +752,25 @@ prisma.types.findMany({
         fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
       };
 
+      const cpExtra = codePosts.find((c: any) => c.id === rate.code_post_extra_bed_id);
+      const grp = companyTypes.find((c: any) => c.id.toString() === rate.grouping || c.name === rate.grouping);
+
       const result = {
         ...rate,
         id: Number(rate.id),
         property_id: Number(rate.property_id),
-        code_post_id: Number(rate.code_post_id),
-        code_post_extra_bed_id: rate.code_post_extra_bed_id ? Number(rate.code_post_extra_bed_id) : null,
+        code_post_id: rate.code_posts ? { value: Number(rate.code_posts.id), label: rate.code_posts.name } : null,
+        code_post_extra_bed_id: cpExtra ? { value: Number(cpExtra.id), label: cpExtra.name } : null,
+        company_type: grp ? { value: Number(grp.id), label: grp.name } : null,
         minimum_rate: Number(rate.minimum_rate),
         start_date: rate.start_date ? formatDate(rate.start_date) : null,
         end_date: rate.end_date ? formatDate(rate.end_date) : null,
         created_by: rate.created_by ? Number(rate.created_by) : null,
         updated_by: rate.updated_by ? Number(rate.updated_by) : null,
         deleted_by: rate.deleted_by ? Number(rate.deleted_by) : null,
-        code_post: rate.code_posts ? { id: Number(rate.code_posts.id), name: rate.code_posts.name } : null,
+        code_post: undefined,
         code_posts: undefined,
+        grouping: undefined,
       };
 
       success(res, result, 'Success', 200, { master });
@@ -750,9 +780,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /api/rates/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async update(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -765,7 +795,7 @@ prisma.types.findMany({
         return;
       }
 
-      const { name, code, start_date, end_date, code_post_id, code_post_extra_bed_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, status } = req.body;
+      const { name, code, start_date, end_date, code_post_id, code_post_extra_bed_id, description, rate_type, term_condition, cancellation_policy, notes, online, staah, min_advance_booking, max_advance_booking, minimum_rate, grouping, company_type, status } = req.body;
 
       // Laravel RateController@update (:380-541) is a partial PUT: absent optional
       // fields keep their stored values — never wiped to null/0.
@@ -776,7 +806,7 @@ prisma.types.findMany({
       if (description !== undefined) data.description = description || null;
       if (rate_type !== undefined) data.rate_type = rate_type || null;
       if (term_condition !== undefined) data.term_condition = term_condition || null;
-      if (cancellation_policy !== undefined) data.cancellation_policy = cancellation_policy || null;
+      if (cancellation_policy !== undefined) data.cancellation_policy = cancellation_policy ? String(cancellation_policy) : null;
       if (notes !== undefined) data.notes = notes || null;
       if (online !== undefined) data.online = online ? 1 : 0;
       if (staah !== undefined) {
@@ -788,7 +818,11 @@ prisma.types.findMany({
       if (min_advance_booking !== undefined && min_advance_booking !== null && min_advance_booking !== '') data.min_advance_booking = Number(min_advance_booking) || 0;
       if (max_advance_booking !== undefined && max_advance_booking !== null && max_advance_booking !== '') data.max_advance_booking = Number(max_advance_booking) || 0;
       if (minimum_rate !== undefined && minimum_rate !== null && minimum_rate !== '') data.minimum_rate = Number(minimum_rate);
-      if (grouping !== undefined) data.grouping = grouping || null;
+      if (company_type !== undefined) {
+        data.grouping = company_type ? String(company_type) : null;
+      } else if (grouping !== undefined) {
+        data.grouping = grouping ? String(grouping) : null;
+      }
       if (status !== undefined) {
         data.status = status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : existing.status);
       }
@@ -817,9 +851,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // DELETE /api/rates/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async destroy(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -844,9 +878,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/rates/:id/restore
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async restore(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -870,12 +904,23 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates/:rateId/grid
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async rateGrid(req: Request, res: Response): Promise<void> {
     try {
-      const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
+      const rateIdParam = String(
+        (Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId) ??
+          req.query.rate_id ??
+          req.query.id ??
+          ''
+      );
+      // `BigInt()` below throws on undefined/garbage and the catch turns that into
+      // a 500; Laravel just ends up with an empty result set instead.
+      if (!/^\d+$/.test(rateIdParam)) {
+        RateController.emptyGrid(req, res);
+        return;
+      }
       const rateId = BigInt(rateIdParam);
       const propertyId = req.user?.lastProperty;
 
@@ -887,29 +932,23 @@ prisma.types.findMany({
       // Filter params: days_0..days_6, room_type_X, fields_X
       const dayFilter: number[] = [];
       for (let i = 0; i < 7; i++) {
-        if (req.query[`days_${i}`] === '1' || req.query[`days_${i}`] === 'true') {
+        if (isGridFlagSet(req.query[`days_${i}`])) {
           dayFilter.push(i);
         }
       }
 
       const roomTypeFilter: bigint[] = [];
       for (const key of Object.keys(req.query)) {
-        if (key.startsWith('room_type_')) {
-          const val = req.query[key];
-          if (val === '1' || val === 'true') {
-            const rtId = BigInt(key.replace('room_type_', ''));
-            roomTypeFilter.push(rtId);
-          }
+        if (key.startsWith('room_type_') && isGridFlagSet(req.query[key])) {
+          const rtId = key.slice('room_type_'.length);
+          if (/^\d+$/.test(rtId)) roomTypeFilter.push(BigInt(rtId));
         }
       }
 
       const fieldFilter: string[] = [];
       for (const key of Object.keys(req.query)) {
-        if (key.startsWith('fields_')) {
-          const val = req.query[key];
-          if (val === '1' || val === 'true') {
-            fieldFilter.push(key.replace('fields_', ''));
-          }
+        if (key.startsWith('fields_') && isGridFlagSet(req.query[key])) {
+          fieldFilter.push(key.slice('fields_'.length));
         }
       }
 
@@ -976,16 +1015,24 @@ prisma.types.findMany({
         filteredDates = allDates.filter((d) => dayFilter.includes(d.getDay()));
       }
 
-      // Get all room types for this property
-      const allRoomTypes = await prisma.room_types.findMany({
-        where: { property_id: propertyId!, deleted_at: null, status: STATUS_ACTIVE },
-        orderBy: { name: 'asc' },
-      });
-
-      let targetRoomTypes = allRoomTypes;
-      if (roomTypeFilter.length > 0) {
-        targetRoomTypes = allRoomTypes.filter((rt) => roomTypeFilter.includes(rt.id));
-      }
+      // Laravel RateRateController@index:79 / BarRateController@index:77 resolve the
+      // grid columns with a bare `RoomType::whereIn('id', $room_types)` — no property
+      // and no status scope. Scoping to the session property here is what made the
+      // grid come back with the Dates column only: the `room_type_*` picks always
+      // win in Laravel, so a wrong/missing `lastProperty` cannot empty the grid.
+      const allRoomTypes = roomTypeFilter.length
+        ? await prisma.room_types.findMany({
+            where: { id: { in: roomTypeFilter } },
+            orderBy: { name: 'asc' },
+          })
+        : await prisma.room_types.findMany({
+            where: {
+              property_id: propertyId!,
+              deleted_at: null,
+              status: STATUS_ACTIVE,
+            },
+            orderBy: { name: 'asc' },
+          });
 
       const selectedFields = fieldFilter.length > 0 ? fieldFilter : GRID_FIELDS;
 
@@ -994,7 +1041,7 @@ prisma.types.findMany({
       const paginatedDates = filteredDates.slice((page - 1) * limit, page * limit);
 
       // Query rate_rates for these dates + room types
-      const roomTypeIds = targetRoomTypes.map((rt) => rt.id);
+      const roomTypeIds = allRoomTypes.map((rt) => rt.id);
       const dateStrs = paginatedDates.map((d) => new Date(formatDate(d)));
 
       const whereRateRates: any = {
@@ -1020,7 +1067,7 @@ prisma.types.findMany({
           day_name: getDayName(date),
         };
 
-        for (const rt of targetRoomTypes) {
+        for (const rt of allRoomTypes) {
           for (const field of selectedFields) {
             const colKey = `${Number(rt.id)}_${field}`;
             const match = rateRates.find(
@@ -1041,14 +1088,24 @@ prisma.types.findMany({
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
       const permission = {
-        view: true,
-        add: req.user?.superUser || permFlags.add,
-        edit: req.user?.superUser || permFlags.edit,
-        delete: req.user?.superUser || permFlags.delete,
+        view: 1,
+        add: req.user?.superUser || permFlags.add ? 1 : 0,
+        edit: req.user?.superUser || permFlags.edit ? 1 : 0,
+        delete: req.user?.superUser || permFlags.delete ? 1 : 0,
       };
 
       const master = {
-        room_types: targetRoomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name, min_rate: Number(rt.min_rate) })),
+        // Laravel :145-152 builds the master room type list from `onlyActive()` +
+        // `not like '%virtual%'`, independent of the grid's own picks.
+        room_types: (await prisma.room_types.findMany({
+          where: {
+            property_id: propertyId!,
+            deleted_at: null,
+            status: STATUS_ACTIVE,
+            NOT: { name: { contains: 'virtual' } },
+          },
+          orderBy: { name: 'asc' },
+        })).map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
         fields: GRID_FIELDS.map((f) => ({ value: f, label: gridFieldLabel(f) })),
       };
@@ -1056,7 +1113,7 @@ prisma.types.findMany({
       success(res, rows, 'Success', 200, {
         permission,
         master,
-        table: buildGridTable(targetRoomTypes, selectedFields),
+        table: buildGridTable(allRoomTypes, selectedFields),
         pagination: {
           current_page: page,
           last_page: Math.ceil(totalDates / limit),
@@ -1072,9 +1129,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/rates/:rateId/grid
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async rateGridStore(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -1096,20 +1153,16 @@ prisma.types.findMany({
       // Parse day/roomType/field filters from request
       const dayFilter: number[] = [];
       for (let i = 0; i < 7; i++) {
-        if (req.body[`days_${i}`] === 1 || req.body[`days_${i}`] === '1' || req.body[`days_${i}`] === true) {
+        if (isGridFlagSet(req.body[`days_${i}`])) {
           dayFilter.push(i);
         }
       }
 
       const roomTypeFilter: bigint[] = [];
       for (const key of Object.keys(req.body)) {
-        if (key.startsWith('room_type_')) {
-          const val = req.body[key];
-          if (val === 1 || val === '1' || val === true) {
-            const rtId = BigInt(key.replace('room_type_', ''));
-            roomTypeFilter.push(rtId);
-          }
-        }
+        if (!key.startsWith('room_type_') || !isGridFlagSet(req.body[key])) continue;
+        const rtId = key.slice('room_type_'.length);
+        if (/^\d+$/.test(rtId)) roomTypeFilter.push(BigInt(rtId));
       }
 
       // Filter dates by day
@@ -1227,9 +1280,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /api/rates/:rateId/grid
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async rateGridUpdate(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -1284,6 +1337,39 @@ prisma.types.findMany({
         return;
       }
 
+      // Laravel BarRateController@update (:429-444) / RateRateController@update
+      // refuse the write when a rate drops below its room type's `min_rate`, and
+      // answer with `code: 200, isMinimum: true` so the form can highlight the
+      // offending cell. Only the numeric fields are compared — base also runs the
+      // comparison over the stop_* checkbox columns, where `(float) true === 1`
+      // trips the guard on any room type whose min_rate exceeds 1.
+      if (!req.body.isMinimum) {
+        const rtIds = [...fieldsByRoomType.keys()];
+        const minRates = rtIds.length
+          ? await prisma.room_types.findMany({
+              where: { id: { in: rtIds.map((n) => BigInt(n)) } },
+              select: { id: true, min_rate: true },
+            })
+          : [];
+        const minByRoomType = new Map<number, number>(
+          minRates.map((rt: any) => [Number(rt.id), Number(rt.min_rate ?? 0)])
+        );
+        for (const [rtId, fields] of fieldsByRoomType) {
+          const min = minByRoomType.get(rtId) ?? 0;
+          for (const field of Object.keys(fields)) {
+            if (gridFieldType(field) === 'checkbox') continue;
+            if (min > Number(fields[field])) {
+              success(res, { isMinimum: true }, 'Success', 200);
+              return;
+            }
+          }
+        }
+      }
+      if (req.body.isMinimum) {
+        badRequest(res, 'Please check minimum rate');
+        return;
+      }
+
       for (const [rtId, fields] of fieldsByRoomType) {
         const updateData: any = {
           property_id: propertyId!,
@@ -1324,9 +1410,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates/:rateId/restrictions
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async rateGridRestriction(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -1425,9 +1511,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/rates/:rateId/restrictions
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async rateGridRestrictionStore(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -1512,9 +1598,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/bar-rates
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // Grid responses must always carry `permission` + `table`, otherwise table-edit
   // never sets isedit and renders no columns.
   static emptyGrid(req: Request, res: Response): void {
@@ -1529,10 +1615,10 @@ prisma.types.findMany({
   private static barPermission(req: Request) {
     const permFlags = getPermissionFlags(req.user, MENU_ID_BAR);
     return {
-      view: true,
-      add: req.user?.superUser || permFlags.add,
-      edit: req.user?.superUser || permFlags.edit,
-      delete: req.user?.superUser || permFlags.delete,
+      view: 1,
+      add: req.user?.superUser || permFlags.add ? 1 : 0,
+      edit: req.user?.superUser || permFlags.edit ? 1 : 0,
+      delete: req.user?.superUser || permFlags.delete ? 1 : 0,
     };
   }
 
@@ -1540,8 +1626,12 @@ prisma.types.findMany({
     try {
       const propertyId = req.user?.lastProperty;
       const rateIdParam = req.query.rate_id as string;
-      const startDateStr = req.query.start_date as string;
-      const endDateStr = req.query.end_date as string;
+      // Laravel BarRateController@index (:35-36) defaults the window to
+      // business_date .. business_date+6 instead of bailing out.
+      const startDateStr = (req.query.start_date as string) || getBusinessDate();
+      const endDateStr =
+        (req.query.end_date as string) ||
+        formatDate(new Date(new Date(startDateStr).getTime() + 6 * 86400000));
 
       if (!rateIdParam || !/^\d+$/.test(rateIdParam)) {
         RateController.emptyGrid(req, res);
@@ -1552,19 +1642,28 @@ prisma.types.findMany({
 
       // Bars live in `rates` with module='bar' (see BarController.list). The legacy
       // `bars` table is empty, so looking there always 404'd and the grid never rendered.
+      //
+      // Do NOT filter on `module` here. barRateCreate resolves the same id without a
+      // module check, so requiring it made the page inconsistent: the date fields
+      // rendered (create succeeded) while the grid 404'd (index rejected the row).
+      // Rows with a legacy/NULL module still belong to the bar the user opened.
       const bar = await prisma.rates.findFirst({
         where: {
           id: rateId,
-          module: MODULE_BAR,
           deleted_at: null,
           ...(propertyId ? { property_id: BigInt(propertyId) } : {}),
         },
-        select: { id: true, name: true },
+        select: { id: true, name: true, module: true },
       });
 
       if (!bar) {
         notFound(res, 'Bar is not found');
         return;
+      }
+      if (bar.module !== MODULE_BAR) {
+        console.warn(
+          `[barRateIndex] rate ${rateId.toString()} has module=${String(bar.module)}, expected "${MODULE_BAR}". Serving grid anyway.`
+        );
       }
 
       // Delegate to rateGrid logic
@@ -1584,24 +1683,86 @@ prisma.types.findMany({
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
 
-      if (!startDateStr || !endDateStr) {
-        RateController.emptyGrid(req, res);
-        return;
-      }
-
       const startDate = new Date(startDateStr);
       const endDate = new Date(endDateStr);
-      const allDates = getDatesInRange(startDate, endDate);
+      // Laravel BarRateController@index (:56-65) walks the window and only keeps
+      // weekdays present in the truthy `days_<n>` params.
+      const dayPicks = new Set<number>();
+      for (const [k, v] of Object.entries(req.query)) {
+        if (!k.startsWith('days_')) continue;
+        if (!isGridFlagSet(v)) continue;
+        const d = k.slice('days_'.length);
+        if (/^\d+$/.test(d)) dayPicks.add(Number(d));
+      }
+      const allDates = getDatesInRange(startDate, endDate).filter((d) => {
+        if (!dayPicks.size) return true;
+        // UTC weekday: formatDate() emits YYYY-MM-DD in UTC and the rows are keyed
+        // on that string, so getDay() (local) would shift the column near midnight.
+        return dayPicks.has(new Date(`${formatDate(d)}T00:00:00Z`).getUTCDay());
+      });
       const totalDates = allDates.length;
       const paginatedDates = allDates.slice((page - 1) * limit, page * limit);
 
-      // Get room types for bar rates
-      const allRoomTypes = await prisma.room_types.findMany({
-        where: { property_id: propertyId!, deleted_at: null, status: STATUS_ACTIVE },
+      // Laravel Collection::srcstr('room_type_') (AppServiceProvider:390) keeps keys
+      // whose value is truthy and strips the prefix -> room type ids.
+      const picked = new Set<bigint>();
+      for (const [k, v] of Object.entries(req.query)) {
+        if (!k.startsWith('room_type_')) continue;
+        if (!isGridFlagSet(v)) continue;
+        const id = k.slice('room_type_'.length);
+        if (/^\d+$/.test(id)) picked.add(BigInt(id));
+      }
+
+      // Grid columns: BarRateController@index:77 uses a bare
+      // `RoomType::whereIn('id', $room_types)` — the picks win and are not scoped
+      // to the session property or to active/virtual, so the grid can never come
+      // back with the Dates column only because of a property mismatch. The
+      // `onlyActive()` + `not like '%virtual%'` filter (:142-144) belongs to the
+      // master list below, not to the columns.
+      const gridRoomTypes = picked.size
+        ? await prisma.room_types.findMany({
+            where: { id: { in: [...picked] } },
+            orderBy: { name: 'asc' },
+          })
+        : await prisma.room_types.findMany({
+            where: {
+              property_id: propertyId!,
+              deleted_at: null,
+              status: STATUS_ACTIVE,
+            },
+            orderBy: { name: 'asc' },
+          });
+
+      // Master list: BarRateController@index:142-152 `RoomType::onlyActive()` +
+      // `where('name','not like','%virtual%')`. Prisma `contains` is
+      // case-sensitive without `mode`, matching Postgres LIKE.
+      const masterRoomTypes = await prisma.room_types.findMany({
+        where: {
+          property_id: propertyId!,
+          deleted_at: null,
+          status: STATUS_ACTIVE,
+          NOT: { name: { contains: 'virtual' } },
+        },
         orderBy: { name: 'asc' },
       });
 
-      const roomTypeIds = allRoomTypes.map((rt) => rt.id);
+      // Laravel BarRateController@index (:125-140) only emits a column when the
+      // field's slug is among the truthy `fields_*` params, and walks
+      // formatTable() order. The bar grid form auto-checks a single field
+      // (one_adult) on load, so honouring the picks is what keeps this grid in
+      // step with the base reference instead of always painting all 9 columns.
+      const pickedFields = new Set<string>();
+      for (const [k, v] of Object.entries(req.query)) {
+        if (!k.startsWith('fields_')) continue;
+        if (!isGridFlagSet(v)) continue;
+        const field = k.slice('fields_'.length);
+        if (field) pickedFields.add(field);
+      }
+      const gridFields = pickedFields.size
+        ? GRID_FIELDS.filter((f) => pickedFields.has(f))
+        : GRID_FIELDS;
+
+      const roomTypeIds = gridRoomTypes.map((rt) => rt.id);
       const dateStrs = paginatedDates.map((d) => new Date(formatDate(d)));
 
       const rateRates = await prisma.rate_rates.findMany({
@@ -1622,8 +1783,8 @@ prisma.types.findMany({
           day_name: getDayName(date),
         };
 
-        for (const rt of allRoomTypes) {
-          for (const field of GRID_FIELDS) {
+        for (const rt of gridRoomTypes) {
+          for (const field of gridFields) {
             const colKey = `${Number(rt.id)}_${field}`;
             const match = rateRates.find(
               (rr) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id
@@ -1643,7 +1804,7 @@ prisma.types.findMany({
       const permission = RateController.barPermission(req);
 
       const master = {
-        room_types: allRoomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name, min_rate: Number(rt.min_rate) })),
+        room_types: masterRoomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name, min_rate: Number(rt.min_rate) })),
         days: DAY_NAMES.map((d, i) => ({ value: i, label: d.charAt(0).toUpperCase() + d.slice(1) })),
         fields: GRID_FIELDS.map((f) => ({ value: f, label: gridFieldLabel(f) })),
         bar_info: {
@@ -1655,7 +1816,7 @@ prisma.types.findMany({
       success(res, rows, 'Success', 200, {
         permission,
         master,
-        table: buildGridTable(allRoomTypes, GRID_FIELDS),
+        table: buildGridTable(gridRoomTypes, gridFields),
         pagination: {
           current_page: page,
           last_page: Math.ceil(totalDates / limit),
@@ -1671,9 +1832,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/bar-rates/create
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async barRateCreate(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -1686,13 +1847,15 @@ prisma.types.findMany({
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
-        prisma.code_posts.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE },
-          select: { id: true, name: true },
-          orderBy: { name: 'asc' },
-        }),
-        prisma.rates.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, module: 'rate' },
+          prisma.code_posts.findMany({
+            // Was unscoped: no property_id and no type filter, so this list mixed every
+            // property's postcodes and payment methods into one dropdown.
+            where: { deleted_at: null, status: STATUS_ACTIVE, type: 'DEFAULT', ...(propertyId ? { property_id: propertyId } : {}) },
+            select: { id: true, name: true },
+            orderBy: { name: 'asc' },
+          }),
+          prisma.rates.findMany({
+            where: { deleted_at: null, status: STATUS_ACTIVE, module: 'rate' },
           select: { id: true, name: true, code: true },
           orderBy: { name: 'asc' },
         }),
@@ -1717,9 +1880,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/bar-rates
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async barRateStore(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -1875,72 +2038,31 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /api/bar-rates
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async barRateUpdate(req: Request, res: Response): Promise<void> {
-    try {
-      const propertyId = req.user?.lastProperty;
-      const userId = req.user?.id;
-
-      const { rate_id, date, room_type_id, ...fields } = req.body;
-
-      if (!rate_id || !date || !room_type_id) {
-        badRequest(res, 'rate_id, date, and room_type_id are required');
-        return;
+    // Laravel BarRateController@update (:414-519) accepts the SAME inline-edit payload
+    // as RateRateController@update: the edited grid row, i.e. `{ date, id, day_name,
+    // "<roomTypeId>_<field>": value, ... }`. The rate id rides along in the query
+    // string as `bar_id` (table-edit builds `uri + "/" + rowId + "?..." + queryString`)
+    // and the room type id is recovered from the column key. Demanding explicit
+    // `rate_id` / `room_type_id` body fields made every bar grid save 400.
+    //
+    // `req.params.id` here is the `rate_rates` row id from the URL, NOT the rate id,
+    // so it must never be used as `rate_id` — Laravel ignores `{bar_rate}` too and
+    // reads `bar_id` from the query string.
+    if (req.body.rate_id === undefined) {
+      const fromQuery = req.query.bar_id ?? req.query.rate_id;
+      if (fromQuery !== undefined && fromQuery !== null && String(fromQuery) !== '') {
+        req.body.rate_id = fromQuery;
       }
-
-      const rateId = BigInt(rate_id);
-      const targetDate = new Date(date);
-      const targetRoomTypeId = BigInt(room_type_id);
-
-      const updateData: any = {
-        property_id: propertyId!,
-        rate_id: rateId,
-        room_type_id: targetRoomTypeId,
-        date: targetDate,
-        updated_by: userId,
-        updated_at: new Date(),
-        status: STATUS_ACTIVE,
-      };
-
-      for (const field of GRID_FIELDS) {
-        if (fields[field] !== undefined) {
-          updateData[field] = fields[field];
-        }
-      }
-
-      await prisma.rate_rates.upsert({
-        where: {
-          rate_rates_rate_id_room_type_id_date_key: {
-            rate_id: rateId,
-            room_type_id: targetRoomTypeId,
-            date: targetDate,
-          },
-        } as any,
-        create: {
-          ...updateData,
-          created_by: userId,
-        },
-        update: updateData,
-      });
-
-      // Laravel BarRateController@update parity: flags + cascade + BE dispatch
-      await resetRateSyncFlags(rateId);
-      const fieldsByRoomType = new Map<number, Record<string, any>>([[Number(targetRoomTypeId), fields]]);
-      await applyLinkedRateCascade(rateId, propertyId!, userId, fieldsByRoomType, [targetDate]);
-      enqueueJob('sync-price-booking-engine', {});
-
-      success(res, null, 'Success');
-    } catch (err: any) {
-      console.error('Bar rate update error:', err);
-      error(res, 'Failed to update bar rate', 500);
     }
+    return RateController.rateGridUpdate(req, res);
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET /api/rates/:rateId/day-uses
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // ─────────────────────────────────────────────
   // RateRateGrid — /rate/rate* (Laravel RateRateController parity, menuId 86)
   // ─────────────────────────────────────────────
@@ -1961,7 +2083,8 @@ prisma.types.findMany({
         orderBy: { name: 'asc' },
       });
       const codePosts = await prisma.code_posts.findMany({
-        where: { deleted_at: null, status: STATUS_ACTIVE },
+        // Was unscoped: no property_id and no type filter.
+        where: { deleted_at: null, status: STATUS_ACTIVE, type: 'DEFAULT', ...(propertyId ? { property_id: propertyId } : {}) },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });
@@ -2152,8 +2275,8 @@ prisma.types.findMany({
 
   static async dayUseList(req: Request, res: Response): Promise<void> {
     try {
-      const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
-      const rateId = rateIdParam ? BigInt(rateIdParam) : undefined;
+      const rateIdParam = String(req.query.rate_id ?? req.query.id ?? req.query.data ?? req.params.rateId ?? '');
+      const rateId = rateIdParam && /^\d+$/.test(rateIdParam) ? BigInt(rateIdParam) : undefined;
       const propertyId = req.user?.lastProperty;
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
@@ -2215,9 +2338,9 @@ prisma.types.findMany({
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/rates/:rateId/day-uses
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async dayUseStore(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -2253,9 +2376,9 @@ time: time || 0,
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /api/day-uses/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async dayUseUpdate(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2285,9 +2408,9 @@ const { name, time, status } = req.body;
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // DELETE /api/day-uses/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async dayUseDestroy(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2312,9 +2435,9 @@ const { name, time, status } = req.body;
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/rates/:rateId/configs
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async configList(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -2378,9 +2501,9 @@ const { name, time, status } = req.body;
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/rates/:rateId/configs
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async configStore(req: Request, res: Response): Promise<void> {
     try {
       const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
@@ -2420,9 +2543,9 @@ const { name, time, status } = req.body;
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /api/rate-configs/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async configUpdate(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2459,9 +2582,9 @@ const { name, description, image, status } = req.body;
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // DELETE /api/rate-configs/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async configDestroy(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2497,6 +2620,10 @@ const { name, description, image, status } = req.body;
     return Math.round((v + a) * 100) / 100;
   }
 
+// Called as `RateController.getRateLinkRows(...)`, never `this.getRateLinkRows(...)`:
+// routes register `RateController.rateLinkListing` as a bare reference, so Express
+// invokes it with `this === undefined` and a `this.` lookup throws
+// `Cannot read properties of undefined (reading 'getRateLinkRows')`.
 private static async getRateLinkRows(rateId: bigint, statusFilter?: string, propertyId?: bigint | number | null): Promise<any[]> {
     const [links, rll] = await Promise.all([
       prisma.model_has_rates.findMany({ where: { model_id: rateId, model_type: 'App\\Models\\Rate' } }),
@@ -2543,17 +2670,11 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
     });
   }
 
-  static async rateLinkListing(req: Request, res: Response): Promise<void> {
-    try {
-      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
-      if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
-      const rateId = BigInt(rateIdRaw);
-const rate = await prisma.rates.findUnique({ where: { id: rateId } });
-      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
-      const rows = await this.getRateLinkRows(rateId, undefined, req.user?.lastProperty);
-      const table = [
-        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
-        { label: 'Amount', key: 'amount', type: 'number', is_search: false },
+  /** Column metadata for the Rate Link grids; `appliedTo` is empty when there are no rows. */
+  private static rateLinkTable(appliedTo: Array<{ value: number; label: string }>) {
+    return [
+      { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+      { label: 'Amount', key: 'amount', type: 'number', is_search: false },
         { label: 'Type', key: 'type', type: 'select', is_search: false, options: [
           { value: 'percentage', label: 'Percentage' },
           { value: 'flat', label: 'Amount' },
@@ -2561,14 +2682,32 @@ const rate = await prisma.rates.findUnique({ where: { id: rateId } });
         { label: 'Extra Adult', key: 'offsetExtraAdult', type: 'number', is_search: false },
         { label: 'Extra Child', key: 'offsetExtraChild', type: 'number', is_search: false },
         { label: 'Applied to', key: 'applied_to', type: 'select_multiple', is_search: false,
-          options: rows.map(r => ({ value: r.id, label: r.room_type })) },
-      ];
+          options: appliedTo },
+    ];
+  }
+
+  static async rateLinkListing(req: Request, res: Response): Promise<void> {
+    try {
+      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? req.query.data ?? '');
       const permission = { view: true, add: true, edit: true, delete: true };
+      const paging = (n: number) => ({
+        current_page: 1, last_page: 1, per_page: n || 1, total: n, from: 1, to: n,
+      });
+      // Returning `table: []` made the grid render zero columns, so opening this tab
+      // straight from the menu showed a blank area with no headers and no hint. Laravel
+      // answers 404 here; we keep 200 but still send the columns so the grid is visible.
+      if (!/^\d+$/.test(rateIdRaw)) {
+        success(res, [], 'Success', 200, { table: RateController.rateLinkTable([]), permission, pagination: paging(0) });
+        return;
+      }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const rows = await RateController.getRateLinkRows(rateId, undefined, req.user?.lastProperty);
       success(res, rows, 'Success', 200, {
-        table, permission,
-        pagination: {
-          current_page: 1, last_page: 1, per_page: rows.length || 1, total: rows.length, from: 1, to: rows.length,
-        },
+        table: RateController.rateLinkTable(rows.map((r: any) => ({ value: r.id, label: r.room_type }))),
+        permission,
+        pagination: paging(rows.length),
       });
     } catch (err: any) {
       console.error('Rate link listing error:', err);
@@ -2578,24 +2717,30 @@ const rate = await prisma.rates.findUnique({ where: { id: rateId } });
 
   static async rateLinkApplyList(req: Request, res: Response): Promise<void> {
     try {
-      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? '');
-      if (!/^\d+$/.test(rateIdRaw)) { success(res, [], 'Success', 200, { table: [], permission: { view: true, add: true, edit: true, delete: true }, pagination: { current_page: 1, last_page: 1, per_page: 1, total: 0, from: 1, to: 0 } }); return; }
-      const rateId = BigInt(rateIdRaw);
-const rate = await prisma.rates.findUnique({ where: { id: rateId } });
-      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
-      const rows = await this.getRateLinkRows(rateId, '1', req.user?.lastProperty);
-      const table = [
+      const rateIdRaw = String(req.query.rate_id ?? req.query.id ?? req.query.data ?? '');
+      const permission = { view: true, add: true, edit: true, delete: true };
+      const paging = (n: number) => ({
+        current_page: 1, last_page: 1, per_page: n || 1, total: n, from: 1, to: n,
+      });
+      const applyTable = [
         { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
         { label: 'Amount', key: 'amount', type: 'number', is_search: false },
         { label: 'Extra Adult', key: 'offsetExtraAdult', type: 'number', is_search: false },
         { label: 'Extra Child', key: 'offsetExtraChild', type: 'number', is_search: false },
       ];
+      // Same reasoning as rateLinkListing: send the columns so the grid still renders.
+      if (!/^\d+$/.test(rateIdRaw)) {
+        success(res, [], 'Success', 200, { table: applyTable, permission, pagination: paging(0) });
+        return;
+      }
+      const rateId = BigInt(rateIdRaw);
+      const rate = await prisma.rates.findUnique({ where: { id: rateId } });
+      if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
+      const rows = await RateController.getRateLinkRows(rateId, '1', req.user?.lastProperty);
       success(res, rows, 'Success', 200, {
-        table,
-        permission: { view: true, add: true, edit: true, delete: true },
-        pagination: {
-          current_page: 1, last_page: 1, per_page: rows.length || 1, total: rows.length, from: 1, to: rows.length,
-        },
+        table: applyTable,
+        permission,
+        pagination: paging(rows.length),
       });
     } catch (err: any) {
       console.error('Rate link apply list error:', err);
@@ -2940,15 +3085,33 @@ const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       const [items, total] = await Promise.all([
-        prisma.code_items.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { id: 'asc' } }),
+        // `code_posts` has to be included or the Code Post column renders the bare
+        // code_post_id instead of the ledger name ("Tampilan Postcode di Additional Item
+        // to Sell berupa ID").
+        prisma.code_items.findMany({
+          where,
+          skip: (page - 1) * limit,
+          take: limit,
+          orderBy: { id: 'asc' },
+          include: { code_posts: { select: { id: true, name: true } } },
+        }),
         prisma.code_items.count({ where }),
       ]);
       const salesByItem = new Map(pivots.map((p) => [Number(p.code_item_id), p.sales]));
-      const data = items.map((it: any) => ({ ...it, sales: salesByItem.get(Number(it.id)) ?? it.sales }));
+      const data = items.map((it: any) => ({
+        ...it,
+        code_post_id: it.code_posts
+          ? { value: Number(it.code_posts.id), label: it.code_posts.name }
+          : null,
+        sales: salesByItem.get(Number(it.id)) ?? it.sales
+      }));
 
+      const propertyId = req.user?.lastProperty;
       const codePosts = await prisma.code_posts.findMany({
-        where: { type: 'DEFAULT', status: STATUS_ACTIVE, deleted_at: null },
+        // Was unscoped by property - mixed every property's ledgers into this dropdown.
+        where: { type: 'DEFAULT', status: STATUS_ACTIVE, deleted_at: null, ...(propertyId ? { property_id: propertyId } : {}) },
         select: { id: true, name: true },
+        orderBy: { name: 'asc' },
       });
       const table = [
         { label: 'Code', key: 'code', type: 'none', is_search: false },

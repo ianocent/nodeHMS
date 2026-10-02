@@ -1,14 +1,10 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest } from '../utils/response';
-import { moneyFormat } from '../utils/cmsConfig';
+import { moneyFormat, DEPOSIT_REFERENCE_PREFIX } from '../utils/cmsConfig';
 import { STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { safeOrderBy } from '../utils/querySafety';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const MENU_ID = 63n; // Laravel hasCrudPermission(63, ...) used by these controllers
 const COMPANY_TYPE = 'App\\Models\\CompanyProfile';
@@ -150,7 +146,7 @@ export class FrontDeskExtrasController {
       if (sort) {
         const desc = sort.startsWith('-');
         const col = desc ? sort.slice(1) : sort;
-        orderBy = [{ [col]: desc ? 'desc' : 'asc' }];
+        orderBy = [safeOrderBy('wake_up_calls', col, { id: desc ? 'desc' : 'asc' })];
       }
 
       // Laravel quirk preserved: paginate() result discarded, ->get() returns all rows.
@@ -637,14 +633,10 @@ export class FrontDeskExtrasController {
 
   // ==================== DEPOSIT PAYMENT ====================
 
-  private static depositRow(t: any) {
-    return {
-      id: t.id,
-      date: t.date,
-      payment_type: { value: t.type_payment_id, label: t.type_payments?.name ?? t.type_payment_name ?? '' },
-      amount: moneyFormat(Number(t.total ?? 0)),
-    };
-  }
+  // Note: the grid below formats rows inline. `depositRow` used to build the
+  // transaction-shaped row, but the screen now reads `deposit_payments`, whose
+  // id is the one the edit/delete endpoints address — so a shared formatter
+  // would have reintroduced the id mismatch it was written for.
 
   static async depositPaymentIndex(req: Request, res: Response): Promise<void> {
     try {
@@ -654,13 +646,20 @@ export class FrontDeskExtrasController {
       if (!folioId) { badRequest(res, 'The folio id field is required.'); return; }
       const pid = req.user?.lastProperty ?? 0n;
 
-      const rows = await prisma.transactions.findMany({
-        where: { type: 'payment', is_pos_deposit: 1, folio_id: BigInt(folioId), property_id: pid, deleted_at: null },
-        include: { type_payments: { select: { name: true } } },
-        orderBy: { id: 'desc' },
-      });
-      // Laravel quirk: pagging total from deposit_payments count (all folios), not the listed rows.
-      const totalData = await prisma.deposit_payments.count({ where: { property_id: pid } });
+      // `deposit_payments` is the source of truth for this screen.
+      //
+      // It used to read `transactions WHERE type='payment' AND is_pos_deposit=1`,
+      // but save/update/delete all target `deposit_payments` — so the grid showed
+      // rows whose id belonged to a different table (editing or deleting one hit
+      // the wrong row, or 404'd), and deposits recorded on this screen were not
+      // listed at all because that flag was never written. The money leg now
+      // lives in `transactions` keyed by DEPOSIT_REFERENCE_PREFIX; this table
+      // stays the header that the grid and the edit endpoints address.
+      const where = { folio_id: BigInt(folioId), property_id: pid, deleted_at: null };
+      const [rows, totalData] = await Promise.all([
+        prisma.deposit_payments.findMany({ where, orderBy: { id: 'desc' } }),
+        prisma.deposit_payments.count({ where }),
+      ]);
 
       const table = [
         { label: 'Date', key: 'date', type: 'date', is_search: false },
@@ -668,7 +667,27 @@ export class FrontDeskExtrasController {
         { label: 'Amount', key: 'amount', type: 'text', is_search: false },
       ];
 
-      success(res, bigintToNumber(rows.map((r) => FrontDeskExtrasController.depositRow(r))), 'Success', 200, {
+      const codePostIds = [...new Set(rows.map((r) => String(r.payment_type)))];
+      const codePosts = codePostIds.length
+        ? await prisma.code_posts.findMany({ where: { id: { in: codePostIds.map((c) => BigInt(c)) } }, select: { id: true, name: true } })
+        : [];
+      const nameById = new Map(codePosts.map((c) => [String(c.id), c.name]));
+
+      const shaped = rows.map((r) => ({
+        id: Number(r.id),
+        date: r.date,
+        folio_id: Number(r.folio_id),
+        payment_type: { value: String(r.payment_type), label: nameById.get(String(r.payment_type)) ?? '' },
+        amount: r.amount,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        created_by: r.created_by,
+        updated_by: r.updated_by,
+        status: r.status,
+        folio_number: null as string | null,
+      }));
+
+      success(res, bigintToNumber(shaped), 'Success', 200, {
         table,
         pagging: paging(totalData, limit, page),
         permission: { ...viewFlags(req), add: permFlags(req).add, edit: permFlags(req).edit },
@@ -709,19 +728,69 @@ export class FrontDeskExtrasController {
       if (!payment_type) { badRequest(res, 'The payment type field is required.'); return; }
       if (amount === undefined || amount === null || amount === '') { badRequest(res, 'The amount field is required.'); return; }
 
-      const row = await prisma.deposit_payments.create({
-        data: {
-          property_id: req.user?.lastProperty ?? 0n,
-          folio_id: BigInt(folio_id),
-          date: new Date(date),
-          payment_type: BigInt(payment_type),
-          amount: Math.round(parseAmount(amount)),
-          status: 1,
-          created_at: new Date(),
-          created_by: req.user?.id,
-        },
+      const folio = await prisma.folios.findUnique({
+        where: { id: BigInt(folio_id) },
+        select: { id: true, folio_number: true, company_profile_id: true, guest_profile_id: true },
       });
-      success(res, bigintToNumber(await FrontDeskExtrasController.depositFormatRow(row.id, req, 1)), 'Success', 200);
+      if (!folio) { badRequest(res, 'The selected folio id is invalid.'); return; }
+
+      const codePost = await prisma.code_posts.findUnique({
+        where: { id: BigInt(payment_type) },
+        select: { id: true, name: true },
+      });
+      const amt = Math.round(parseAmount(amount));
+      if (amt <= 0) { badRequest(res, 'The amount must be greater than 0.'); return; }
+
+      // A deposit is money IN. It must exist as a folio transaction, otherwise
+      // it never nets against the folio balance and check-out stays blocked on a
+      // folio the guest has already paid. The header row in deposit_payments is
+      // kept because the deposit screen reads its payment_type from there.
+      const result = await prisma.$transaction(async (tx) => {
+        const row = await tx.deposit_payments.create({
+          data: {
+            property_id: req.user?.lastProperty ?? 0n,
+            folio_id: BigInt(folio_id),
+            date: new Date(date),
+            payment_type: BigInt(payment_type),
+            amount: amt,
+            status: 1,
+            created_at: new Date(),
+            created_by: req.user?.id,
+          },
+        });
+
+        await tx.transactions.create({
+          data: {
+            property_id: req.user?.lastProperty ?? 0n,
+            folio_id: BigInt(folio_id),
+            type: 'payment',
+            date: new Date(date),
+            code: String(payment_type),
+            code_name: codePost?.name ?? null,
+            description: 'Deposit',
+            amount: amt,
+            total: amt,
+            type_amount: 'MINUS',
+            bill_to: folio.guest_profile_id ? `${folio.guest_profile_id}-guest` : null,
+            model_type: GUEST_TYPE,
+            model_id: folio.guest_profile_id,
+            // Link back to the header row so update/delete stay in sync and the
+            // balance can tell a linked deposit from a legacy orphan.
+            reference: `${DEPOSIT_REFERENCE_PREFIX}${row.id}`,
+            is_pos_deposit: 1,
+            is_end_of_day: 0,
+            is_posting: 0,
+            status: 1,
+            source: 'hms',
+            created_at: new Date(),
+            created_by: req.user?.id,
+          },
+        });
+
+        return row;
+      });
+
+      success(res, bigintToNumber(await FrontDeskExtrasController.depositFormatRow(result.id, req, 1)), 'Success', 200);
     } catch (err: any) {
       console.error('Deposit-payment store error:', err);
       error(res, 'Failed to create deposit payment', 500);
@@ -736,16 +805,42 @@ export class FrontDeskExtrasController {
       if (amount === undefined || amount === null || amount === '') { badRequest(res, 'The amount field is required.'); return; }
 
       const id = idParam(req.params.id);
-      await prisma.deposit_payments.update({
-        where: { id },
-        data: {
-          date: new Date(date),
-          payment_type: BigInt(payment_type),
-          amount: Math.round(parseAmount(amount)),
-          updated_at: new Date(),
-          updated_by: req.user?.id,
-        },
+      const amt = Math.round(parseAmount(amount));
+      if (amt <= 0) { badRequest(res, 'The amount must be greater than 0.'); return; }
+
+      const codePost = await prisma.code_posts.findUnique({
+        where: { id: BigInt(payment_type) },
+        select: { id: true, name: true },
       });
+
+      await prisma.$transaction(async (tx) => {
+        await tx.deposit_payments.update({
+          where: { id },
+          data: {
+            date: new Date(date),
+            payment_type: BigInt(payment_type),
+            amount: amt,
+            updated_at: new Date(),
+            updated_by: req.user?.id,
+          },
+        });
+
+        // Keep the linked folio transaction in step. A deposit edit that only
+        // moved the header left the balance showing the old amount.
+        await tx.transactions.updateMany({
+          where: { reference: `${DEPOSIT_REFERENCE_PREFIX}${id}`, deleted_at: null },
+          data: {
+            date: new Date(date),
+            code: String(payment_type),
+            code_name: codePost?.name ?? null,
+            amount: amt,
+            total: amt,
+            updated_at: new Date(),
+            updated_by: req.user?.id,
+          },
+        });
+      });
+
       success(res, bigintToNumber(await FrontDeskExtrasController.depositFormatRow(id, req, 1)), 'Success', 200);
     } catch (err: any) {
       console.error('Deposit-payment update error:', err);
@@ -755,9 +850,18 @@ export class FrontDeskExtrasController {
 
   static async depositPaymentDestroy(req: Request, res: Response): Promise<void> {
     try {
-      await prisma.deposit_payments.update({
-        where: { id: idParam(req.params.id) },
-        data: { deleted_at: new Date(), deleted_by: req.user?.id, status: 0 },
+      const id = idParam(req.params.id);
+      await prisma.$transaction(async (tx) => {
+        await tx.deposit_payments.update({
+          where: { id },
+          data: { deleted_at: new Date(), deleted_by: req.user?.id, status: 0 },
+        });
+        // Soft-delete the money leg too, otherwise a voided deposit still
+        // offsets the balance.
+        await tx.transactions.updateMany({
+          where: { reference: `${DEPOSIT_REFERENCE_PREFIX}${id}`, deleted_at: null },
+          data: { deleted_at: new Date(), deleted_by: req.user?.id, status: 0 },
+        });
       });
       success(res, [], 'Success', 200);
     } catch (err: any) {

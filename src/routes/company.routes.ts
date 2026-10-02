@@ -15,6 +15,7 @@ router.get('/profile/company-v2', authMiddleware, CompanyController.autocomplete
 router.get('/profile/company/create', authMiddleware, CompanyController.createForm);
 router.get('/profile/company/:id', authMiddleware, CompanyController.show);
 router.get('/profile/company/:id/update', authMiddleware, CompanyController.createForm);
+router.get('/profile/company/:id/edit', authMiddleware, CompanyController.createForm);
 router.post('/profile/company', authMiddleware, CompanyController.store);
 router.put('/profile/company/:id', authMiddleware, CompanyController.update);
 router.delete('/profile/company/:id', authMiddleware, CompanyController.destroy);
@@ -25,6 +26,7 @@ router.get('/company-v2', authMiddleware, CompanyController.autocomplete);
 router.get('/company/create', authMiddleware, CompanyController.clientCreateForm);
 router.get('/company/:id', authMiddleware, CompanyController.clientShow);
 router.get('/company/:id/update', authMiddleware, CompanyController.clientCreateForm);
+router.get('/company/:id/edit', authMiddleware, CompanyController.clientCreateForm);
 router.post('/company', authMiddleware, CompanyController.clientStore);
 router.put('/company/:id', authMiddleware, CompanyController.clientUpdate);
 router.delete('/company/:id', authMiddleware, CompanyController.clientDestroy);
@@ -34,6 +36,7 @@ router.get('/client-v2', authMiddleware, CompanyController.autocomplete);
 router.get('/client/create', authMiddleware, CompanyController.clientCreateForm);
 router.get('/client/:id', authMiddleware, CompanyController.clientShow);
 router.get('/client/:id/update', authMiddleware, CompanyController.clientCreateForm);
+router.get('/client/:id/edit', authMiddleware, CompanyController.clientCreateForm);
 router.post('/client', authMiddleware, CompanyController.clientStore);
 router.put('/client/:id', authMiddleware, CompanyController.clientUpdate);
 router.delete('/client/:id', authMiddleware, CompanyController.clientDestroy);
@@ -73,6 +76,10 @@ router.delete('/profile/company-guest/:id', authMiddleware, CompanyController.gu
 router.get('/profile/company-folio', authMiddleware, CompanyController.folioList);
 router.post('/profile/company-folio', authMiddleware, CompanyController.folioStore);
 router.delete('/profile/company-folio/:id', authMiddleware, CompanyController.folioDestroy);
+
+router.get('/profile/company-reservation', authMiddleware, CompanyController.folioList);
+router.post('/profile/company-reservation', authMiddleware, CompanyController.folioStore);
+router.delete('/profile/company-reservation/:id', authMiddleware, CompanyController.folioDestroy);
 
 // AR Transaction
 router.get('/profile/company-ar-transaction', authMiddleware, CompanyController.arTransactionList);

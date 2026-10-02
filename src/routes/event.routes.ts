@@ -55,7 +55,10 @@ router.delete('/event-packages/:id', authMiddleware, requirePermission(211, 'del
 
 // Singular aliases
 router.get('/event-package', authMiddleware, requirePermission(211, 'view'), EventController.packageList);
+router.get('/event-package/get-max-capacity', authMiddleware, requirePermission(211, 'view'), EventController.getMaxCapacity);
+router.get('/event-package/create', authMiddleware, requirePermission(211, 'add'), EventController.packageCreate);
 router.post('/event-package', authMiddleware, requirePermission(211, 'add'), EventController.packageStore);
+router.get('/event-package/:id/edit', authMiddleware, requirePermission(211, 'view'), EventController.packageShow);
 router.put('/event-package/:id', authMiddleware, requirePermission(211, 'edit'), EventController.packageUpdate);
 router.delete('/event-package/:id', authMiddleware, requirePermission(211, 'delete'), EventController.packageDestroy);
 
@@ -98,6 +101,7 @@ router.post('/event/:eventId/deposit-actuals', authMiddleware, requirePermission
 router.delete('/event/deposit-actuals/:id', authMiddleware, requirePermission(211, 'delete'), EventController.depositActualDestroy);
 
 // Instructions (nested under event)
+router.get('/event/:eventId/items', authMiddleware, requirePermission(211, 'view'), EventController.itemList);
 router.get('/events/:eventId/instructions', authMiddleware, requirePermission(211, 'view'), EventController.instructionList);
 router.post('/events/:eventId/instructions', authMiddleware, requirePermission(211, 'edit'), EventController.instructionSave);
 

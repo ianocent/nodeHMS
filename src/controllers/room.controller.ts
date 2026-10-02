@@ -1,11 +1,25 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { dataSearch, applySearchField } from '../utils/search';
 import { getStatusLabel } from '../utils/cmsConfig';
+import {
+  MAID_STATUSES,
+  ROOM_STATUSES,
+  STATUS_RESERVATION_MAP,
+  dashLabel,
+  folioUrl,
+  getColorCodeMaid,
+  getColorCodeReservation,
+  getColorCodeRoom,
+  getColorMaid,
+  getColorRoom,
+  ucfirst,
+} from '../utils/cmsStatus';
+import { badRequest, error, notFound, success, validationError } from '../utils/response';
+import { uniqueExtendError } from '../utils/uniqueExtend';
+import { applySearchField, dataSearch } from '../utils/search';
+import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
+import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
 
 // Helper: coerce sort/status to number (matches Laravel int casting)
@@ -29,24 +43,7 @@ function parseCleaningTime(v: any): Date {
   const d = new Date(v);
   return isNaN(d.getTime()) ? new Date(Date.UTC(1970, 0, 1, 0, 0, 0)) : new Date(Date.UTC(1970, 0, 1, d.getHours(), d.getMinutes(), d.getSeconds()));
 }
-import {
-  ROOM_STATUSES,
-  MAID_STATUSES,
-  STATUS_RESERVATION_MAP,
-  getColorRoom,
-  getColorCodeRoom,
-  getColorMaid,
-  getColorCodeMaid,
-  getColorCodeReservation,
-  dashLabel,
-  ucfirst,
-  folioUrl,
-} from '../utils/cmsStatus';
-import { laravelPaging, TABLES, listPermission } from '../utils/tableMeta';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const STATUS_ACTIVE = 1;
 const MENU_ID = 1120;
@@ -78,13 +75,9 @@ function parseBigIntArray(arr: string | string[] | undefined): bigint[] | undefi
   return items.filter(Boolean).map((s: string) => BigInt(s.trim()));
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// RoomController â€” room_types, rooms, images, inventories
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// RoomController room_types, rooms, images, inventories
 export class RoomController {
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
   // ROOM TYPES
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   /**
    * GET /api/room-types
@@ -99,6 +92,7 @@ export class RoomController {
 
       const where: any = { deleted_at: null };
       if (propertyId) where.property_id = propertyId;
+      applyStatusScope(where, req, 'room_types');
       if (search) {
         where.name = { contains: search, mode: 'insensitive' };
       }
@@ -125,7 +119,7 @@ export class RoomController {
         ];
       }
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'room_types');
 
       const [roomTypes, total] = await Promise.all([
         prisma.room_types.findMany({
@@ -147,7 +141,7 @@ export class RoomController {
         ...bigintToNumber(rt),
         room_count: rt.rooms?.length || 0,
         rooms: undefined,
-        status: getStatusLabel(rt.status),
+        status: rt.status ?? 0, // raw 0/1 → success() converts to boolean for checkbox
       }));
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
@@ -186,6 +180,7 @@ export class RoomController {
 
       const roomTypeGroupings = await prisma.types.findMany({
         where: {
+          property_id: propertyId!,
           deleted_at: null,
           status: STATUS_ACTIVE,
           group: 'room-type-grouping',
@@ -221,6 +216,26 @@ export class RoomController {
       const errors: Record<string, string[]> = {};
       if (!name) errors.name = ['The name field is required.'];
       if (rate !== undefined && isNaN(Number(rate))) errors.rate = ['The rate must be numeric.'];
+
+      // Laravel RoomTypeController@store:123-124
+      //   'name'        => [... 'unique_extend:room_types,name,NULL,id,deleted_at,NULL']
+      //   'description' => ['nullable','string','max:255','unique_extend:room_types,description']
+      // Both soft-delete aware. `description` is nullable, so an empty value is skipped.
+      // Property-scoped: room_types is multi-tenant (each property keeps its own set).
+      const dupName = await uniqueExtendError(prisma, 'room_types', 'name', 'name', name, null, {
+        property_id: propertyId!,
+      });
+      if (dupName) errors.name = [dupName];
+      const dupDesc = await uniqueExtendError(
+        prisma,
+        'room_types',
+        'description',
+        'description',
+        description,
+        null,
+        { property_id: propertyId! }
+      );
+      if (dupDesc) errors.description = [dupDesc];
 
       if (Object.keys(errors).length > 0) {
         validationError(res, errors);
@@ -307,7 +322,7 @@ export class RoomController {
         select: { type_id: true },
       });
       const types = await prisma.types.findMany({
-        where: { id: { in: mht.map((m: any) => m.type_id) }, group: 'room-configuration', deleted_at: null },
+        where: activeWhere('types', { id: { in: mht.map((m: any) => m.type_id) }, group: 'room-configuration' }, req.user?.lastProperty),
         select: { id: true, name: true },
       });
       const seen = new Set<string>();
@@ -496,6 +511,7 @@ export class RoomController {
    */
   static async typeEdit(req: Request, res: Response): Promise<void> {
     try {
+      const propertyId = req.user?.lastProperty;
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
 
@@ -512,6 +528,7 @@ export class RoomController {
 
       const roomTypeGroupings = await prisma.types.findMany({
         where: {
+          property_id: propertyId!,
           deleted_at: null,
           status: STATUS_ACTIVE,
           group: 'room-type-grouping',
@@ -556,6 +573,26 @@ export class RoomController {
       }
 
       const { name, description, specification, is_physical, rate, min_rate, sort, status, room_type_grouping } = req.body;
+
+      // Laravel RoomTypeController@update:258-259 (own id excluded on both fields).
+      if (name !== undefined) {
+        const dupName = await uniqueExtendError(prisma, 'room_types', 'name', 'name', name, id, {
+          property_id: existing.property_id,
+        });
+        if (dupName) { badRequest(res, dupName); return; }
+      }
+      if (description !== undefined) {
+        const dupDesc = await uniqueExtendError(
+          prisma,
+          'room_types',
+          'description',
+          'description',
+          description,
+          id,
+          { property_id: existing.property_id }
+        );
+        if (dupDesc) { badRequest(res, dupDesc); return; }
+      }
 
       // Laravel guard: active -> inactive blocked when room type has live reservation
       if (Number(existing.status) === 1 && status !== undefined && Number(status) === 0) {
@@ -676,6 +713,7 @@ export class RoomController {
       const trash = req.query.trash === '1' || req.query.trash === 'true';
       const where: any = { deleted_at: trash ? { not: null } : null };
       if (propertyId) where.property_id = propertyId;
+      applyStatusScope(where, req, 'rooms');
       if (search) {
         where.name = { contains: search, mode: 'insensitive' };
       }
@@ -684,7 +722,7 @@ export class RoomController {
       const order = req.query.order === 'desc' ? 'desc' : 'asc';
       let orderBy: any = { sort: 'asc' };
       if (sort) {
-        orderBy = { [sort]: order };
+        orderBy = safeOrderBy('rooms', sort, { sort: 'asc' });
       }
 
       const table = group === 'room'
@@ -717,7 +755,7 @@ export class RoomController {
             { label: 'Description', key: 'description', type: 'text', is_search: true },
           ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'rooms');
 
       const [rooms, total] = await Promise.all([
         prisma.rooms.findMany({
@@ -889,7 +927,7 @@ export class RoomController {
           room_types: { select: { id: true, name: true } },
           properties: { select: { id: true, name: true } },
           other_rooms: {
-            where: { deleted_at: null },
+            where: activeWhere('rooms', {}, req.user?.lastProperty),
             select: { id: true, name: true, is_physical: true, sort: true },
           },
         },
@@ -990,7 +1028,7 @@ export class RoomController {
 
       // Floor plan templates (group 'template-floor-plan')
       const templates = await prisma.types.findMany({
-        where: { deleted_at: null, status: STATUS_ACTIVE, group: 'template-floor-plan' },
+        where: { deleted_at: null, status: STATUS_ACTIVE, group: 'template-floor-plan', property_id: propertyId! },
         select: { id: true, description: true, text: true },
         orderBy: { sort: 'asc' },
       });
@@ -1131,22 +1169,22 @@ export class RoomController {
           orderBy: { name: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-configuration' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-configuration', property_id: propertyId! },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building', property_id: propertyId! },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor', property_id: propertyId! },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-type-grouping' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-type-grouping', property_id: propertyId! },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
@@ -1212,22 +1250,22 @@ export class RoomController {
           orderBy: { name: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-configuration' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-configuration', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'in-room-equipment' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'in-room-equipment', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
@@ -1287,6 +1325,27 @@ export class RoomController {
       if (!name) errors.name = ['The name field is required.'];
       if (!max_pax && max_pax !== 0) errors.max_pax = ['The max pax field is required.'];
       if (!total_bed && total_bed !== 0) errors.total_bed = ['The total bed field is required.'];
+
+      // The reference only marks `name` required (RoomController@store:176) and lets
+      // duplicate room units through, which makes two rooms indistinguishable in a
+      // PMS. Property-scoped because `rooms` is multi-tenant (98 names repeat across
+      // properties in this dataset while none repeat inside one).
+      const dupName = await uniqueExtendError(prisma, 'rooms', 'name', 'name', name, null, {
+        property_id: propertyId!,
+      });
+      if (dupName) errors.name = [dupName];
+      if (address_code !== undefined && address_code !== null && String(address_code).trim() !== '') {
+        const dupCode = await uniqueExtendError(
+          prisma,
+          'rooms',
+          'address_code',
+          'address code',
+          address_code,
+          null,
+          { property_id: propertyId! }
+        );
+        if (dupCode) errors.address_code = [dupCode];
+      }
 
       if (Object.keys(errors).length > 0) {
         validationError(res, errors);
@@ -1411,22 +1470,22 @@ export class RoomController {
           orderBy: { name: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-configuration' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'room-configuration', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'in-room-equipment' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'in-room-equipment', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'floor', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'building', ...(propertyId ? { property_id: propertyId } : {}) },
           select: { id: true, name: true },
           orderBy: { sort: 'asc' },
         }),
@@ -1527,6 +1586,26 @@ export class RoomController {
         status,
         room_configuration_ids,
       } = req.body;
+
+      // Same property-scoped uniqueness as the create path (own id excluded).
+      if (name !== undefined) {
+        const dupName = await uniqueExtendError(prisma, 'rooms', 'name', 'name', name, id, {
+          property_id: existing.property_id,
+        });
+        if (dupName) { badRequest(res, dupName); return; }
+      }
+      if (address_code !== undefined && address_code !== null && String(address_code).trim() !== '') {
+        const dupCode = await uniqueExtendError(
+          prisma,
+          'rooms',
+          'address_code',
+          'address code',
+          address_code,
+          id,
+          { property_id: existing.property_id }
+        );
+        if (dupCode) { badRequest(res, dupCode); return; }
+      }
 
       const updateData: any = { updated_at: new Date(), updated_by: userId };
       // FE sends select values as {value,label} — unwrap before BigInt/Number casts
@@ -1769,7 +1848,7 @@ export class RoomController {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const roomTypes = await prisma.room_types.findMany({
-        where: { deleted_at: null },
+        where: activeWhere('room_types', {}, req.user?.lastProperty),
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
       });

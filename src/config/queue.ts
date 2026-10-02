@@ -39,7 +39,12 @@ export async function initQueue() {
   // balloons the V8 heap (the process OOM'd at ~1GB inside a worker at boot).
   const origWork = bossInstance.work.bind(bossInstance);
   bossInstance.work = (name: string, handler: any) =>
-    origWork(name, async (job: any) => {
+    origWork(name, async (jobs: any) => {
+      // pg-boss >= 10 hands the handler an ARRAY of jobs ([job]). Every
+      // queue/jobs/*.ts here uses the single-job shape (job.data), so unwrap
+      // here instead of touching 11 job files. Without this, job.data is
+      // undefined and jobs die with "Cannot convert undefined to a BigInt".
+      const job = Array.isArray(jobs) ? jobs[0] : jobs;
       const mem = () =>
         `rss=${Math.round(process.memoryUsage().rss / 1048576)}MB heap=${Math.round(process.memoryUsage().heapUsed / 1048576)}MB`;
       console.log(`[queue] job start: ${name} id=${job?.id} ${mem()}`);
@@ -137,13 +142,15 @@ export async function initQueue() {
 
     // Dispatcher for per-property availability sync
     await bossInstance.work('dispatch-staah-availability', async (job: any) => {
-      const { PrismaClient } = await import('@prisma/client');
-      const prisma = new PrismaClient();
+      // Reuse the shared app client — a bare `new PrismaClient()` throws
+      // "needs to be constructed with a non-empty, valid PrismaClientOptions"
+      // because Prisma 7 requires a driver adapter. No $disconnect(): the pool
+      // is shared with the HTTP server, disconnecting it would break the app.
+      const { prisma } = await import('./prisma');
       const interfaces = await prisma.staah_interfaces.findMany({ where: { status: 'active' } });
       for (const iface of interfaces) {
          await bossInstance.send('sync-staah-room-availability', { propertyId: Number(iface.property_id) });
       }
-      await prisma.$disconnect();
     });
 
   // Schedule cron jobs (equivalent to Laravel Console/Kernel.php)

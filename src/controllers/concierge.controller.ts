@@ -1,19 +1,13 @@
+import { prisma } from '../config/prisma';
 ﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
 import { success, error, badRequest, notFound } from '../utils/response';
-import { buildDefaultTable } from '../utils/table';
 import { TABLES } from '../utils/tableMeta';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, ITEM_LOST_FOUND_STATUS, STATUS_LOST } from '../utils/cmsConfig';
 import { storageRoot } from '../utils/storage';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -55,7 +49,13 @@ export class ConciergeController {
     try {
       const { page, limit, search } = parsePagination(req.query);
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const where: any = { property_id: pid, deleted_at: null };
+      // Base PhoneBookGroup{1,2,3}Controller@index all scope to their own level
+      // (`PhoneBookGroup1::where('group', 1)`), and the route decides the level.
+      // Without it every tab listed all three levels mixed together.
+      const levelRaw = String((req.params as any).groupLevel ?? '1');
+      const level = [1, 2, 3].includes(Number(levelRaw)) ? Number(levelRaw) : 1;
+
+      const where: any = { property_id: pid, group: level, deleted_at: null };
       if (search) where.name = { contains: search, mode: 'insensitive' };
 
       const [data, total] = await Promise.all([
@@ -63,8 +63,23 @@ export class ConciergeController {
         prisma.phone_book_groups.count({ where }),
       ]);
 
+      // PhoneBookGroup2/3Controller@formatTable expose a Parent Group select
+      // populated from the level above.
+      const table = JSON.parse(JSON.stringify(TABLES[level === 1 ? 'phoneBookGroup1' : level === 2 ? 'phoneBookGroup2' : 'phoneBookGroup3']));
+      if (level > 1) {
+        const parents = await prisma.phone_book_groups.findMany({
+          where: { property_id: pid, group: level - 1, deleted_at: null },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+        const parentCol = table.find((c: any) => c.key === 'parent_id');
+        if (parentCol) {
+          parentCol.options = parents.map((p: any) => ({ value: Number(p.id), label: p.name }));
+        }
+      }
+
       success(res, bigintToNumber(data), 'Success', 200, {
-        table: buildDefaultTable(data),
+        table,
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -86,9 +101,14 @@ export class ConciergeController {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const { parent_id, name, sort, status } = req.body;
       if (!name) { badRequest(res, 'name is required'); return; }
+      // Base pins the level on create (PhoneBookGroup1Controller@store: `'group' => 1`).
+      // Without it the row fell to the schema default 0, and since every list filters
+      // `group = N` a newly added Phone Book Group was invisible in all three tabs.
+      const levelRaw = String((req.params as any).groupLevel ?? '1');
+      const level = [1, 2, 3].includes(Number(levelRaw)) ? Number(levelRaw) : 1;
 
       const data = await prisma.phone_book_groups.create({
-        data: { property_id: pid, parent_id: parent_id ? BigInt(parent_id) : null, name, sort: sort || 0, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, group: level, parent_id: parent_id ? BigInt(parent_id) : null, name, sort: sort || 0, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Group created', 200);
     } catch (err: any) { console.error('Phone book group store error:', err); error(res, 'Failed to create group', 500); }
@@ -98,7 +118,10 @@ export class ConciergeController {
     try {
       const id = idParam(req.params.id);
       const { parent_id, name, sort, status } = req.body;
-      await prisma.phone_book_groups.update({ where: { id }, data: { parent_id: parent_id ? BigInt(parent_id) : null, name, sort, status, updated_at: new Date(), updated_by: req.user?.id } });
+      // Keep the level pinned so an edit can never demote a row out of its tab.
+      const levelRaw = String((req.params as any).groupLevel ?? '1');
+      const level = [1, 2, 3].includes(Number(levelRaw)) ? Number(levelRaw) : 1;
+      await prisma.phone_book_groups.update({ where: { id }, data: { group: level, parent_id: parent_id ? BigInt(parent_id) : null, name, sort, status, updated_at: new Date(), updated_by: req.user?.id } });
       success(res, null, 'Group updated');
     } catch (err: any) { error(res, 'Failed to update group', 500); }
   }
@@ -116,7 +139,10 @@ export class ConciergeController {
     try {
       const { page, limit, search } = parsePagination(req.query);
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const groupId = req.query.group_id as string;
+      // The phone-book page sends `phone_book_group_id` (base PhoneBookController@index
+      // reads the same name); `group_id` was the only alias accepted, so the list
+      // was never scoped to the group picked in the tree.
+      const groupId = (req.query.phone_book_group_id ?? req.query.group_id) as string;
       const where: any = { property_id: pid, deleted_at: null };
       if (search) { where.name = { contains: search, mode: 'insensitive' }; }
       if (groupId) where.phone_book_group_id = BigInt(groupId);
@@ -127,7 +153,7 @@ export class ConciergeController {
       ]);
 
       success(res, bigintToNumber(data), 'Success', 200, {
-        table: buildDefaultTable(data),
+        table: TABLES.phoneBook,
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -257,8 +283,20 @@ export class ConciergeController {
         prisma.car_parks.count({ where }),
       ]);
 
+      // CarPark::formatTable() fills the Room select from Room::all().
+      const rooms = await prisma.rooms.findMany({
+        where: { property_id: pid, deleted_at: null, status: 1 },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const carParkTable = JSON.parse(JSON.stringify(TABLES.carPark));
+      const roomCol = carParkTable.find((c: any) => c.key === 'room');
+      if (roomCol) {
+        roomCol.options = rooms.map((r: any) => ({ value: Number(r.id), label: r.name }));
+      }
+
       success(res, bigintToNumber(data), 'Success', 200, {
-        table: buildDefaultTable(data),
+        table: carParkTable,
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
@@ -308,8 +346,25 @@ export class ConciergeController {
         prisma.lost_and_founds.count({ where }),
       ]);
 
+      // LostAndFound::formatTable() declares status_lost / item_status / room as
+      // selects without inline options; the option lists come from cms config and
+      // the room master (same sources LostAndFoundController@create uses).
+      const rooms = await prisma.rooms.findMany({
+        where: { property_id: pid, deleted_at: null, status: 1 },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const lostFoundTable = JSON.parse(JSON.stringify(TABLES.lostFound));
+      const setOptions = (key: string, options: any[]) => {
+        const col = lostFoundTable.find((c: any) => c.key === key);
+        if (col) col.options = options;
+      };
+      setOptions('status_lost', STATUS_LOST);
+      setOptions('item_status', ITEM_LOST_FOUND_STATUS);
+      setOptions('room', rooms.map((r: any) => ({ value: Number(r.id), label: r.name })));
+
       success(res, bigintToNumber(data), 'Success', 200, {
-        table: buildDefaultTable(data),
+        table: lostFoundTable,
         permission: { view: true, add: true, edit: true, delete: true },
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });

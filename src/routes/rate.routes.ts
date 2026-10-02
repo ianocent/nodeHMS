@@ -69,7 +69,12 @@ router.post('/rate/rate', authMiddleware, requirePermission(86, 'view'), (req, r
   req.params.rateId = rateIdFromQuery(req);
   return RateController.rateGrid(req, res);
 });
-router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.create);
+// Laravel routes/cms.php:788 maps rate/rate/create to RateRateController@create, NOT
+// RateController@create. That handler returns the rate's own start_date/end_date in
+// `data` plus a master carrying business_date / is_checked / field_restrictions —
+// the rate-rate form reads all of those, and a wrong `data` leaves the grid's
+// start_date/end_date picks empty.
+router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.rateRateCreate);
 router.post('/rate/rate/store', authMiddleware, requirePermission(86, 'add'), (req, res) => {
   if (req.body.rate_id === undefined && req.body.bar_id !== undefined) req.body.rate_id = req.body.bar_id;
   return RateController.rateRateStore(req, res);
@@ -81,6 +86,7 @@ router.put('/rate/rate/:id', authMiddleware, requirePermission(86, 'edit'), (req
   return RateController.rateGridUpdate(req, res);
 });
 router.get('/rate/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.create);
+router.get('/rate/rate/:id/edit', authMiddleware, requirePermission(86, 'edit'), RateController.create);
 
 // ── /rate/rate-link-listing — RateRelationController parity (must precede /rate/:id) ──
 router.get('/rate/rate-link-listing', authMiddleware, requirePermission(86, 'view'), RateController.rateLinkListing);
@@ -141,20 +147,18 @@ router.get('/bar-rate/create', authMiddleware, requirePermission(87, 'add'), Rat
 router.post('/bar-rate', authMiddleware, requirePermission(87, 'add'), RateController.barRateStore);
 router.put('/bar-rate', authMiddleware, requirePermission(87, 'edit'), RateController.barRateUpdate);
 
-// ── /bar/rate parity aliases (Laravel BarRateController: index/create/store/update) ──
-router.get('/bar/rate', authMiddleware, requirePermission(87, 'view'), RateController.barRateIndex);
-router.post('/bar/rate', authMiddleware, requirePermission(87, 'view'), RateController.barRateIndex);
-router.get('/bar/rate/create', authMiddleware, requirePermission(87, 'add'), RateController.barRateCreate);
-router.post('/bar/rate/store', authMiddleware, requirePermission(87, 'add'), RateController.barRateStore);
-router.put('/bar/rate/:id', authMiddleware, requirePermission(87, 'edit'), RateController.barRateUpdate);
-// /bar/rate-link-listing parity (Laravel BarRelationController::link) — see line 197
+// /bar/rate parity aliases (Laravel BarRateController: index/create/store/update)
+// NOTE: registered further below, next to the other /bar routes, because the handlers
+// there need the bar_id -> rate_id + body->query normalisation. Registering them here
+// first shadowed those wrappers and every grid request fell through to emptyGrid.
 
 // Short alias: /rate/:id/update — frontend form edit URL
 router.get('/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.edit);
 
 // ── RateRate Grid (Laravel RateRateController parity, menuId 86) — rate/rate page ──
-router.get('/rate/rate', authMiddleware, requirePermission(86, 'view'), RateController.rateRateIndex);
-router.post('/rate/rate', authMiddleware, requirePermission(86, 'view'), RateController.rateRateIndex);
+// NOTE: the GET/POST /rate/rate pair is already registered at the top of this file
+// (delegating to RateController.rateGrid). Express keeps the first match, so
+// re-declaring it here silently shadowed that handler and rateRateIndex never ran.
 router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.rateRateCreate);
 router.post('/rate/rate/store', authMiddleware, requirePermission(86, 'add'), RateController.rateRateStore);
 router.put('/rate/rate/:id', authMiddleware, requirePermission(86, 'edit'), RateController.rateRateUpdate);
@@ -170,9 +174,6 @@ router.post('/rate/restriction', authMiddleware, requirePermission(86, 'edit'), 
   return RateController.rateGridRestrictionStore(req, res);
 });
 
-// Rate rate link listing (RateRelationController parity)
-router.get('/rate/rate-link-listing', authMiddleware, requirePermission(86, 'view'), RateController.rateLinkListing);
-
 // ── Bar Master (menuId: 87) — parity with Laravel BarController (rates where module='bar')
 // Order matters: static paths (create, minimum-rate, inclusives) BEFORE /bar/:id
 router.get('/bar', authMiddleware, requirePermission(87, 'view'), BarController.list);
@@ -182,17 +183,14 @@ router.get('/bar/minimum-rate', authMiddleware, requirePermission(87, 'view'), B
 router.put('/bar/minimum-rate/:id', authMiddleware, requirePermission(87, 'edit'), BarController.updateRoomType);
 
 // Bar inclusives (frontend sends bar_id as query param)
-router.get('/bar/inclusives', authMiddleware, requirePermission(87, 'view'), (req, res) => {
-  req.params.rateId = req.query.bar_id as string;
-  return RateAddonController.inclusiveList(req, res);
-});
-router.post('/bar/inclusives', authMiddleware, requirePermission(87, 'add'), (req, res) => {
-  req.params.rateId = req.query.bar_id as string;
-  return RateAddonController.inclusiveStore(req, res);
-});
-router.put('/bar/inclusives/:id', authMiddleware, requirePermission(87, 'edit'), RateAddonController.inclusiveUpdate);
-router.delete('/bar/inclusives/:id', authMiddleware, requirePermission(87, 'delete'), RateAddonController.inclusiveDestroy);
-router.delete('/bar/inclusives/:id/delete', authMiddleware, requirePermission(87, 'delete'), RateAddonController.inclusiveDelete);
+// These are their own table (bar_inclusives). They used to be routed to the rate
+// handlers, which wrote rows into rate_inclusives, so BAR Setup "Inclusive"
+// could not be stored. See RateAddonController.barInclusiveList.
+router.get('/bar/inclusives', authMiddleware, requirePermission(87, 'view'), RateAddonController.barInclusiveList);
+router.post('/bar/inclusives', authMiddleware, requirePermission(87, 'add'), RateAddonController.barInclusiveStore);
+router.put('/bar/inclusives/:id', authMiddleware, requirePermission(87, 'edit'), RateAddonController.barInclusiveUpdate);
+router.delete('/bar/inclusives/:id', authMiddleware, requirePermission(87, 'delete'), RateAddonController.barInclusiveDestroy);
+router.delete('/bar/inclusives/:id/delete', authMiddleware, requirePermission(87, 'delete'), RateAddonController.barInclusiveDelete);
 
 // ── /bar/rate — rate-bar/form grid page (must precede /bar/:id) ──
 router.get('/bar/rate', authMiddleware, requirePermission(87, 'view'), (req, res) => {
@@ -209,11 +207,9 @@ router.post('/bar/rate/store', authMiddleware, requirePermission(87, 'add'), (re
   if (req.body.rate_id === undefined && req.body.bar_id !== undefined) req.body.rate_id = req.body.bar_id;
   return RateController.barRateStore(req, res);
 });
-router.put('/bar/rate/:id', authMiddleware, requirePermission(87, 'edit'), (req, res) => {
-  if (req.body.rate_id === undefined) req.body.rate_id = req.params.id;
-  return RateController.barRateUpdate(req, res);
-});
+router.put('/bar/rate/:id', authMiddleware, requirePermission(87, 'edit'), RateController.barRateUpdate);
 router.get('/bar/rate/:id/update', authMiddleware, requirePermission(87, 'edit'), RateController.barRateCreate);
+router.get('/bar/rate/:id/edit', authMiddleware, requirePermission(87, 'edit'), RateController.barRateCreate);
 
 // ── /bar/rate-link-listing — BarRelationController::link parity (must precede /bar/:id) ──
 router.get('/bar/rate-link-listing', authMiddleware, requirePermission(87, 'view'), (req, res) => {
@@ -224,6 +220,7 @@ router.get('/bar/rate-link-listing', authMiddleware, requirePermission(87, 'view
 });
 
 router.get('/bar/:id/update', authMiddleware, requirePermission(87, 'edit'), BarController.edit);
+router.get('/bar/:id/edit', authMiddleware, requirePermission(87, 'edit'), BarController.edit);
 router.get('/bar/:id', authMiddleware, requirePermission(87, 'view'), BarController.show);
 router.put('/bar/:id', authMiddleware, requirePermission(87, 'edit'), BarController.update);
 router.delete('/bar/:id', authMiddleware, requirePermission(87, 'delete'), BarController.destroy);

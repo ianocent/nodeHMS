@@ -1,14 +1,9 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
 import { timingSafeEqual } from 'crypto';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, notFound } from '../utils/response';
 import { enqueueJob } from '../config/queue';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -309,7 +304,11 @@ export async function createStaahBookingCore(
       check_in_date: checkInDate ? new Date(checkInDate) : null,
       check_out_date: checkOutDate ? new Date(checkOutDate) : null,
       booking_no: bookingNo,
-      status_reservation: 1,
+      // status_reservation 1 = check_out. Creating channel bookings in that state
+      // made them invisible on the front-desk list (which filters to {0,3}) and
+      // impossible to check in (which requires status 3 → 0). A new booking is a
+      // RESERVATION (3); booking-engine parity already does this.
+      status_reservation: 3,
       status: 1,
       is_booking_engine: false,
       parent: 0n,
@@ -339,7 +338,9 @@ export async function createStaahBookingCore(
         night: nightDiff,
         adult: room.numberofadults || room.adult || 2,
         child: room.numberofchildren || room.child || 0,
-        status_reservation: 1,
+        // Same reason as the folio above: a new night is a reservation, not a
+        // completed stay.
+        status_reservation: 3,
         status: 1,
       },
     });
@@ -389,8 +390,6 @@ function extractRooms(reservation: any): any[] {
 }
 
 async function findOrCreateGuestProfile(propertyId: number, reservationData: any): Promise<any> {
-  const prisma = new PrismaClient();
-
   const rooms = extractRooms(reservationData);
   const room = rooms[0] || {};
   const customer = reservationData.customer || reservationData.Customer || {};
@@ -440,7 +439,6 @@ async function findOrCreateGuestProfile(propertyId: number, reservationData: any
 }
 
 async function resolveCompanyProfileId(propertyId: number, reservationData: any): Promise<number | null> {
-  const prisma = new PrismaClient();
   const affiliation = reservationData.affiliation || {};
   const channelId = affiliation.OTA_Code || null;
 
@@ -458,7 +456,6 @@ async function resolveCompanyProfileId(propertyId: number, reservationData: any)
 }
 
 async function findRoomMapping(interfaceId: number, staahRoomId: string): Promise<any> {
-  const prisma = new PrismaClient();
   const cleanId = staahRoomId?.replace(/[- ]/g, '').toLowerCase();
 
   const result: any = await prisma.$queryRawUnsafe(`
@@ -474,7 +471,6 @@ async function findRoomMapping(interfaceId: number, staahRoomId: string): Promis
 }
 
 async function findRateMapping(interfaceId: number, staahRateId: string): Promise<any> {
-  const prisma = new PrismaClient();
   const cleanId = staahRateId?.replace(/[- ]/g, '').toLowerCase();
 
   const result: any = await prisma.$queryRawUnsafe(`
@@ -490,7 +486,6 @@ async function findRateMapping(interfaceId: number, staahRateId: string): Promis
 }
 
 async function generateBookingNo(propertyId: number): Promise<string> {
-  const prisma = new PrismaClient();
   const prefix = 'OL' + String(propertyId).padStart(3, '0');
 
   const last = await prisma.folios.findFirst({

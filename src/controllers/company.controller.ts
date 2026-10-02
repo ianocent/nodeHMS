@@ -1,17 +1,15 @@
+import { Prisma } from '@prisma/client';
+import { prisma, pool } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
-import { success, error, badRequest, notFound } from '../utils/response';
-import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
-import { STATUSES, REGIONS, BILLINGS, TERMS, moneyFormat } from '../utils/cmsConfig';
+import { BILLINGS, REGIONS, STATUSES, TERMS, moneyFormat } from '../utils/cmsConfig';
+import { badRequest, error, notFound, success } from '../utils/response';
+import { uniqueExtendError } from '../utils/uniqueExtend';
 import { storageRoot } from '../utils/storage';
+import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
+import { activeWhere, applyStatusScope, pushCondition, searchPredicate } from '../utils/querySafety';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bn(v: any): any {
   if (typeof v === 'bigint') return Number(v);
@@ -33,7 +31,7 @@ function idParamBig(v: any): bigint { return BigInt(Array.isArray(v) ? v[0] : v)
 
 export class CompanyController {
 
-  // â”€â”€ Company Profile â”€â”€
+  //  Company Profile 
   static async list(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -49,6 +47,7 @@ export class CompanyController {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { deleted_at: trash ? { not: null } : null };
       if (pid) where.property_id = pid;
+      applyStatusScope(where, req, 'company_profiles');
 
       if (isReservation) {
         where.deleted_at = null;
@@ -60,7 +59,7 @@ export class CompanyController {
       }
 
       if (searchField && searchValue) {
-        where[searchField] = { contains: searchValue, mode: 'insensitive' };
+        pushCondition(where, searchPredicate('company_profiles', searchField, searchValue));
       }
 
       const orderBy: any = isReservation ? { account: 'asc' } : { id: 'desc' };
@@ -126,6 +125,43 @@ export class CompanyController {
         { label: 'Mobile Phone', key: 'mobile_phone', type: 'text', is_search: true },
       ] : TABLES.company;
 
+      // A company's market segment / source live in the model_has_types pivot,
+      // not on company_profiles — `sync_mkt_segment_*` is the OTA sync string and
+      // is usually empty. The reservation form needs the real selection to
+      // pre-fill market segment when a company is picked, so attach it here
+      // (PHP: CompanyProfile::formatData derives the same fields from `type`).
+      // Batched on the page's ids — attachCompanyTypes() would be N+1.
+      if (rows.length > 0) {
+        try {
+          const ids = rows.map((r: any) => r.id);
+          const links = await prisma.model_has_types.findMany({
+            where: {
+              model_type: 'App\\Models\\CompanyProfile',
+              model_id: { in: ids as any[] },
+              types: { group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'] } },
+            },
+            include: { types: { select: { id: true, name: true, group: true } } },
+          });
+          const byCompany = new Map<string, any[]>();
+          for (const l of links) {
+            const k = String(l.model_id);
+            const arr = byCompany.get(k);
+            if (arr) arr.push(l.types);
+            else byCompany.set(k, [l.types]);
+          }
+          rows = rows.map((r: any) => {
+            const types = byCompany.get(String(r.id)) || [];
+            const out: any = { ...r };
+            for (const t of types) {
+              const g = t.group;
+              const key = g === 'source' ? 'source' : g.startsWith('market-segment-') ? g.replace(/-/g, '_') : null;
+              if (key) out[key] = { value: Number(t.id), label: t.name };
+            }
+            return out;
+          });
+        } catch (e) { /* pivot unavailable — leave rows as-is */ }
+      }
+
       success(res, rows, 'Success', 200, {
         table,
         pagination: laravelPaging(total, lim, page),
@@ -142,6 +178,7 @@ export class CompanyController {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const where: any = { deleted_at: null };
       if (pid) where.property_id = pid;
+      applyStatusScope(where, req, 'company_profiles');
       if (s) where.name = { contains: s, mode: 'insensitive' };
       const data = await prisma.company_profiles.findMany({ where, select: { id: true, name: true }, orderBy: { name: 'asc' }, take: 20 });
       success(res, bn(data), 'Success');
@@ -168,11 +205,11 @@ prisma.types.findMany({
         orderBy: { name: 'asc' },
       }),
       prisma.properties.findUnique({ where: { id: pid } }),
-      prisma.countries.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.countries.findMany({ where: activeWhere('countries'), select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       // Do not fetch all cities to avoid huge payload (413 Request Entity Too Large). Frontend should use autocomplete or filtered API.
       Promise.resolve([]),
       // CodePost is HasProperties-scoped in Laravel
-      prisma.code_posts.findMany({ where: { deleted_at: null, ...(req.user?.lastProperty ? { property_id: pid } : {}) }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      prisma.code_posts.findMany({ where: activeWhere('code_posts', req.user?.lastProperty ? { property_id: pid } : {}, req.user?.lastProperty), select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     ]);
     const byGroup = (g: string) =>
       mktSeg.filter((t: any) => t.group === g).map((t: any) => ({ value: Number(t.id), label: t.name }));
@@ -252,9 +289,80 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       else if (g === 'source') out.source = { value: Number(t.type_id), label: t.types?.name };
       else if (g && g.startsWith('market-segment-')) out[g.replace(/-/g, '_')] = { value: Number(t.type_id), label: t.types?.name };
     }
+
+    // Plain string/number selects whose option list uses the same raw value.
+    const selectFields = ['type_company', 'billing_region', 'mailing_region', 'term'];
+    selectFields.forEach(f => {
+      if (out[f] !== null && out[f] !== undefined && out[f] !== '') out[f] = { value: out[f], label: out[f] };
+    });
+
+    // Country / city are stored as an id in a text column, so the id has to be
+    // resolved to a name and coerced to a Number. Shaping them as
+    // `{ value: "360", label: "360" }` never matched the option list (which is
+    // `{ value: 360, label: "Indonesia" }`), so the selects rendered blank on
+    // edit even though the values were stored correctly.
+    const geoIds = (['billing_country', 'billing_city', 'mailing_country', 'mailing_city'] as const).map(
+      (f) => ({ f, raw: out[f] }),
+    );
+    const numOf = (raw: any): number | null => {
+      if (raw === null || raw === undefined || raw === '') return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+    const countryIds = geoIds.filter((g) => g.f.endsWith('country')).map((g) => numOf(g.raw)).filter((n): n is number => n !== null);
+    const cityIds = geoIds.filter((g) => g.f.endsWith('city')).map((g) => numOf(g.raw)).filter((n): n is number => n !== null);
+    const [countryRows, cityRows] = await Promise.all([
+      countryIds.length
+        ? prisma.countries.findMany({ where: { id: { in: countryIds } }, select: { id: true, name: true } })
+        : Promise.resolve([] as any[]),
+      cityIds.length
+        ? prisma.cities.findMany({ where: { id: { in: cityIds } }, select: { id: true, name: true } })
+        : Promise.resolve([] as any[]),
+    ]);
+    const countryName = new Map(countryRows.map((c: any) => [Number(c.id), c.name]));
+    const cityName = new Map(cityRows.map((c: any) => [Number(c.id), c.name]));
+    for (const g of geoIds) {
+      const id = numOf(g.raw);
+      if (id === null) {
+        out[g.f] = null;
+        continue;
+      }
+      const name = g.f.endsWith('country') ? countryName.get(id) : cityName.get(id);
+      out[g.f] = { value: id, label: name ?? String(id) };
+    }
+
+    // `staff_in_charge` and `billing` are also rendered as selects but were
+    // left as raw values, which react-select cannot render a selection for.
+    if (out.staff_in_charge !== null && out.staff_in_charge !== undefined && out.staff_in_charge !== '') {
+      const sid = Number(out.staff_in_charge);
+      if (Number.isFinite(sid)) {
+        const staffRow = await prisma.users
+          .findFirst({ where: { id: BigInt(sid) }, select: { name: true } })
+          .catch(() => null);
+        out.staff_in_charge = { value: sid, label: staffRow?.name ?? String(sid) };
+      }
+    }
+    if (out.billing !== null && out.billing !== undefined && out.billing !== '') {
+      const billingVal = Number(out.billing);
+      const billingOpt = BILLINGS.find((b: any) => b.value === billingVal);
+      out.billing = { value: billingVal, label: billingOpt?.label ?? String(out.billing) };
+    }
+
+    // Booleans and `status` are rendered as toggles, not selects. Shaping them
+    // as `{ value, label }` made React coerce the object to `checked` (always
+    // truthy), so every toggle showed the wrong state and the next save wrote
+    // the inverted value. They must go back as plain booleans.
+    ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out'].forEach(f => {
+      if (out[f] !== null && out[f] !== undefined) out[f] = !!out[f];
+    });
+
+    if (out.status !== null && out.status !== undefined) out.status = !!out.status;
+    if (out.blacklist !== null && out.blacklist !== undefined) out.blacklist = !!out.blacklist;
+
     out.credit_limit = moneyFormat(d.credit_limit);
     try {
-      const r = await pool.query('SELECT remaining FROM company_profiles WHERE id = $1', [d.id]);
+      // @ts-ignore
+      const r = await pool.query('SELECT remaining FROM company_profiles WHERE id = $1', [String(d.id)]);
       const rem = r.rows?.[0]?.remaining;
       out.remaining = rem != null ? moneyFormat(Number(rem)) : 0;
     } catch { out.remaining = 0; }
@@ -284,6 +392,15 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (!name) { badRequest(res, 'name required'); return; }
+      // Laravel CompanyProfileController@store:253
+      // 'name' => [... 'unique_extend:company_profiles,name,NULL,id,deleted_at,NULL']
+      // Property-scoped: company_profiles carries property_id and each property keeps
+      // its own book of companies (this dataset has 21 name groups duplicated
+      // globally), so a literal global check would reject valid rows.
+      const dupName = await uniqueExtendError(prisma, 'company_profiles', 'name', 'name', name, null, {
+        property_id: pid,
+      });
+      if (dupName) { badRequest(res, dupName); return; }
       const d = await prisma.company_profiles.create({
         data: {
           property_id: pid, name, type_company: type_company || 'Corporate', email, telp, mobile_phone,
@@ -292,12 +409,18 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
           mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country'), mailing_city: v('mailing_city'), mailing_postal_code: v('mailing_postal_code'),
           term: v('term'), remarks: v('remarks'), short_code: v('short_code'), description: v('description'),
           business_regional: v('business_regional'), IATA: v('IATA'),
-          gst: b('gst'), is_stop_credit: b('is_stop_credit'), is_pay_commission: b('is_pay_commission'), is_charge_back: b('is_charge_back'), is_surcharge_opt_out: b('is_surcharge_opt_out'),
+          website: v('website'), fax: v('fax'), staff_in_charge: v('staff_in_charge'), billing: v('billing'),
+          gst: b('gst'), is_stop_credit: b('is_stop_credit'), is_pay_commission: b('is_pay_commission'), is_charge_back: b('is_charge_back'), is_surcharge_opt_out: b('is_surcharge_opt_out'), blacklist: b('blacklist'),
           commission_rate: v('commission_rate') ?? undefined, based_online_commission: v('based_online_commission') ?? undefined,
-          credit_limit: moneyN(credit_limit), status: status ?? 1, code_billing_id: '', created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
+          // `status` is a toggle on the client, so it arrives as a boolean while
+          // the column is a 0/1 int — Prisma rejected the boolean outright.
+          credit_limit: moneyN(credit_limit),
+          status: status === undefined ? 1 : (status === true || status === 1 || status === '1' ? 1 : 0),
+          code_billing_id: '', created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
-      await pool.query('UPDATE company_profiles SET remaining = $1 WHERE id = $2', [moneyN(credit_limit), d.id]);
+      // @ts-ignore
+      await pool.query('UPDATE company_profiles SET remaining = $1 WHERE id = $2', [moneyN(credit_limit), String(d.id)]);
       await CompanyController.syncCompanyTypes(d.id, req.body);
       success(res, await CompanyController.attachCompanyTypes(d), 'Created');
     } catch (err: any) { console.error(err); error(res, 'Failed', 500); }
@@ -310,26 +433,38 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const { name, type_company, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
+      // Laravel CompanyProfileController@update:503 (own id excluded).
+      if (name !== undefined) {
+        const dupName = await uniqueExtendError(prisma, 'company_profiles', 'name', 'name', name, id, {
+          property_id: existing.property_id,
+        });
+        if (dupName) { badRequest(res, dupName); return; }
+      }
       const data: any = { updated_at: new Date() };
       if (name !== undefined) data.name = name; if (type_company !== undefined) data.type_company = type_company;
       if (email !== undefined) data.email = email; if (telp !== undefined) data.telp = telp;
       if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (billing_address !== undefined) data.billing_address = billing_address;
       if (billing_city !== undefined) data.billing_city = billing_city; if (billing_country !== undefined) data.billing_country = billing_country;
-      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'mailing_country', 'mailing_city', 'mailing_postal_code', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA']) {
+      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'mailing_country', 'mailing_city', 'mailing_postal_code', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA', 'website', 'fax', 'staff_in_charge', 'billing']) {
         if (v(k) !== undefined) data[k] = v(k);
       }
-      for (const k of ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out']) {
+      for (const k of ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out', 'blacklist']) {
         if (b(k) !== undefined) data[k] = b(k);
       }
-      if (v('commission_rate') !== undefined) data.commission_rate = v('commission_rate');
-      if (v('based_online_commission') !== undefined) data.based_online_commission = v('based_online_commission');
-      if (credit_limit !== undefined) data.credit_limit = moneyN(credit_limit); if (status !== undefined) data.status = status;
+      if (v('commission_rate') !== undefined) data.commission_rate = Number(v('commission_rate'));
+      if (v('based_online_commission') !== undefined) data.based_online_commission = Number(v('based_online_commission'));
+      if (credit_limit !== undefined) data.credit_limit = moneyN(credit_limit);
+      // `status` is a toggle, so the client sends a boolean. Normalise to the
+      // 0/1 the column stores — passing an object here silently landed on 0.
+      if (status !== undefined) data.status = status === true || status === 1 || status === '1' ? 1 : 0;
       const origCL = Number(existing.credit_limit ?? 0);
       const newCL = credit_limit !== undefined ? moneyN(credit_limit) : origCL;
       if (credit_limit !== undefined && newCL !== origCL) {
-        const rr = await pool.query('SELECT remaining FROM company_profiles WHERE id = $1', [id]);
+        // @ts-ignore
+        const rr = await pool.query('SELECT remaining FROM company_profiles WHERE id = $1', [String(id)]);
         const oldRem = rr.rows?.[0]?.remaining != null ? Number(rr.rows[0].remaining) : 0;
-        await pool.query('UPDATE company_profiles SET remaining = $1 WHERE id = $2', [(newCL - origCL) + oldRem, id]);
+        // @ts-ignore
+        await pool.query('UPDATE company_profiles SET remaining = $1 WHERE id = $2', [(newCL - origCL) + oldRem, String(id)]);
       }
       await prisma.company_profiles.update({ where: { id }, data });
       await CompanyController.syncCompanyTypes(id, req.body);
@@ -342,7 +477,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try { const id = idP(req.params.id); await prisma.company_profiles.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Client (Client menu = Laravel CompanyController, table `companies`) â”€â”€
+  //  Client (Client menu = Laravel CompanyController, table `companies`) 
   static async clientFormat(d: any, props: string): Promise<any> {
     return {
       id: Number(d.id),
@@ -367,6 +502,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const s = req.query.search as string;
       const trash = req.query.trash === '1' || req.query.trash === 'true';
       const where: any = { deleted_at: trash ? { not: null } : null };
+      applyStatusScope(where, req, 'companies');
       if (s) where.OR = [
         { name: { contains: s, mode: 'insensitive' } },
         { ip: { contains: s, mode: 'insensitive' } },
@@ -475,7 +611,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try { const id = idP(req.params.id); await prisma.companies.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Contact Person â”€â”€
+  //  Contact Person 
   static async contactList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -495,7 +631,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('Company contact list error:', err); error(res, 'Failed', 500); }
   }
   static async contactStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, name, position, email, tel, mobile_phone, is_default } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, name, position, email, tel, mobile_phone, is_default } = req.body;
       const d = await prisma.company_profile_contact_persons.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), name, position, email, tel, mobile_phone, is_default: is_default ?? false, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -523,7 +659,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('Contact person by company error:', err); error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Department â”€â”€
+  //  Department 
   static async deptList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -538,7 +674,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('Company department list error:', err); error(res, 'Failed', 500); }
   }
   static async deptStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, department, country_id, city_id, address, postal_code } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, department, country_id, city_id, address, postal_code } = req.body;
       const d = await prisma.company_profile_departments.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), department, country_id: country_id ? BigInt(country_id) : null, city_id: city_id ? BigInt(city_id) : null, address, postal_code, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -553,7 +689,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try { const id = idP(req.params.id); await prisma.company_profile_departments.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Activity â”€â”€
+  //  Activity 
   static async activityList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -568,9 +704,9 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('Company activity list error:', err); error(res, 'Failed', 500); }
   }
   static async activityStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, date, subject, objective, notes } = req.body;
-      const d = await prisma.company_profile_activities.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), date: new Date(date || Date.now()), subject, objective, notes, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id } }); success(res, bn(d), 'Created');
-    } catch (err: any) { error(res, 'Failed', 500); }
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, date, subject, objective, notes, status } = req.body;
+      const d = await prisma.company_profile_activities.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), date: new Date(date || Date.now()), subject, objective, notes, status: status === true || status === 'true' || status === 1 ? 1 : 0, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id ? BigInt(req.user.id) : null } }); success(res, bn(d), 'Created');
+    } catch (err: any) { console.error('activityStore error:', err); error(res, 'Failed', 500); }
   }
   static async activityUpdate(req: Request, res: Response): Promise<void> {
     try { const id = idP(req.params.id); const { date, subject, objective, notes } = req.body; const data: any = { updated_at: new Date() };
@@ -582,7 +718,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try { const id = idP(req.params.id); await prisma.company_profile_activities.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Document â”€â”€
+  //  Document 
   static async documentList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -599,7 +735,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async documentStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { company_profile_id, file, description } = req.body;
+      const { company_profile_id = req.query.company_id as string, file, description } = req.body;
       if (!company_profile_id) { badRequest(res, 'company_profile_id required'); return; }
       let fileName: string | null = file ?? null;
       let filePath: string | null = null;
@@ -626,7 +762,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try { const id = idP(req.params.id); await prisma.company_profile_documents.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Guest â”€â”€
+  //  Guest 
   static async guestList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
@@ -643,7 +779,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async guestStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { company_profile_id, first_name, last_name, email, mobile_phone } = req.body;
+      const { company_profile_id = req.query.company_id as string, first_name, last_name, email, mobile_phone } = req.body;
       if (!company_profile_id) { badRequest(res, 'company_profile_id required'); return; }
       const d = await prisma.company_guests.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), first_name, last_name, email, mobile_phone, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
@@ -652,52 +788,65 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try { const id = idP(req.params.id); await prisma.company_guests.update({ where: { id }, data: { deleted_at: new Date() } }); success(res, null, 'Deleted'); } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Folio â”€â”€
+  //  Folio 
   static async folioList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const companyId = req.query.company_id as string;
+      const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
+      const s = req.query.search as string;
       const where: any = { property_id: pid, deleted_at: null };
       if (companyId) where.company_profile_id = BigInt(companyId);
-      const data = await prisma.folios.findMany({ where, orderBy: { id: 'desc' }, take: 50 });
-      success(res, bn(data), 'Success');
+      if (s) {
+        where.OR = [
+          { folio_number: { contains: s, mode: 'insensitive' } },
+        ];
+      }
+      const [data, total] = await Promise.all([
+        prisma.folios.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * lim, take: lim }),
+        prisma.folios.count({ where })
+      ]);
+      success(res, bn(data), 'Success', 200, {
+        table: TABLES.guestFolio,
+        permission: listPermission(req, { add: true, edit: true, delete: true }),
+        pagination: laravelPaging(total, lim, page)
+      });
     } catch (err: any) { error(res, 'Failed', 500); }
   }
 
-// â”€â”€ Statistic â”€â”€
+//  Statistic 
   // Laravel CompanyProfileStatisticController@index parity: group RESERVATIONS by month
   // (F Y) for the company's folios — ARR = room_revenue / room_night.
   static async statisticIndex(req: Request, res: Response): Promise<void> {
     try {
       const companyId = req.query.company_id as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 99999;
-      const folioWhere: any = {
-        status_reservation: { not: 2 },
-        OR: [
-          { parent: 0, type_reservation: 'fit' },
-          { type_reservation: 'git', parent: { not: 0 } },
-        ],
-      };
-      if (companyId) folioWhere.company_profile_id = BigInt(companyId);
-      const folios = await prisma.folios.findMany({ where: folioWhere, select: { id: true } });
-      const folioIds = folios.map((f: any) => f.id);
-      const reservations = folioIds.length ? await prisma.reservations.findMany({ where: { folio_id: { in: folioIds } } }) : [];
-      const monthMap = new Map<string, { room_night: number; room_revenue: number }>();
-      for (const r of reservations) {
-        const key = new Date(r.date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-        const prev = monthMap.get(key) || { room_night: 0, room_revenue: 0 };
-        prev.room_night += 1;
-        prev.room_revenue += Number(r.amount);
-        monthMap.set(key, prev);
-      }
-      const result = [...monthMap.entries()]
-        .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-        .map(([month, v]) => ({
-          month,
-          arr: moneyFormat(v.room_night ? v.room_revenue / v.room_night : 0),
-          room_night: v.room_night,
-          room_revenue: moneyFormat(v.room_revenue),
-        }));
+      // Aggregate in SQL instead of loading every reservation row: the folio list
+      // here is ~41k ids, and sending them as an `IN (...)` list made this the
+      // slowest endpoint in the suite.
+      const companyFilter = companyId ? Prisma.sql`AND f.company_profile_id = ${BigInt(companyId)}` : Prisma.empty;
+      const rows: any[] = await prisma.$queryRaw`
+        SELECT
+          to_char(r.date, 'Month YYYY') AS month_key,
+          to_char(r.date, 'MM') AS month_sort,
+          to_char(r.date, 'YYYY') AS year_sort,
+          COUNT(*)::bigint AS room_night,
+          COALESCE(SUM(r.amount), 0) AS room_revenue
+        FROM reservations r
+        JOIN folios f ON f.id = r.folio_id
+        WHERE f.status_reservation IS DISTINCT FROM 2
+          AND ((f.parent = 0 AND f.type_reservation = 'fit')
+               OR (f.type_reservation = 'git' AND f.parent IS DISTINCT FROM 0))
+          ${companyFilter}
+        GROUP BY month_key, month_sort, year_sort
+        ORDER BY year_sort DESC, month_sort DESC
+      `;
+      const result = rows.map((r: any) => ({
+        month: String(r.month_key).trim(),
+        arr: moneyFormat(Number(r.room_night) ? Number(r.room_revenue) / Number(r.room_night) : 0),
+        room_night: Number(r.room_night),
+        room_revenue: moneyFormat(Number(r.room_revenue)),
+      }));
       success(res, result, 'Success', 200, {
         table: TABLES.companyStatistic,
         permission: listPermission(req, { add: true }),
@@ -707,11 +856,11 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('Company statistic list error:', err); error(res, 'Failed', 500); }
   }
 
-  // â”€â”€ Company Folio store/destroy (CompanyProfileFolioController parity) â”€â”€
+  //  Company Folio store/destroy (CompanyProfileFolioController parity) 
   static async folioStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { company_profile_id, check_in_date, check_out_date, name, booking_agent, folio, status } = req.body;
+      const { company_profile_id = req.query.company_id as string, check_in_date, check_out_date, name, booking_agent, folio, status } = req.body;
       if (!company_profile_id) { badRequest(res, 'company_profile_id is required'); return; }
       const d = await prisma.folios.create({ data: {
         property_id: pid,
@@ -742,11 +891,11 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('Company folio destroy error:', err); error(res, 'Failed to delete folio', 500); }
   }
 
-  // â”€â”€ Statistic store/destroy (CompanyProfileStatisticController parity) â”€â”€
+  //  Statistic store/destroy (CompanyProfileStatisticController parity) 
   static async statisticStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { company_id, month, room_night, room_revenue, other_revenue } = req.body;
+      const { company_id = req.query.company_id as string, month, room_night, room_revenue, other_revenue } = req.body;
       if (!company_id) { badRequest(res, 'company_id is required'); return; }
       const d = await prisma.company_profile_statistics.create({ data: {
         property_id: pid,
@@ -814,7 +963,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     } catch (err: any) { console.error('AR transaction list error:', err); error(res, 'Failed', 500); }
   }
   static async arTransactionStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id, transaction_code, document, date, description, amount } = req.body;
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, transaction_code, document, date, description, amount } = req.body;
       const d = await prisma.company_profile_ar_transactions.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), transaction_code, document, date: new Date(date || Date.now()), description: description || '', amount: amount ?? 0, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -831,8 +980,8 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const s = req.query.search as string;
       const companyId = req.query.company_id as string;
       const [companyBilling, codeBillings] = await Promise.all([
-        prisma.company_profile_billing_setups.findMany({ where: { ...(companyId ? { company_profile_id: BigInt(companyId) } : {}) } }),
-        prisma.code_billings.findMany({ where: { status: 1 }, orderBy: { sort: 'asc' } }),
+        prisma.company_profile_billing_setups.findMany({ where: activeWhere('company_profile_billing_setups', { ...(companyId ? { company_profile_id: BigInt(companyId) } : {}), ...(req.user?.lastProperty ? { property_id: req.user.lastProperty } : {}) }, req.user?.lastProperty) }),
+        prisma.code_billings.findMany({ where: activeWhere('code_billings', req.user?.lastProperty ? { property_id: req.user.lastProperty } : {}, req.user?.lastProperty), orderBy: { sort: 'asc' } }),
       ]);
       let data = codeBillings.map((code) => {
         const setup = companyBilling.find((b) => String(b.code_billing_id) === String(code.id));
@@ -855,7 +1004,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async billingSetupStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { company_profile_id, code_billing_id, billing } = req.body;
+      const { company_profile_id = req.query.company_id as string, code_billing_id, billing } = req.body;
       const d = await prisma.company_profile_billing_setups.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), code_billing_id: BigInt(code_billing_id), billing, status: 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id } });
       success(res, bn(d), 'Created');
     } catch (err: any) { console.error('Billing setup store error:', err); error(res, 'Failed', 500); }

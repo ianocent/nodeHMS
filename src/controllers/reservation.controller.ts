@@ -1,23 +1,33 @@
-import { PrismaPg } from '@prisma/adapter-pg';
+import { prisma } from '../config/prisma';
+// @ts-ignore
+import { Prisma } from '@prisma/client';
+// @ts-ignore
 import { Prisma, PrismaClient } from '@prisma/client';
 import { Request, Response } from 'express';
-import { Pool } from 'pg';
 import { enqueueJob } from '../config/queue';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { calculateCodePost, moneyFormat } from '../utils/cmsConfig';
-import { ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { ROOM_STATUSES, MAID_STATUSES, STATUS_RESERVATION_MAP, getColorRoom, getColorMaid } from '../utils/cmsStatus';
 import { applyPromoDiscounts, findPromosForNight, priceNight, PromoLike } from '../utils/reservationPricing';
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
 import { applySearchField, dataSearch } from '../utils/search';
+import { pushCondition, searchPredicate } from '../utils/querySafety';
+import { mandatoryCheckInBlock, readPropertyMandatory } from '../utils/guestMandatory';
+import { writeAudit } from '../utils/audit';
+import {
+  performCheckIn,
+  performCheckOut,
+  performReverseStay,
+  performChangeStayDate,
+  folioBalanceMinorUnits,
+  isFolioSettledMinorPublic,
+} from './front-desk.controller';
 import { AuthController } from './auth.controller';
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 // Status reservation constants (matching Laravel config/cms.php)
 const STATUS_RESERVATION = {
@@ -134,7 +144,7 @@ function reservationBn(val: any): any {
   return val;
 }
 
-// â”€â”€ Helper-endpoint parity helpers (Laravel ReservationController) â”€â”€
+//  Helper-endpoint parity helpers (Laravel ReservationController) 
 function fmtDateOnly(d: any): string | null {
   if (!d) return null;
   if (d instanceof Date) return d.toISOString().substring(0, 10);
@@ -189,8 +199,202 @@ function parseTimeLike(value: any, base: Date): Date | null {
   return isNaN(parsed.getTime()) ? null : parsed;
 }
 
+// Checkbox groups arrive from the FE as `[{ name, value }]` arrays (the same
+// shape as checkbokmulti), so the old `=== true || Number(x) === 1` test never
+// matched and is_24_hour was persisted as 0 for every reservation.
+function flagToInt(value: any): number {
+  if (value === true || value === 1 || value === '1') return 1;
+  if (Array.isArray(value)) return value.some((v: any) => v && (v.value === true || v.value === 1 || v.value === '1')) ? 1 : 0;
+  if (value && typeof value === 'object') return value.value === true || value.value === 1 || value.value === '1' ? 1 : 0;
+  return 0;
+}
+
 function dayKeyF(d: Date | string): string {
   return new Date(d).toISOString().slice(0, 10);
+}
+
+// Numeric columns (adult/child/add_bed/quantity/night) arrive from the FE as
+// strings because every input posts text/plain. Prisma rejects a String for an
+// Int field outright, so coerce at the boundary — and treat "" / null / NaN as
+// "not supplied" so the column default applies instead of persisting 0 for a
+// field the user never touched.
+function intOr(value: any, fallback: number): number {
+  if (value === null || value === undefined || value === '') return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+// Market segment / source are attached to a company through model_has_types,
+// not as columns (PHP: `$company->type->where('group', 'market-segment-1')`).
+// Picking a company therefore already determines them — the reservation must
+// not force the user to re-enter them on the reservation form.
+// Laravel ReservationController@store:619-660 — when `company_profile_id` is absent and
+// the booking is flagged walk-in (or house-use), the company is resolved server-side from
+// the company's `company-type` tag instead of being demanded from the form:
+//
+//   CompanyProfile::with('type')->getWalkIn()->first()   // type group 'company-type', name LIKE '%Walk In%'
+//   CompanyProfile::with('type')->getHouseUse()->first() // ... LIKE '%House Use%'
+//
+// Three things the naive port got wrong:
+//   - it filtered `company_profiles.type_company` by the literal 'Walk In', but that
+//     column stores a types.id (3085 = "Corporate"), so it never matched and
+//     `master.is_walk_in` came back null;
+//   - the tag names are not consistently cased in this dataset ("Walk In" / "WALK IN",
+//     "House use" / "HOUSE USE") and Postgres LIKE is case-sensitive;
+//   - it took the first matching *link*, but some linked company ids no longer exist.
+//     Laravel's `->first()` orders by the company itself, so resolve to the first ACTIVE
+//     company in id order instead.
+async function resolveSpecialCompanyProfile(
+  kind: 'walk-in' | 'house-use'
+): Promise<{
+  id: bigint;
+  name: string | null;
+  /** `{ value: <types.id>, label: <types.name> }` or null, read from model_has_types. */
+  market_segment_1: { value: number; label: string } | null;
+  market_segment_2: { value: number; label: string } | null;
+  market_segment_3: { value: number; label: string } | null;
+  market_segment_4: { value: number; label: string } | null;
+  source: { value: number; label: string } | null;
+} | null> {
+  const nameFragment = kind === 'walk-in' ? 'walk in' : 'house use';
+  const links = await prisma.model_has_types.findMany({
+    where: {
+      model_type: 'App\\Models\\CompanyProfile',
+      types: { group: 'company-type', name: { contains: nameFragment, mode: 'insensitive' } },
+    },
+    select: { model_id: true },
+  });
+  if (links.length === 0) return null;
+  const company = await prisma.company_profiles.findFirst({
+    where: {
+      id: { in: links.map((l: any) => l.model_id) },
+      deleted_at: null,
+      status: STATUS_ACTIVE,
+    },
+    select: { id: true, name: true },
+    orderBy: { id: 'asc' },
+  });
+  if (!company) return null;
+
+  // Market segments and source live in `model_has_types`, NOT in the
+  // `sync_mkt_segment_*` / `source` columns. Those columns are OTA sync
+  // strings and are empty on every walk-in row, which is why the FIT form
+  // arrived with blank market segments and could not store them.
+  const typeLinks = await prisma.model_has_types.findMany({
+    where: {
+      model_type: 'App\\Models\\CompanyProfile',
+      model_id: company.id,
+      types: {
+        deleted_at: null,
+        group: {
+          in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'],
+        },
+      },
+    },
+    select: { types: { select: { id: true, name: true, group: true } } },
+  });
+
+  const opt = (group: string) => {
+    const hit = typeLinks.find((l: any) => l.types?.group === group)?.types;
+    return hit ? { value: Number(hit.id), label: hit.name } : null;
+  };
+
+  return {
+    id: company.id,
+    name: company.name,
+    market_segment_1: opt('market-segment-1'),
+    market_segment_2: opt('market-segment-2'),
+    market_segment_3: opt('market-segment-3'),
+    market_segment_4: opt('market-segment-4'),
+    source: opt('source'),
+  };
+}
+
+async function companyMarketSegments(companyId: bigint): Promise<Record<string, bigint>> {
+  const links = await prisma.model_has_types.findMany({
+    where: {
+      model_type: 'App\\Models\\CompanyProfile',
+      model_id: companyId,
+      types: { group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'] } },
+    },
+    include: { types: { select: { id: true, group: true } } },
+  });
+  const out: Record<string, bigint> = {};
+  for (const l of links) {
+    const g = l.types?.group;
+    if (!g) continue;
+    const key = g === 'source' ? 'source' : g.replace(/-/g, '_');
+    if (!(key in out)) out[key] = BigInt(l.type_id);
+  }
+  return out;
+}
+
+// Body values win (the FE pre-fills them from the company); the pivot is the
+// fallback so an empty/missing field still resolves to the company's segment.
+async function resolveMarketSegments(body: any, companyId: bigint | null): Promise<Record<string, bigint | null>> {
+  const fromCompany: Record<string, bigint> = companyId
+    ? await companyMarketSegments(companyId).catch((): Record<string, bigint> => ({}))
+    : {};
+  const pick = (key: string): bigint | null => {
+    const raw = body?.[key];
+    const v = raw && typeof raw === 'object' ? (raw as any).value : raw;
+    if (v === undefined || v === null || v === '' || String(v) === '0') {
+      return fromCompany[key] ?? null;
+    }
+    try { return BigInt(v); } catch { return null; }
+  };
+  return {
+    market_segment_1: pick('market_segment_1'),
+    market_segment_2: pick('market_segment_2'),
+    market_segment_3: pick('market_segment_3'),
+    market_segment_4: pick('market_segment_4'),
+    source: pick('source'),
+  };
+}
+
+// Laravel HasTypes::syncTypes keeps the pivot in sync for BOTH the folio and each
+// reservation row:
+//
+//   ReservationController::store  -> $folio->syncTypes($request)   (:720)
+//   ReservationController::update -> $folio->syncTypes($request)   (:1564)
+//   Folio::saveReservation         -> $reservation->syncTypes($req) (:2645)
+//
+// The detail form reads market segment / source off whichever pivot it finds,
+// and the folio list + `formatUpdate` read the FOLIO one. Writing only the
+// reservation pivot is what left the fields blank after both create and edit.
+// `model_type` is the pivot discriminator, so both targets share this helper.
+async function syncTypesPivot(
+  modelType: 'App\\Models\\Folio' | 'App\\Models\\Reservation',
+  modelId: bigint,
+  segments: Record<string, bigint | null>,
+): Promise<void> {
+  for (const [key, typeId] of Object.entries(segments)) {
+    if (!typeId) continue;
+    // `source` is a single word, not underscore-separated, so the generic
+    // replace below already yields the right group. It must NOT be skipped:
+    // the detail form reads source off this pivot, so omitting it left the
+    // field permanently blank after a create.
+    const group = key.replace(/_/g, '-');
+    const existing = await prisma.model_has_types.findFirst({
+      where: { model_type: modelType, model_id: modelId, types: { group } },
+    });
+    if (existing) {
+      if (BigInt(existing.type_id) !== typeId) {
+        await prisma.model_has_types.updateMany({
+          where: { type_id: existing.type_id, model_type: modelType, model_id: modelId },
+          data: { type_id: typeId },
+        });
+      }
+    } else {
+      await prisma.model_has_types.create({
+        data: { type_id: typeId, model_type: modelType, model_id: modelId },
+      });
+    }
+  }
+}
+
+async function syncReservationTypes(reservationId: bigint, segments: Record<string, bigint | null>): Promise<void> {
+  return syncTypesPivot('App\\Models\\Reservation', reservationId, segments);
 }
 
 function rateTableColumns(codePostOptions: any[], withStatus: boolean): any[] {
@@ -264,14 +468,30 @@ function barRowData(b: any, codePostById: Map<any, any>): any {
   };
 }
 
-// Laravel RoomType::onlyAvailable parity â€” returns available room ids for [dateStart, dateEnd)
-async function onlyAvailableRoomIds(propertyId: bigint | number, dateStart: string, dateEnd: string): Promise<Set<number>> {
+// Laravel RoomType::onlyAvailable parity — returns available room ids for [dateStart, dateEnd)
+//
+// `excludeFolioId` lets an existing reservation keep (or take) its own room:
+// without it, re-assigning a folio to a room it already occupies would report
+// the room as taken by itself.
+async function onlyAvailableRoomIds(
+  propertyId: bigint | number,
+  dateStart: string,
+  dateEnd: string,
+  excludeFolioId?: bigint,
+): Promise<Set<number>> {
   const pId = BigInt(Number(propertyId));
   const start = new Date(dateStart);
   const end = new Date(dateEnd);
   const [rooms, availability, workOrders, reservations] = await Promise.all([
     prisma.rooms.findMany({
-      where: { deleted_at: null, status: 1, property_id: pId, room_status: { not: ROOM_STATUSES.out_of_order.id } },
+      // Both out_of_order and blocked rooms are unsellable. Excluding only OOO
+      // let a room the grid shows as Blocked appear in every room picker.
+      where: {
+        deleted_at: null,
+        status: 1,
+        property_id: pId,
+        room_status: { notIn: [ROOM_STATUSES.out_of_order.id, ROOM_STATUSES.block.id] },
+      },
       select: { id: true },
     }),
     prisma.room_availabilities.findMany({
@@ -283,7 +503,11 @@ async function onlyAvailableRoomIds(propertyId: bigint | number, dateStart: stri
       select: { room_id: true },
     }),
     prisma.reservations.findMany({
-      where: { date: { gte: start, lte: end }, status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] } },
+      where: {
+        date: { gte: start, lte: end },
+        status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
+        ...(excludeFolioId ? { folio_id: { not: excludeFolioId } } : {}),
+      },
       select: { room_id: true, room_id_next: true, room_status_name: true },
     }),
   ]);
@@ -291,10 +515,13 @@ async function onlyAvailableRoomIds(propertyId: bigint | number, dateStart: stri
   for (const a of availability) blocked.add(Number(a.room_id));
   for (const w of workOrders) blocked.add(Number(w.room_id));
   for (const r of reservations) {
-    if (r.room_status_name !== ROOM_STATUSES.due_out.name) {
-      if (r.room_id != null) blocked.add(Number(r.room_id));
-      if (r.room_id_next != null) blocked.add(Number(r.room_id_next));
-    }
+    // No due-out exemption. The old check read `reservations.room_status_name`,
+    // a denormalised column nothing in this codebase ever writes, so the
+    // exemption could never fire and every occupied room blocked correctly by
+    // accident. An overlapping reservation on this folio must also not block
+    // itself, hence the caller-side folio exclusion.
+    if (r.room_id != null) blocked.add(Number(r.room_id));
+    if (r.room_id_next != null) blocked.add(Number(r.room_id_next));
   }
   const available = new Set<number>();
   for (const room of rooms) if (!blocked.has(Number(room.id))) available.add(Number(room.id));
@@ -397,6 +624,48 @@ const safeParseFolioData = (raw: any): any => {
   try { return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {}); } catch { return {}; }
 };
 
+/**
+ * Card Type options for the folio edit form.
+ *
+ * The list used to be a hardcoded ['KTP', 'Paspor', 'SIM', 'KITAS'], but that
+ * predates the data: `guest_profiles.card_type` also holds values like 'NRIC'
+ * (Indonesian hotels overwhelmingly use KTP, but NRIC rows exist). A guest whose
+ * card_type was anything outside the hardcoded four came back from the edit
+ * endpoint with that value set, yet the dropdown had no matching option, so the
+ * select rendered blank and saving then wrote the blank back -- which is how the
+ * reservation screen and the guest profile ended up disagreeing about the same
+ * guest's card.
+ *
+ * So: keep the known defaults first (stable order for the common ones), then
+ * append every distinct value that is actually in use for this property. If the
+ * lookup fails we still return the defaults rather than an empty dropdown.
+ */
+const DEFAULT_CARD_TYPES = ['KTP', 'Paspor', 'SIM', 'KITAS'];
+async function buildCardTypeOptions(propertyId?: bigint | null): Promise<{ value: string; label: string }[]> {
+  const options = DEFAULT_CARD_TYPES.map((c) => ({ value: c, label: c }));
+  const seen = new Set(options.map((o) => o.value.toLowerCase()));
+  try {
+    const distinct = await prisma.guest_profiles.findMany({
+      where: {
+        card_type: { not: null },
+        deleted_at: null,
+        ...(propertyId ? { property_id: propertyId } : {}),
+      },
+      distinct: ['card_type'],
+      select: { card_type: true },
+    });
+    for (const row of distinct) {
+      const value = (row.card_type ?? '').trim();
+      if (!value || seen.has(value.toLowerCase())) continue;
+      seen.add(value.toLowerCase());
+      options.push({ value, label: value });
+    }
+  } catch (err: any) {
+    console.error('Card type option lookup failed:', err?.message || err);
+  }
+  return options;
+}
+
 // Folio::saveReservation with is_update=1 — delete unposted rows then re-price
 // and recreate per-night rows for the given list items (store-loop parity).
 async function saveReservationRows(folio: any, items: any[], userId: bigint | undefined): Promise<void> {
@@ -428,6 +697,7 @@ async function saveReservationRows(folio: any, items: any[], userId: bigint | un
       nightDate.setDate(nightDate.getDate() + i);
 
       const pricing = await priceNight({
+        // @ts-ignore
         prisma,
         rateId: rateIdBig,
         roomTypeId: roomTypeIdEff,
@@ -448,9 +718,9 @@ async function saveReservationRows(folio: any, items: any[], userId: bigint | un
           rate_id: rateIdBig,
           room_type_id: item.room_type_id ? BigInt(item.room_type_id) : null,
           room_id: item.room_id ? BigInt(item.room_id) : null,
-          adult: item.adult || 1,
-          child: item.child || 0,
-          add_bed: item.add_bed || 0,
+          adult: intOr(item.adult, 1),
+          child: intOr(item.child, 0),
+          add_bed: intOr(item.add_bed, 0),
           check_in_date: new Date(item.check_in_date),
           check_out_date: itemCheckOut,
           date: nightDate,
@@ -618,8 +888,24 @@ async function createFolioWithRetry(propertyId: bigint, typeReservation: string,
     try {
       return await prisma.folios.create({ data: folioData(folioNumber) });
     } catch (err: any) {
-      if (err?.code === 'P2002' && err?.meta?.target?.includes('folio_number')) {
-        continue; // race — retry
+      // Prisma 7 with the pg driver adapter no longer populates
+      // `meta.target` ("Unique constraint failed on the (not available)"),
+      // so keying the retry off `meta.target.includes('folio_number')` never
+      // matched and every duplicate-key race surfaced as a 500. Match on the
+      // P2002 code and inspect the adapter's original constraint instead.
+      if (err?.code === 'P2002') {
+        const constraint = String(
+          err?.meta?.driverAdapterError?.cause?.constraint
+          ?? err?.meta?.driverAdapterError?.cause?.originalMessage
+          ?? '',
+        );
+        // A violation on the primary key means the id sequence is out of sync
+        // with the table — retrying a different folio number cannot help.
+        if (constraint.includes('folio_number')) continue;
+        throw new Error(
+          `Folio id sequence out of sync (constraint: ${constraint || 'unknown'}). ` +
+          'Run the sequence repair SQL in the project root before retrying.',
+        );
       }
       throw err;
     }
@@ -661,9 +947,9 @@ export class ReservationController {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async list(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -675,10 +961,29 @@ export class ReservationController {
       const parentId = req.query.parent_id ? BigInt(req.query.parent_id as string) : null;
 
       const trash = req.query.trash === '1' || req.query.trash === 'true';
+
+      // Laravel: `->statusReservation(['reservation','pending'], $displayStatus)`.
+      // The default pair is only a fallback — when the user picks statuses in the
+      // filter bar those win. Without this the "Status Folio" dropdown was dead
+      // UI, and a virtual folio that had been checked in vanished from
+      // /reservation/vr entirely (it only reappeared on the check-out screen).
+      const displayStatusRaw = (req.query.display_status as string) || '';
+      const statusCodes = displayStatusRaw
+        .split(',')
+        .map((c: string) => c.trim())
+        .filter(Boolean);
+      let statusWhere: any = { in: [STATUS_RESERVATION.reservation.id, STATUS_RESERVATION.pending.id] };
+      if (statusCodes.length > 0) {
+        const ids = statusCodes
+          .map((code: string) => Object.values(STATUS_RESERVATION).find((s: any) => s.code === code)?.id)
+          .filter((v: any) => v !== undefined && v !== null);
+        if (ids.length > 0) statusWhere = { in: ids };
+      }
+
       const where: any = {
         deleted_at: trash ? { not: null } : null,
         is_pos_trx: false,
-        status_reservation: { in: [STATUS_RESERVATION.reservation.id, STATUS_RESERVATION.pending.id] },
+        status_reservation: statusWhere,
       };
 
 if (propertyId) where.property_id = propertyId;
@@ -721,7 +1026,7 @@ const table = [
         { label: 'C', key: 'cc' },
       ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'folios');
 
       const [folios, total] = await Promise.all([
         prisma.folios.findMany({
@@ -733,7 +1038,17 @@ const table = [
             properties: { select: { name: true } },
             reservations: {
               where: { deleted_at: null },
-              include: { room_types: { select: { name: true } } },
+              orderBy: { date: 'asc' },
+              select: {
+                is_posting: true,
+                room_name: true,
+                room_type_name: true,
+                room_id_next: true,
+                adult: true,
+                child: true,
+                room_types: { select: { name: true } },
+                rooms: { select: { name: true, room_status: true, maid_status: true } },
+              },
             },
           },
         }),
@@ -763,9 +1078,17 @@ const formatted = folios.map((f: any) => {
           if (gp) guestName = `${gp.first_name || ''} ${gp.last_name || ''}`.trim();
         }
 
-        const lastReservation = f.reservations?.[f.reservations.length - 1];
-        const roomName = lastReservation?.room_name || '';
-        const roomTypeName = lastReservation?.room_type_name || '';
+        // Folio::lastReservation() parity: first reservation with is_posting = 0
+        // ordered by date asc, falling back to the most recent reservation.
+        const allReservations = f.reservations ?? [];
+        const notPostedReservations = allReservations.filter((r: any) => Number(r.is_posting ?? 0) === 0);
+        const lastReservation = notPostedReservations.length > 0
+          ? notPostedReservations[0]
+          : [...allReservations].sort(
+              (a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+            )[0];
+        const roomName = lastReservation?.rooms?.name || lastReservation?.room_name || '';
+        const roomTypeName = lastReservation?.room_types?.name || lastReservation?.room_type_name || '';
         const roomNext = lastReservation?.room_id_next ? (lastReservation.rooms?.name || '') : '';
 
         // Get balance from transactions (batched)
@@ -793,8 +1116,25 @@ const formatted = folios.map((f: any) => {
           }];
         };
 
-        const roomStatusColor: { label: string; color: string; is_color: boolean }[] = []; // Would need room relation
-        const roomCleanStatusColor: { label: string; color: string; is_color: boolean }[] = []; // Would need room relation
+        // Room/Clean Status from the room the last reservation points at,
+        // mirroring Folio::formatList(). Empty array when no room is attached.
+        const attachedRoom = lastReservation?.rooms ?? null;
+        const roomStatusId = attachedRoom ? Number(attachedRoom.room_status) : null;
+        const maidStatusId = attachedRoom ? Number(attachedRoom.maid_status) : null;
+        const roomStatusName = roomStatusId != null
+          ? (Object.values(ROOM_STATUSES).find((s: any) => s.id === roomStatusId) as any)?.name
+          : null;
+        const maidStatusName = maidStatusId != null
+          ? (Object.values(MAID_STATUSES).find((s: any) => s.id === maidStatusId) as any)?.name
+          : null;
+        const roomStatusColor: { label: string; color: string; is_color: boolean }[] =
+          attachedRoom && roomStatusName && roomStatusId != null
+            ? [{ label: roomStatusName.replace(/\s+/g, '-'), color: getColorRoom(roomStatusId), is_color: true }]
+            : [];
+        const roomCleanStatusColor: { label: string; color: string; is_color: boolean }[] =
+          attachedRoom && maidStatusName && maidStatusId != null
+            ? [{ label: maidStatusName.replace(/\s+/g, '-'), color: getColorMaid(maidStatusId), is_color: true }]
+            : [];
 
         return {
           id: Number(f.id),
@@ -857,9 +1197,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation-item (ReservationItemController parity - room grid per folio)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async reservationItemIndex(req: Request, res: Response): Promise<void> {
     const tableRom = [
       { label: 'Doc Date', key: 'date', type: 'none', is_search: true },
@@ -923,6 +1263,7 @@ success(res, formatted, 'Success', 200, {
           where: {
             deleted_at: null,
             status: STATUS_ACTIVE,
+            property_id: req.user?.lastProperty ?? 0,
             group: { in: ['remark-room', 'market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'] },
           },
           select: { id: true, name: true, group: true },
@@ -932,7 +1273,7 @@ success(res, formatted, 'Success', 200, {
           select: { id: true, name: true, market_segment_1: true, market_segment_2: true, market_segment_3: true, market_segment_4: true },
         }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: 'cancellation-reservation' },
+          where: { deleted_at: null, status: STATUS_ACTIVE, property_id: req.user?.lastProperty ?? 0, group: 'cancellation-reservation' },
           select: { id: true, name: true },
           orderBy: { name: 'asc' },
         }),
@@ -1038,9 +1379,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /cms/reservation-item/:id (ReservationItemController update parity - basic)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async reservationItemUpdate(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -1195,6 +1536,7 @@ success(res, formatted, 'Success', 200, {
           };
           const nights = await prisma.reservations.count({ where: { folio_id: folioRow.id, deleted_at: null } });
           const promos: PromoLike[] = folioRow.promo_code
+            // @ts-ignore
             ? await findPromosForNight(prisma, BigInt(rate_id), dayStart, nights, String(folioRow.promo_code))
             : [];
           const amountNet = applyPromoDiscounts(Number(total), promos);
@@ -1328,9 +1670,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/create
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async create(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -1366,20 +1708,19 @@ success(res, formatted, 'Success', 200, {
           where: {
             deleted_at: null,
             status: STATUS_ACTIVE,
+            property_id: propertyId,
             group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status', 'cancellation-reservation'] },
           },
           select: { id: true, name: true, group: true },
         }),
-        // 3: walk-in company
-        prisma.company_profiles.findFirst({
-          where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'Walk In' },
-          select: { id: true, name: true, sync_mkt_segment_1: true, sync_mkt_segment_2: true, sync_mkt_segment_3: true, sync_mkt_segment_4: true, source: true },
-        }),
-        // 4: house-use company
-        prisma.company_profiles.findFirst({
-          where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'House Use' },
-          select: { id: true, name: true, sync_mkt_segment_1: true, sync_mkt_segment_2: true, sync_mkt_segment_3: true, sync_mkt_segment_4: true, source: true },
-        }),
+        // 3 + 4: walk-in / house-use company, resolved through the company-type tag.
+        // The old lookup filtered `type_company: 'Walk In'`, but that column holds a
+        // types.id (3085 = "Corporate"), so it never matched and the FIT form received
+        // `master.is_walk_in = null` — leaving the company fields blank and making save
+        // fail with "The company profile id field is required." Laravel resolves it via
+        // CompanyProfile::scopeGetWalkIn / scopeGetHouseUse.
+        Promise.resolve(null),
+        Promise.resolve(null),
         // 5: property config
         prisma.properties.findUnique({
           where: { id: propertyId },
@@ -1404,8 +1745,8 @@ success(res, formatted, 'Success', 200, {
       if (results[0].status === 'fulfilled') roomTypes = results[0].value;
       if (results[1].status === 'fulfilled') companies = results[1].value;
       if (results[2].status === 'fulfilled') types = results[2].value;
-      if (results[3].status === 'fulfilled') walkInCompany = results[3].value;
-      if (results[4].status === 'fulfilled') houseUseCompany = results[4].value;
+      walkInCompany = await resolveSpecialCompanyProfile('walk-in');
+      houseUseCompany = await resolveSpecialCompanyProfile('house-use');
       if (results[5].status === 'fulfilled') property = results[5].value;
       if (results[6].status === 'fulfilled') logAudit = results[6].value;
 
@@ -1489,8 +1830,11 @@ success(res, formatted, 'Success', 200, {
           { label: 'APPLICABLE FOR ALL', color: 'bg-primary text-white rounded-md font-semibold' },
         ],
         business_date: businessDate,
-        is_walk_in: walkInCompany ? { id: Number(walkInCompany.id), name: walkInCompany.name, market_segment_1: walkInCompany.sync_mkt_segment_1, market_segment_2: walkInCompany.sync_mkt_segment_2, market_segment_3: walkInCompany.sync_mkt_segment_3, market_segment_4: walkInCompany.sync_mkt_segment_4, source: walkInCompany.source } : null,
-        is_house_use: houseUseCompany ? { id: Number(houseUseCompany.id), name: houseUseCompany.name, market_segment_1: houseUseCompany.sync_mkt_segment_1, market_segment_2: houseUseCompany.sync_mkt_segment_2, market_segment_3: houseUseCompany.sync_mkt_segment_3, market_segment_4: houseUseCompany.sync_mkt_segment_4, source: houseUseCompany.source } : null,
+        // `market_segment_*` / `source` are already `{ value, label }` from
+        // resolveSpecialCompanyProfile (model_has_types), which is the shape
+        // the step-4 selects and the save payload both expect.
+        is_walk_in: walkInCompany ? { id: Number(walkInCompany.id), name: walkInCompany.name, market_segment_1: walkInCompany.market_segment_1, market_segment_2: walkInCompany.market_segment_2, market_segment_3: walkInCompany.market_segment_3, market_segment_4: walkInCompany.market_segment_4, source: walkInCompany.source } : null,
+        is_house_use: houseUseCompany ? { id: Number(houseUseCompany.id), name: houseUseCompany.name, market_segment_1: houseUseCompany.market_segment_1, market_segment_2: houseUseCompany.market_segment_2, market_segment_3: houseUseCompany.market_segment_3, market_segment_4: houseUseCompany.market_segment_4, source: houseUseCompany.source } : null,
         markets: property ? {
           is_market_segment_1: property.market_segment_1,
           is_market_segment_2: property.market_segment_2,
@@ -1515,6 +1859,11 @@ success(res, formatted, 'Success', 200, {
   // POST /api/reservations
   // ─────────────────────────────────────────────────────────────â”€
   static async store(req: Request, res: Response): Promise<void> {
+    // store() has no prisma.$transaction (PHP wraps it in DB::transaction), so
+    // a failure after the folio insert used to leave an orphan folio behind —
+    // folio #47418 had 0 reservations after a failed create. Track what this
+    // call creates and undo it best-effort in the catch.
+    const createdFolios: bigint[] = [];
     try {
       const propertyId = req.user?.lastProperty;
       const userId = req.user?.id;
@@ -1533,7 +1882,7 @@ success(res, formatted, 'Success', 200, {
       const {
         type_reservation = 'fit',
         guest_profile_id,
-        company_profile_id,
+        company_profile_id: bodyCompanyProfileId,
         first_name,
         last_name,
         email,
@@ -1557,18 +1906,73 @@ success(res, formatted, 'Success', 200, {
         dept_branch,
       } = body;
 
-      // Validation
+      // Laravel ReservationController@store:619-660 resolves the company from the
+      // company-type tag when the caller did not send one and the booking is a walk-in
+      // or house-use, then merges that company's market segments / source into the
+      // payload. Anything the form did send still wins.
+      let company_profile_id = bodyCompanyProfileId;
+      let specialCompanyMissing = false;
+      if (!company_profile_id) {
+        if (is_walk_in) {
+          const walkIn = await resolveSpecialCompanyProfile('walk-in');
+          if (walkIn) company_profile_id = walkIn.id;
+          else specialCompanyMissing = true;
+        } else if (is_house_use) {
+          const houseUse = await resolveSpecialCompanyProfile('house-use');
+          if (houseUse) company_profile_id = houseUse.id;
+          else specialCompanyMissing = true;
+        }
+      }
+      if (company_profile_id) {
+        const specialSegments = await companyMarketSegments(company_profile_id);
+        body.market_segment_1 = body.market_segment_1 ?? specialSegments.market_segment_1 ?? null;
+        body.market_segment_2 = body.market_segment_2 ?? specialSegments.market_segment_2 ?? null;
+        body.market_segment_3 = body.market_segment_3 ?? specialSegments.market_segment_3 ?? null;
+        body.market_segment_4 = body.market_segment_4 ?? specialSegments.market_segment_4 ?? null;
+        body.source = body.source ?? specialSegments.source ?? null;
+      }
+
+      // Validation — Laravel ReservationController@store :326-360 + :410-469.
+      // Top-level check_in_date/check_out_date are only required in the `else`
+      // branch (git / day-use / vr). For `fit` the dates live per-row inside
+      // reservation_list and are validated there instead, so demanding them at
+      // the top level 422'd every FIT create.
       const errors: Record<string, string[]> = {};
       if (!guest_profile_id) errors.guest_profile_id = ['The guest profile id field is required.'];
-      if (!company_profile_id) errors.company_profile_id = ['The company profile id field is required.'];
-      if (!check_in_date) errors.check_in_date = ['Check in date is required'];
-      if (!check_out_date) errors.check_out_date = ['Check out date is required'];
-
-      if (type_reservation === 'fit' && reservation_list.length === 0) {
-        errors.reservation_list = ['Reservation list is required'];
+      if (!company_profile_id) {
+        errors.company_profile_id = specialCompanyMissing
+          ? [(is_walk_in ? 'Company Walk In' : 'Company House Use') + ' not found']
+          : ['The company profile id field is required.'];
       }
-      if (type_reservation === 'git' && room_reservation_list.length === 0) {
-        errors.room_reservation_list = ['Room reservation list is required'];
+
+      if (type_reservation === 'fit') {
+        if (reservation_list.length === 0) {
+          errors['reservation_list'] = ['Reservation list is required'];
+        } else {
+          reservation_list.forEach((row: any, idx: number) => {
+            // Laravel marks only the two dates `required`. rate_id and
+            // room_type_id are `nullable` there, so requiring them here would
+            // reject payloads the reference accepts.
+            if (!row?.check_in_date) {
+              errors[`reservation_list.${idx}.check_in_date`] = ['Check in date is required'];
+            }
+            if (!row?.check_out_date) {
+              errors[`reservation_list.${idx}.check_out_date`] = ['Check out date is required'];
+            }
+          });
+        }
+      } else {
+        if (!check_in_date) errors.check_in_date = ['Check in date is required'];
+        if (!check_out_date) errors.check_out_date = ['Check out date is required'];
+        if (type_reservation === 'git') {
+          if (room_reservation_list.length === 0) {
+            errors.room_reservation_list = ['Room reservation list is required'];
+          } else {
+            room_reservation_list.forEach((row: any, idx: number) => {
+              if (!row?.id) errors[`room_reservation_list.${idx}.id`] = ['Room type is required'];
+            });
+          }
+        }
       }
 
       if (Object.keys(errors).length > 0) {
@@ -1576,12 +1980,13 @@ success(res, formatted, 'Success', 200, {
         return;
       }
 
-      // Resolve company_profile_id for walk-in / house-use
+      // Resolve company_profile_id for walk-in / house-use. The pre-validation pass
+      // above normally already filled company_profile_id, so these are a safety net;
+      // both used to query `type_company: 'Walk In'`, which never matches because that
+      // column stores a types.id.
       let resolvedCompanyId = company_profile_id ? BigInt(company_profile_id) : null;
       if (!resolvedCompanyId && is_walk_in) {
-        const walkInCompany = await prisma.company_profiles.findFirst({
-          where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'Walk In' },
-        });
+        const walkInCompany = await resolveSpecialCompanyProfile('walk-in');
         if (!walkInCompany) {
           badRequest(res, 'Company Walk In not found');
           return;
@@ -1589,9 +1994,7 @@ success(res, formatted, 'Success', 200, {
         resolvedCompanyId = walkInCompany.id;
       }
       if (!resolvedCompanyId && is_house_use) {
-        const houseUseCompany = await prisma.company_profiles.findFirst({
-          where: { deleted_at: null, status: STATUS_ACTIVE, type_company: 'House Use' },
-        });
+        const houseUseCompany = await resolveSpecialCompanyProfile('house-use');
         if (!houseUseCompany) {
           badRequest(res, 'Company House Use not found');
           return;
@@ -1608,6 +2011,11 @@ success(res, formatted, 'Success', 200, {
       const companyProfile = resolvedCompanyId
         ? await prisma.company_profiles.findUnique({ where: { id: resolvedCompanyId } })
         : null;
+
+      // Market segment follows the chosen company (PHP merges it from
+      // `$company->type` for walk-in/house-use; here it is the general rule so
+      // the form never asks the user to retype what the company already has).
+      const marketSegments = await resolveMarketSegments(body, resolvedCompanyId);
 
       // Pricing inputs (Laravel Folio::saveReservation engine)
       const property = await prisma.properties.findUnique({ where: { id: propertyId! }, select: { is_tax: true } });
@@ -1632,6 +2040,7 @@ success(res, formatted, 'Success', 200, {
         if (bodyAppliedPromos.length > 0) return bodyAppliedPromos;
         if (!promo_code || !rateIdStr || rateIdStr === '0') return [];
         const rateIdBig = BigInt(rateIdStr);
+        // @ts-ignore
         return findPromosForNight(prisma, rateIdBig, night, getNight, promo_code);
       }
 
@@ -1640,17 +2049,40 @@ success(res, formatted, 'Success', 200, {
         ? STATUS_RESERVATION.pending.id
         : STATUS_RESERVATION.reservation.id;
 
-      // Calculate actual check-in/check-out from reservation_list
-      let actualCheckIn = check_in_date;
-      let actualCheckOut = check_out_date;
+      // Calculate actual check-in/check-out. FIT carries the dates per-row inside
+      // reservation_list (Laravel :410-421), so fall back to the earliest row
+      // in / latest row out when the top-level fields are absent. Without this
+      // `new Date(undefined)` would throw "Invalid Date" on create.
+      let actualCheckIn = check_in_date ?? null;
+      let actualCheckOut = check_out_date ?? null;
+
+      if (!actualCheckIn || !actualCheckOut) {
+        const rowDates = reservation_list
+          .filter((r: any) => r?.check_in_date && r?.check_out_date)
+          .map((r: any) => ({
+            in: new Date(r.check_in_date).getTime(),
+            out: new Date(r.check_out_date).getTime(),
+          }));
+        if (rowDates.length > 0) {
+          actualCheckIn = actualCheckIn ?? new Date(Math.min(...rowDates.map((d: any) => d.in))).toISOString();
+          actualCheckOut = actualCheckOut ?? new Date(Math.max(...rowDates.map((d: any) => d.out))).toISOString();
+        }
+      }
+
+      if (!actualCheckIn || !actualCheckOut) {
+        validationError(res, {
+          check_in_date: ['Check in date is required'],
+          check_out_date: ['Check out date is required'],
+        });
+        return;
+      }
 
       if (type_reservation === 'day-use') {
         actualCheckOut = actualCheckIn; // Day-use: same date
       }
 
       // Generate folio number
-      const folio = await createFolioWithRetry(propertyId!, type_reservation, (folioNumber) => ({
-        folio_number: folioNumber,
+      const folio = await createFolioWithRetry(propertyId!, type_reservation, (folioNumber) => ({        folio_number: folioNumber,
         parent: 0,
         property_id: propertyId!,
         type_reservation: type_reservation === 'day-use' ? 'fit' : type_reservation,
@@ -1697,6 +2129,13 @@ success(res, formatted, 'Success', 200, {
         card_expiry: guestProfile?.card_expiry || null,
         created_by: userId,
       }));
+      createdFolios.push(folio.id);
+
+      // Laravel ReservationController::store :720 — `$folio->syncTypes($request)`
+      // writes the market segment / source onto the FOLIO pivot. The folio list
+      // and `formatUpdate` read it from there, so without this the fields came
+      // back blank on a freshly created reservation.
+      await syncTypesPivot('App\\Models\\Folio', folio.id, marketSegments);
 
       // Create reservation items (per-night entries, priced via Folio::saveReservation parity)
       if (type_reservation !== 'git' && reservation_list.length > 0) {
@@ -1716,13 +2155,35 @@ success(res, formatted, 'Success', 200, {
           const getNight = type_reservation === 'day-use' ? 0 : nights;
           const loopCount = type_reservation === 'day-use' ? 1 : nights;
           const rateIdBig = item.rate_id && String(item.rate_id) !== '0' ? BigInt(item.rate_id) : null;
-          const roomTypeIdEff = item.room_type_id ? BigInt(item.room_type_id) : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null);
+
+          // Room resolution — Laravel Folio::saveReservation :2548-2584, the same
+          // rule update() applies. A pending folio holds no room at all
+          // (ReservationController::store :726-733 nulls room_id); otherwise a
+          // room picked as `room_id_next` is promoted into `room_id` when the
+          // item is `immediately` or the folio is still in `reservation`, so the
+          // physical room attaches at reservation time and not only at check-in.
+          const isPendingRsv = statusReservation === STATUS_RESERVATION.pending.id;
+          const isImmediate = item.immediately === true || Number(item.immediately) === 1;
+          const promoteRoom = isImmediate || statusReservation === STATUS_RESERVATION.reservation.id;
+          const roomIdEff: bigint | null = isPendingRsv
+            ? null
+            : promoteRoom
+              ? (item.room_id_next ? BigInt(item.room_id_next) : (item.room_id ? BigInt(item.room_id) : null))
+              : (item.room_id ? BigInt(item.room_id) : null);
+          const roomTypeIdEff: bigint | null = isPendingRsv
+            ? null
+            : promoteRoom
+              ? (item.room_type_id_next ? BigInt(item.room_type_id_next) : (item.room_type_id ? BigInt(item.room_type_id) : null))
+              : (item.room_type_id ? BigInt(item.room_type_id) : null);
+          const roomNextIdEff = isPendingRsv || promoteRoom ? null : (item.room_id_next ? BigInt(item.room_id_next) : null);
+          const roomTypeNextIdEff = isPendingRsv || promoteRoom ? null : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null);
 
           for (let i = 0; i < loopCount; i++) {
             const nightDate = new Date(itemCheckIn);
             nightDate.setDate(nightDate.getDate() + i);
 
             const pricing = await priceNight({
+              // @ts-ignore
               prisma,
               rateId: rateIdBig,
               roomTypeId: roomTypeIdEff,
@@ -1756,23 +2217,25 @@ success(res, formatted, 'Success', 200, {
               }
             }
 
-            await prisma.reservations.create({
+            const createdReservation = await prisma.reservations.create({
               data: {
                 property_id: propertyId!,
                 folio_id: folio.id,
                 rate_id: rateIdBig,
-                room_type_id: item.room_type_id ? BigInt(item.room_type_id) : null,
-                room_id: item.room_id ? BigInt(item.room_id) : null,
-                adult: item.adult || 1,
-                child: item.child || 0,
-                add_bed: item.add_bed || 0,
+                room_type_id: roomTypeIdEff,
+                room_id: roomIdEff,
+                room_type_id_next: roomTypeNextIdEff,
+                room_id_next: roomNextIdEff,
+                adult: intOr(item.adult, 1),
+                child: intOr(item.child, 0),
+                add_bed: intOr(item.add_bed, 0),
                 // Per-item fields persisted by Laravel saveReservation (:2610-2633)
                 eta: parseTimeLike(item.eta, nightDate),
                 etd: parseTimeLike(item.etd, nightDate),
-                is_24_hour: item.is_24_hour === true || Number(item.is_24_hour) === 1 ? 1 : 0,
+                is_24_hour: flagToInt(item.is_24_hour),
                 package_id: item.package_id ? BigInt(item.package_id) : null,
-                quantity: Number(item.quantity ?? 1),
-                quantity_extra_day_use: Number(item.quantity_extra_day_use ?? 0),
+                quantity: intOr(item.quantity, 1),
+                quantity_extra_day_use: intOr(item.quantity_extra_day_use, 0),
                 is_extra_day_use: item.is_extra_day_use === true || Number(item.is_extra_day_use) === 1 ? 1 : 0,
                 check_in_date: new Date(item.check_in_date),
                 check_out_date: itemCheckOut,
@@ -1801,6 +2264,7 @@ success(res, formatted, 'Success', 200, {
                 created_by: userId,
               },
             });
+            await syncReservationTypes(createdReservation.id, marketSegments);
           }
         }
       }
@@ -1852,6 +2316,7 @@ success(res, formatted, 'Success', 200, {
               nightDate.setDate(nightDate.getDate() + n);
 
               const pricing = await priceNight({
+                // @ts-ignore
                 prisma,
                 rateId: gitRateId,
                 roomTypeId: gitRoomTypeId,
@@ -1865,14 +2330,14 @@ success(res, formatted, 'Success', 200, {
                 promos: await promosForNight(roomItem.rate_id ? String(roomItem.rate_id) : null, nightDate, gitNights),
               });
 
-              await prisma.reservations.create({
+              const gitReservation = await prisma.reservations.create({
                 data: {
                   property_id: propertyId!,
                   folio_id: subFolio.id,
                   rate_id: gitRateId,
                   room_type_id: gitRoomTypeId,
-                  adult: roomItem.adult || 1,
-                  child: roomItem.child || 0,
+                  adult: intOr(roomItem.adult, 1),
+                  child: intOr(roomItem.child, 0),
                   check_in_date: new Date(actualCheckIn),
                   check_out_date: new Date(actualCheckOut),
                   date: nightDate,
@@ -1895,6 +2360,8 @@ success(res, formatted, 'Success', 200, {
                   created_by: userId,
                 },
               });
+              createdFolios.push(subFolio.id);
+              await syncReservationTypes(gitReservation.id, marketSegments);
             }
 
             subIndex++;
@@ -1915,13 +2382,22 @@ success(res, formatted, 'Success', 200, {
       });
       success(res, result, message, 200);
     } catch (err: any) {
+      // Best-effort rollback for this store attempt (matches PHP DB::rollBack).
+      try {
+        if (createdFolios.length > 0) {
+          await prisma.reservations.deleteMany({ where: { folio_id: { in: createdFolios } } });
+          await prisma.folios.deleteMany({ where: { id: { in: createdFolios } } });
+        }
+      } catch (rbErr: any) {
+        // swallow rollback errors
+      }
       error(res, `Failed to create reservation: ${err?.message || 'unknown'}`, 500);
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async show(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -1951,9 +2427,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/:id/edit
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // Replicates Laravel Folio::formatData (+ ReservationController@edit master) â€” GET /reservation/:id/update
   static async edit(req: Request, res: Response): Promise<void> {
     try {
@@ -2022,8 +2498,19 @@ success(res, formatted, 'Success', 200, {
         : 0;
       const reservationsMeta = isParentGit && childFolio ? childFolio : folio;
 
-      const [typeLinks, roomRows] = await Promise.all([
+      const [typeLinks, roomRows, reservationTypeLinks] = await Promise.all([
         prisma.model_has_types.findMany({ where: { model_type: { contains: 'Folio' }, model_id: id }, include: { types: true } }),
+        // Market segment / source live on the Reservation pivot (Folio.php:2645
+        // `$reservation->syncTypes($request)`), not the Folio one, so the detail
+        // form has to read them per item — reading only the folio pivot left
+        // every field blank.
+        prisma.model_has_types.findMany({
+          where: {
+            model_type: 'App\\Models\\Reservation',
+            model_id: { in: reservations.map((r: any) => r.id) },
+          },
+          include: { types: true },
+        }),
         prisma.rooms.findMany({
           where: {
             OR: [
@@ -2035,6 +2522,19 @@ success(res, formatted, 'Success', 200, {
       ]);
       const roomMap = new Map(roomRows.map((r: any) => [Number(r.id), r]));
 
+      // Per-reservation type lookup, keyed by reservation id then group.
+      const resTypesById = new Map<string, any[]>();
+      for (const l of reservationTypeLinks as any[]) {
+        const k = String(l.model_id);
+        const arr = resTypesById.get(k);
+        if (arr) arr.push(l.types);
+        else resTypesById.set(k, [l.types]);
+      }
+      const reservationType = (reservationId: any, group: string): any => {
+        const t = (resTypesById.get(String(reservationId)) || []).find((x: any) => x?.group === group);
+        return t ? { value: Number(t.id), label: t.name } : [];
+      };
+
       const folioTypes = (group: string): any => {
         const t = typeLinks.find((l: any) => l.types?.group === group);
         return t?.types ? { value: Number(t.types.id), label: t.types.name } : [];
@@ -2044,7 +2544,7 @@ success(res, formatted, 'Success', 200, {
         prisma.company_profiles.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE, property_id: pid }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
         prisma.room_types.findMany({ where: { deleted_at: null, status: STATUS_ACTIVE, property_id: pid }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
         prisma.types.findMany({
-          where: { deleted_at: null, status: STATUS_ACTIVE, group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status'] } },
+          where: { deleted_at: null, status: STATUS_ACTIVE, property_id: pid, group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status'] } },
           select: { id: true, name: true, group: true },
         }),
         prisma.properties.findUnique({ where: { id: pid }, include: { cities: true } }),
@@ -2109,7 +2609,7 @@ success(res, formatted, 'Success', 200, {
           { label: 'House Use', value: 'is_house_use' },
           { label: 'Complimentary', value: 'complimentary' },
         ],
-        cardtypes: ['KTP', 'Paspor', 'SIM', 'KITAS'].map((c) => ({ value: c, label: c })),
+        cardtypes: buildCardTypeOptions(req.user?.lastProperty),
         companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         legend: [
@@ -2141,7 +2641,7 @@ success(res, formatted, 'Success', 200, {
           is_market_segment_3: !!property?.market_segment_3,
           is_market_segment_4: !!property?.market_segment_4,
           is_source: !!property?.source,
-          mandatory_check_in: [],
+          mandatory_check_in: await readPropertyMandatory(prisma, folio.property_id),
         },
       };
 
@@ -2150,6 +2650,10 @@ success(res, formatted, 'Success', 200, {
         if (name) return name;
         const m = Object.values(ROOM_STATUSES).find((s: any) => s.id === Number(code));
         return m?.name ?? String(code ?? '');
+      };
+      const maidStatusLabel = (code: any): string => {
+        const m = Object.values(MAID_STATUSES).find((s: any) => s.id === Number(code));
+        return m?.name ?? '';
       };
 
       const isDayUse = !!folio.is_day_use;
@@ -2217,6 +2721,13 @@ success(res, formatted, 'Success', 200, {
           quantity_extra_day_use: first.quantity_extra_day_use,
           is_extra_day_use: !!first.is_extra_day_use,
           is_24_hour: !!first.is_24_hour,
+          // Read off this reservation's own pivot rows (see resTypesById above).
+          market_segment_1: reservationType(first.id, 'market-segment-1'),
+          market_segment_2: reservationType(first.id, 'market-segment-2'),
+          market_segment_3: reservationType(first.id, 'market-segment-3'),
+          market_segment_4: reservationType(first.id, 'market-segment-4'),
+          source: reservationType(first.id, 'source'),
+          remark_room: reservationType(first.id, 'remark-room'),
         });
       });
 
@@ -2365,9 +2876,16 @@ success(res, formatted, 'Success', 200, {
         guest: {
           guest_name: guestName(guestProfile?.first_name ?? null, guestProfile?.last_name ?? null, guestProfile?.account),
           guest_profile_id: folio.guest_profile_id ? Number(folio.guest_profile_id) : null,
-          card_type: { value: folio.card_type, label: folio.card_type },
-          card_number: guestProfile?.card_number ?? null,
-          card_expiry: folio.card_expiry,
+          // All three card fields read from the folio, with the guest profile as
+          // the fallback. They used to be mixed -- `card_type` and `card_expiry`
+          // from the folio, `card_number` from the guest profile -- so for a guest
+          // whose folio had no card copied onto it the form showed an empty Card
+          // Type next to a filled NRIC, and saving then wrote the blank back.
+          // The profile wins when the folio has nothing, because that is where the
+          // card is actually kept (guest_profiles is the master copy).
+          card_type: { value: folio.card_type ?? guestProfile?.card_type ?? null, label: folio.card_type ?? guestProfile?.card_type ?? null },
+          card_number: folio.card_number ?? guestProfile?.card_number ?? null,
+          card_expiry: folio.card_expiry ?? guestProfile?.card_expiry ?? null,
           email: guestProfile?.email ?? null,
           status_profile: folioTypes('guest-status') || normalFallback,
           gender: folio.gender ? { value: folio.gender, label: folio.gender } : [],
@@ -2398,7 +2916,16 @@ success(res, formatted, 'Success', 200, {
         is_change_room: reservations.some((r: any) => r.room_id_next != null),
         balance: moneyFormat(balance),
         revenue,
-        room_status: lastRoom ? roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name) : '',
+          // Room status stays a plain string here; the edit form reads
+          // `.label`, so keep both shapes consistent (see FE room_status branch).
+          room_status: lastRoom
+            ? { value: Number(lastRoom.room_status), label: roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name) }
+            : [],
+          // Clean/maid status from the attached room, as a coloured pill so the
+          // detail screen shows the same pair the folio list does.
+          room_clean_status: lastRoom
+            ? [{ label: maidStatusLabel(lastRoom.maid_status), color: getColorMaid(Number(lastRoom.maid_status)), is_color: true }]
+            : [],
         total_night: folio.check_in_date && folio.check_out_date ? Math.round((new Date(folio.check_out_date).getTime() - new Date(folio.check_in_date).getTime()) / 86400000) : 0,
         is_do_not_move: true,
         type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
@@ -2421,9 +2948,24 @@ success(res, formatted, 'Success', 200, {
         room_type: lastReservation?.room_type_name ?? lastReservation?.room_types?.name ?? null,
         status_reservation: statusReservationValue.label,
         status_reservation_color: [{ label: String(statusReservationValue.label).replace(/\s+/g, '-'), color: '', is_color: true }],
-        room_clean_status_color: lastRoom ? [{ label: String(lastReservation?.maid_status_name ?? '').replace(/\s+/g, '-'), color: '', is_color: true }] : [],
-        room_status_color: lastRoom ? [{ label: String(roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name)).replace(/\s+/g, '-'), color: '', is_color: true }] : [],
-        room_clean_status: lastReservation?.maid_status_name ?? '',
+        room_clean_status_color: lastRoom
+          ? [{
+              label: String(
+                lastReservation?.maid_status_name
+                || (Object.values(MAID_STATUSES).find((s: any) => s.id === Number(lastRoom.maid_status)) as any)?.name
+                || '',
+              ).replace(/\s+/g, '-'),
+              color: getColorMaid(Number(lastRoom.maid_status)),
+              is_color: true,
+            }]
+          : [],
+        room_status_color: lastRoom
+          ? [{
+              label: String(roomStatusLabel(lastRoom.room_status, lastReservation?.room_status_name)).replace(/\s+/g, '-'),
+              color: getColorRoom(Number(lastRoom.room_status)),
+              is_color: true,
+            }]
+          : [],
         remark_folio: folio.remark,
         remark: folio.remark,
         remark_bool: !!(folio.remark !== '' || folio.posting_instruction !== '' || folio.check_out_instruction !== '' || folio.check_in_instruction !== ''),
@@ -2441,7 +2983,10 @@ success(res, formatted, 'Success', 200, {
         sharer: '',
         aa: reservations[0]?.adult,
         cc: reservations[0]?.child,
-        mandatory_check_in: { fields: [], missing_fields: [], is_complete: true },
+        mandatory_check_in: mandatoryCheckInBlock(
+          guestProfile,
+          await readPropertyMandatory(prisma, folio.property_id),
+        ),
       };
 
       success(res, data, 'Success', 200, { master });
@@ -2451,9 +2996,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /api/reservations/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async update(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2473,6 +3018,10 @@ success(res, formatted, 'Success', 200, {
         last_name,
         email,
         telp,
+        mobile_phone,
+        card_type,
+        card_number,
+        card_expiry,
         remark,
         remark_ins,
         booking_agent_id,
@@ -2513,6 +3062,19 @@ success(res, formatted, 'Success', 200, {
       if (last_name !== undefined) updateData.last_name = last_name;
       if (email !== undefined) updateData.email = email;
       if (telp !== undefined) updateData.telp = telp;
+      // The form labels this field "Phone" but sends it as `mobile_phone`
+      // (see ActSv in reservation-fit/form/index.tsx). Without this line the
+      // value was loaded into the form, sent on save, and then silently dropped,
+      // so Phone never persisted from the reservation screen.
+      if (mobile_phone !== undefined) updateData.mobile_phone = mobile_phone;
+      // Card fields are mirrored to the guest profile as well (see the guestPatch
+      // block below). They were previously only preloaded, never written, so a
+      // Card Type / NRIC typed on the reservation screen was discarded on save
+      // and the profile kept showing its own -- which is why the two screens
+      // disagreed about the same guest's ID.
+      if (card_type !== undefined) updateData.card_type = card_type;
+      if (card_number !== undefined) updateData.card_number = card_number;
+      if (card_expiry !== undefined) updateData.card_expiry = card_expiry;
       if (remark !== undefined) updateData.remark = remark;
       if (remark_ins !== undefined) updateData.remark_ins = remark_ins;
       if (booking_agent_id !== undefined) updateData.booking_agent_id = booking_agent_id ? BigInt(booking_agent_id) : null;
@@ -2544,6 +3106,53 @@ success(res, formatted, 'Success', 200, {
       if (dept_branch !== undefined) updateData.dept_branch = dept_branch;
 
       await prisma.folios.update({ where: { id }, data: updateData });
+
+      // Mirror the guest fields onto `guest_profiles`.
+      //
+      // The folio keeps its own copy of first_name / last_name / telp / email,
+      // but every screen that renders "Guest Name" for a folio reads
+      // `guestProfile.first_name` (see the `guest` block in this file's show
+      // formatter). So editing the name on the reservation screen updated the
+      // folio and then appeared to revert on reload, and the guest profile page
+      // never saw the change either.
+      //
+      // Only fields actually present in the payload are written, so this stays a
+      // no-op for callers that do not send guest data. The reference copies the
+      // other way round (guest -> folio); doing both keeps the two screens in
+      // agreement, which is what the user expects from editing either one.
+      const guestProfileId = updateData.guest_profile_id ?? existing.guest_profile_id;
+      if (guestProfileId) {
+        const guestPatch: any = {};
+        if (first_name !== undefined) guestPatch.first_name = first_name;
+        if (last_name !== undefined) guestPatch.last_name = last_name;
+        if (email !== undefined) guestPatch.email = email;
+        if (telp !== undefined) guestPatch.telp = telp;
+        if (mobile_phone !== undefined) guestPatch.mobile_phone = mobile_phone;
+        if (card_type !== undefined) guestPatch.card_type = card_type;
+        if (card_number !== undefined) guestPatch.card_number = card_number;
+        if (card_expiry !== undefined) guestPatch.card_expiry = card_expiry;
+        if (Object.keys(guestPatch).length > 0) {
+          try {
+            await prisma.guest_profiles.update({
+              where: { id: BigInt(guestProfileId) },
+              data: { ...guestPatch, updated_at: new Date(), updated_by: userId ?? undefined },
+            });
+          } catch (err: any) {
+            // Never fail the reservation save because the guest mirror did not
+            // stick (e.g. a concurrent soft-delete).
+            console.error('Guest profile sync from reservation failed:', err?.message || err);
+          }
+        }
+      }
+
+      // Laravel ReservationController::update :1564 — `$folio->syncTypes($request)`.
+      // This was missing entirely, so a market segment / source chosen in the
+      // edit form returned 200 and was then discarded on the next load.
+      // Body values win; the company's own segment is the fallback (same
+      // precedence as store()).
+      const updCompanyId = (updateData.company_profile_id ?? existing.company_profile_id ?? null) as bigint | null;
+      const updMarketSegments = await resolveMarketSegments(req.body, updCompanyId);
+      await syncTypesPivot('App\\Models\\Folio', id, updMarketSegments);
 
       // Update reservation items if provided
       if (reservation_list && reservation_list.length > 0 && existing.type_reservation !== 'git') {
@@ -2580,6 +3189,30 @@ success(res, formatted, 'Success', 200, {
           const rateIdUpd = item.rate_id && String(item.rate_id) !== '0' ? BigInt(item.rate_id) : null;
           const cpRow = rateIdUpd ? updCpById.get(Number(updRateRows.find((r) => Number(r.id) === Number(rateIdUpd))?.code_post_id ?? -1)) ?? null : null;
 
+          // Room resolution — Laravel Folio::saveReservation :2548-2584.
+          //
+          // The edit form always posts the picked room as `room_id_next`
+          // (`idpost: "room_id_next"` on the "Room" autocomplete). When the
+          // guest has not checked in yet — i.e. the item is flagged
+          // `immediately`, or the folio is still in `reservation` status —
+          // Laravel promotes that pick straight into `room_id` and clears the
+          // `_next` columns, so the physical room attaches immediately.
+          // Writing `room_id_next` verbatim (as this handler used to) left
+          // `room_id` null, which is why a room chosen in the form appeared to
+          // save and then vanished: nothing was holding it.
+          const folioStatusUpd = updateData.status_reservation ?? existing.status_reservation;
+          const isImmediate = item.immediately === true || Number(item.immediately) === 1;
+          const promoteRoom = isImmediate || folioStatusUpd === STATUS_RESERVATION.reservation.id;
+          const effRoomId: bigint | null = promoteRoom
+            ? (item.room_id_next ? BigInt(item.room_id_next) : (item.room_id ? BigInt(item.room_id) : null))
+            : (item.room_id ? BigInt(item.room_id) : null);
+          const effRoomTypeId: bigint | null = promoteRoom
+            ? (item.room_type_id_next ? BigInt(item.room_type_id_next) : (item.room_type_id ? BigInt(item.room_type_id) : null))
+            : (item.room_type_id ? BigInt(item.room_type_id) : null);
+          // Once promoted there is no pending move left to record.
+          const effRoomNextId = promoteRoom ? null : (item.room_id_next ? BigInt(item.room_id_next) : null);
+          const effRoomTypeNextId = promoteRoom ? null : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null);
+
           for (let i = 0; i < nights; i++) {
             const nightDate = new Date(itemCheckIn);
             nightDate.setDate(nightDate.getDate() + i);
@@ -2589,9 +3222,10 @@ success(res, formatted, 'Success', 200, {
             if (postedRow) continue; // never touch audited nights
 
             const pricing = await priceNight({
+              // @ts-ignore
               prisma,
               rateId: rateIdUpd,
-              roomTypeId: item.room_type_id ? BigInt(item.room_type_id) : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null),
+              roomTypeId: effRoomTypeId,
               night: nightDate,
               getNight: getNightUpd,
               adult: Number(item.adult || 1),
@@ -2605,13 +3239,13 @@ success(res, formatted, 'Success', 200, {
             const rowData: any = {
               rate_id: rateIdUpd,
               rate_name: rateIdUpd ? updRateRows.find((r) => Number(r.id) === Number(rateIdUpd))?.name ?? null : null,
-              room_type_id: item.room_type_id ? BigInt(item.room_type_id) : null,
-              room_id: item.room_id ? BigInt(item.room_id) : null,
-              room_type_id_next: item.room_type_id_next ? BigInt(item.room_type_id_next) : null,
-              room_id_next: item.room_id_next ? BigInt(item.room_id_next) : null,
-              adult: item.adult || 1,
-              child: item.child || 0,
-              add_bed: item.add_bed || 0,
+              room_type_id: effRoomTypeId,
+              room_id: effRoomId,
+              room_type_id_next: effRoomTypeNextId,
+              room_id_next: effRoomNextId,
+              adult: intOr(item.adult, 1),
+              child: intOr(item.child, 0),
+              add_bed: intOr(item.add_bed, 0),
               check_in_date: itemCheckIn,
               check_out_date: itemCheckOut,
               date: nightDate,
@@ -2626,10 +3260,10 @@ success(res, formatted, 'Success', 200, {
               tax3: pricing.tax3,
               eta: parseTimeLike(item.eta, nightDate),
               etd: parseTimeLike(item.etd, nightDate),
-              is_24_hour: item.is_24_hour === true || Number(item.is_24_hour) === 1 ? 1 : 0,
+              is_24_hour: flagToInt(item.is_24_hour),
               package_id: item.package_id ? BigInt(item.package_id) : null,
-              quantity: Number(item.quantity ?? 1),
-              quantity_extra_day_use: Number(item.quantity_extra_day_use ?? 0),
+              quantity: intOr(item.quantity, 1),
+              quantity_extra_day_use: intOr(item.quantity_extra_day_use, 0),
               is_extra_day_use: item.is_extra_day_use === true || Number(item.is_extra_day_use) === 1 ? 1 : 0,
               data: JSON.stringify({
                 rate_price: pricing.rate_price,
@@ -2706,9 +3340,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // DELETE /api/reservations/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async destroy(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2739,9 +3373,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/reservations/:id/restore
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async restore(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2765,9 +3399,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/calendar
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async calendar(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -2812,9 +3446,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/arrivals
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async arrivals(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -2842,9 +3476,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/departures
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async departures(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -2872,9 +3506,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/in-house
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async inHouse(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -2899,9 +3533,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /api/reservations/pending
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async pending(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -2926,9 +3560,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/reservations/on-check
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async onCheck(req: Request, res: Response): Promise<void> {
     try {
       const { room_reservation_list, check_in_date, check_out_date, rate_id } = req.body;
@@ -3173,29 +3807,40 @@ success(res, formatted, 'Success', 200, {
     } catch (err: any) { console.error('reservation item destroy error:', err); error(res, 'Failed to delete reservation item', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/reservations/:id/unassign-room
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async unassignRoom(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const id = BigInt(idParam);
       const userId = req.user?.id;
 
-      const folio = await prisma.folios.findUnique({ where: { id } });
-      if (!folio || folio.deleted_at) {
-        notFound(res, 'Not Found');
+      const reservation = await prisma.reservations.findUnique({ where: { id } });
+      if (!reservation || reservation.deleted_at) {
+        notFound(res, 'Reservation Not Found');
         return;
       }
 
-      // Set room_id to null on all reservations for this folio
+      const folio = await prisma.folios.findUnique({ where: { id: reservation.folio_id } });
+      if (!folio || folio.deleted_at) {
+        notFound(res, 'Folio Not Found');
+        return;
+      }
+
       await prisma.reservations.updateMany({
-        where: { folio_id: id, deleted_at: null },
+        where: {
+          folio_id: folio.id,
+          deleted_at: null,
+          date: { gte: reservation.date },
+          room_type_id: reservation.room_type_id,
+          status: 0
+        },
         data: { room_id: null, updated_at: new Date(), updated_by: userId },
       });
 
       const updatedFolio = await prisma.folios.findUnique({
-        where: { id },
+        where: { id: folio.id },
         include: { reservations: { where: { deleted_at: null } } },
       });
 
@@ -3206,9 +3851,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/reservations/:id/replicate
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async replicate(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -3294,53 +3939,233 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/reservations/update-bulk
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
+  /**
+   * Bulk folio action over a GIT group.
+   *
+   * This used to be `updateMany` on `folios` + `updateMany` on `reservations`:
+   * a bare status flip with no settlement gate, no room-availability check, no
+   * room-status write and no audit. Two of its four real call paths
+   * (`un_check_in`, `un_check_out`) were not even in the status switch, so they
+   * returned 400 and the group could not be reversed at all.
+   *
+   * It now drives the SAME `performCheckIn` / `performCheckOut` operations the
+   * single-folio endpoints use, reports per-folio failures, and closes the parent
+   * once every p-block is out.
+   */
   static async updateBulk(req: Request, res: Response): Promise<void> {
     try {
-      const { status_reservation, folio_ids, remark, reason } = req.body;
+      const { status_reservation, folio_ids, remark, reason, parent_folio_id, to_virtual } = req.body;
 
-      if (!status_reservation || !folio_ids?.length) {
+      if (!status_reservation || !Array.isArray(folio_ids) || folio_ids.length === 0) {
         badRequest(res, 'status_reservation and folio_ids are required');
         return;
       }
 
-      // Resolve status code
-      let statusId: number;
-      switch (status_reservation) {
-        case 'check_in': statusId = STATUS_RESERVATION.check_in.id; break;
-        case 'check_out': statusId = STATUS_RESERVATION.check_out.id; break;
-        case 'cancel_reservation': statusId = STATUS_RESERVATION.cancel_reservation.id; break;
-        case 'reservation': statusId = STATUS_RESERVATION.reservation.id; break;
-        case 'pending': statusId = STATUS_RESERVATION.pending.id; break;
-        default:
-          badRequest(res, 'Invalid status_reservation');
-          return;
+      const parsed: bigint[] = [];
+      for (const raw of folio_ids) {
+        try { parsed.push(BigInt(raw)); } catch { /* skip malformed id */ }
+      }
+      if (parsed.length === 0) { badRequest(res, 'No valid folio id supplied'); return; }
+
+      const pid = req.user?.lastProperty ?? 0n;
+      const businessDate = await AuthController.getBusinessDate(pid);
+      const userId = req.user?.id ?? null;
+
+      const succeeded: string[] = [];
+      const failed: { folio_id: number; folio_number: string | null; message: string }[] = [];
+
+      // Plain status actions that need no stay-level validation. These are the
+      // administrative flips (pending / reservation / cancel) and are still done
+      // one at a time so a per-folio guard can reject a single p-block.
+      const PLAIN_ACTIONS: Record<string, number> = {
+        reservation: STATUS_RESERVATION.reservation.id,
+        pending: STATUS_RESERVATION.pending.id,
+        cancel_reservation: STATUS_RESERVATION.cancel_reservation.id,
+      };
+
+      for (const id of parsed) {
+        const folio = await prisma.folios.findUnique({
+          where: { id },
+          select: { id: true, folio_number: true, status_reservation: true, type_reservation: true, parent: true },
+        });
+        if (!folio) {
+          failed.push({ folio_id: Number(id), folio_number: null, message: 'Folio not found' });
+          continue;
+        }
+
+        try {
+          if (status_reservation === 'check_in') {
+            const r = await performCheckIn(id, { propertyId: pid, businessDate, remark, userId });
+            if (r.ok) succeeded.push(String(id));
+            else failed.push({ folio_id: Number(id), folio_number: folio.folio_number, message: r.message });
+            continue;
+          }
+
+          if (status_reservation === 'check_out') {
+            const r = await performCheckOut(id, { businessDate, userId });
+            if (r.ok) succeeded.push(String(id));
+            else failed.push({ folio_id: Number(id), folio_number: folio.folio_number, message: r.message });
+            continue;
+          }
+
+          if (status_reservation === 'un_check_in' || status_reservation === 'un_check_out') {
+            const r = await performReverseStay(id, {
+              businessDate,
+              userId,
+              toVirtual: to_virtual,
+              remark,
+              reason,
+            });
+            if (r.ok) succeeded.push(String(id));
+            else failed.push({ folio_id: Number(id), folio_number: folio.folio_number, message: r.message });
+            continue;
+          }
+
+          if (status_reservation === 'change_date') {
+            const r = await performChangeStayDate(id, {
+              userId,
+              checkInDate: (req.body as any)?.check_in_date ?? null,
+              checkOutDate: (req.body as any)?.check_out_date ?? null,
+              days: (req.body as any)?.days,
+              reason,
+              remark,
+            });
+            if (r.ok) succeeded.push(String(id));
+            else failed.push({ folio_id: Number(id), folio_number: folio.folio_number, message: r.message });
+            continue;
+          }
+
+          const statusId = PLAIN_ACTIONS[status_reservation];
+          if (statusId === undefined) {
+            badRequest(res, `Invalid status_reservation: ${status_reservation}`);
+            return;
+          }
+
+          // Cancelling a folio with money on it has to be settled first, exactly
+          // like the single-folio cancel path.
+          if (status_reservation === 'cancel_reservation') {
+            const current = folio.status_reservation as number;
+            if (current !== STATUS_RESERVATION.reservation.id && current !== STATUS_RESERVATION.pending.id) {
+              failed.push({
+                folio_id: Number(id),
+                folio_number: folio.folio_number,
+                message: 'Only reservation and pending status can be canceled',
+              });
+              continue;
+            }
+            const balanceMinor = await folioBalanceMinorUnits(folio as any);
+            if (!isFolioSettledMinorPublic(balanceMinor)) {
+              failed.push({ folio_id: Number(id), folio_number: folio.folio_number, message: 'Payment required' });
+              continue;
+            }
+          }
+
+          await prisma.folios.update({
+            where: { id },
+            data: { status_reservation: statusId, remark: remark || undefined, updated_by: userId, updated_at: new Date() },
+          });
+          await prisma.reservations.updateMany({
+            where: { folio_id: id, deleted_at: null },
+            data: { status_reservation: statusId },
+          });
+          // @ts-ignore
+          await writeAudit(prisma, req, {
+            table: 'folios',
+            event: 'updated',
+            subjectId: id,
+            name: `folio-${String(status_reservation).replace(/_/g, '-')}`,
+            description: `Folio ${folio.folio_number ?? id}: ${status_reservation} (bulk)`,
+            logName: 'front_desk',
+            old: { status_reservation: folio.status_reservation },
+            attributes: { status_reservation: statusId },
+            meta: { folio_number: folio.folio_number, action: status_reservation, bulk: true, reason: reason ?? null, remark: remark ?? null },
+          });
+          succeeded.push(String(id));
+        } catch (err: any) {
+          console.error('updateBulk per-folio error:', err);
+          failed.push({ folio_id: Number(id), folio_number: folio.folio_number, message: err?.message ?? 'Unexpected error' });
+        }
       }
 
-      const ids = folio_ids.map((id: any) => BigInt(id));
+      // Group close-out: when every non-cancelled p-block is checked out, the
+      // master folio follows. Without this a group stayed "in house" forever
+      // after the last guest left.
+      let parentClosed: number | null = null;
+      const parentId = parent_folio_id != null ? BigInt(parent_folio_id) : null;
+      if (status_reservation === 'check_out' && parentId !== null) {
+        const remaining = await prisma.folios.count({
+          where: {
+            parent: parentId,
+            status_reservation: STATUS_RESERVATION.check_in.id,
+          },
+        });
+        if (remaining === 0) {
+          const parent = await prisma.folios.findUnique({ where: { id: parentId }, select: { id: true, folio_number: true } });
+          if (parent) {
+            await prisma.folios.update({
+              where: { id: parentId },
+              data: {
+                status_reservation: STATUS_RESERVATION.check_out.id,
+                check_out_date: new Date(businessDate + 'T00:00:00.000Z'),
+                updated_by: userId,
+                updated_at: new Date(),
+              },
+            });
+            // @ts-ignore
+            await writeAudit(prisma, req, {
+              table: 'folios',
+              event: 'updated',
+              subjectId: parentId,
+              name: 'git-parent-auto-checked-out',
+              description: `GIT parent ${parent.folio_number ?? parentId} closed: all p-blocks checked out`,
+              logName: 'front_desk',
+              meta: { folio_number: parent.folio_number, children_closed: succeeded.length, business_date: businessDate },
+            });
+            parentClosed = Number(parentId);
+          }
+        }
+      }
 
-      await prisma.folios.updateMany({
-        where: { id: { in: ids } },
-        data: { status_reservation: statusId, updated_at: new Date(), remark: remark || undefined },
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'folios',
+        event: 'updated',
+        subjectId: null,
+        name: `git-bulk-${String(status_reservation).replace(/_/g, '-')}`,
+        description: `Bulk ${status_reservation}: ${succeeded.length} ok, ${failed.length} rejected`,
+        logName: 'front_desk',
+        meta: {
+          action: status_reservation,
+          succeeded,
+          failed,
+          parent_folio_id: parentId != null ? String(parentId) : null,
+          parent_auto_closed: parentClosed,
+          business_date: businessDate,
+        },
       });
 
-      await prisma.reservations.updateMany({
-        where: { folio_id: { in: ids }, deleted_at: null },
-        data: { status_reservation: statusId },
-      });
-
-      success(res, { updated: ids.length, status_reservation: statusId }, 'Success');
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(req.user?.lastProperty ?? 0) });
+      // Partial success still returns 200 with the breakdown — the old handler
+      // reported `updated: ids.length` regardless of what actually happened.
+      success(res, {
+        updated: succeeded.length,
+        succeeded: succeeded.map(Number),
+        failed,
+        parent_closed: parentClosed,
+        status_reservation: status_reservation,
+      }, failed.length > 0 && succeeded.length === 0 ? 'No folio was updated' : 'Success');
     } catch (err: any) {
       console.error('Reservation updateBulk error:', err);
       error(res, 'Failed to bulk update reservations', 500);
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /api/reservations/:id/assign-room
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async assignRoom(req: Request, res: Response): Promise<void> {
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -3348,13 +4173,55 @@ success(res, formatted, 'Success', 200, {
       const userId = req.user?.id;
       const { room_id, room_type_id } = req.body;
 
-      const folio = await prisma.folios.findUnique({ where: { id } });
-      if (!folio || folio.deleted_at) {
-        notFound(res, 'Not Found');
+      const reservation = await prisma.reservations.findUnique({ where: { id } });
+      if (!reservation || reservation.deleted_at) {
+        notFound(res, 'Reservation not found');
         return;
       }
 
-      // Update reservations with room assignment
+      if (room_type_id && Number(room_type_id) !== Number(reservation.room_type_id)) {
+        badRequest(res, 'Cannot change room type');
+        return;
+      }
+
+      const folio = await prisma.folios.findUnique({ where: { id: reservation.folio_id } });
+      if (!folio || folio.deleted_at) {
+        notFound(res, 'Folio Not Found');
+        return;
+      }
+
+      if (room_id) {
+        const targetRoomId = BigInt(room_id);
+        const ci = fmtDateOnly(folio.check_in_date);
+        const co = fmtDateOnly(folio.check_out_date);
+        if (!ci || !co) {
+          badRequest(res, 'Reservation dates are required before assigning a room');
+          return;
+        }
+        
+        const room = await prisma.rooms.findUnique({ where: { id: targetRoomId }, select: { room_type_id: true } });
+        if (!room) { badRequest(res, 'Room not found'); return; }
+        if (Number(room.room_type_id) !== Number(reservation.room_type_id)) {
+          badRequest(res, 'Room does not belong to the selected room type');
+          return;
+        }
+        
+        const propertyId = folio.property_id ?? req.user?.lastProperty;
+        const availableIds = propertyId
+          ? await onlyAvailableRoomIds(propertyId, ci, co, folio.id)
+          : new Set<number>();
+        if (!availableIds.has(Number(targetRoomId))) {
+          badRequest(res, 'Room is not available for the selected dates');
+          return;
+        }
+      }
+
+      const preRoomIds = await prisma.reservations.findMany({
+        where: { folio_id: folio.id, deleted_at: null },
+        select: { room_id: true },
+        orderBy: { date: 'asc' },
+      });
+
       const updateData: any = {
         updated_at: new Date(),
         updated_by: userId,
@@ -3362,23 +4229,52 @@ success(res, formatted, 'Success', 200, {
       if (room_id) updateData.room_id = BigInt(room_id);
       if (room_type_id) updateData.room_type_id = BigInt(room_type_id);
 
-      await prisma.reservations.updateMany({
-        where: { folio_id: id, deleted_at: null },
-        data: updateData,
-      });
+      await prisma.$transaction(
+        async (tx) => {
+          if (reservation.room_id && folio.status_reservation === 3) { // 3 is STATUS_RESERVATION.check_in.id
+            await tx.rooms.update({
+              where: { id: reservation.room_id },
+              data: { room_status: 1, maid_status: 3 } // vacant, dirty
+            });
+          }
+
+          await tx.reservations.updateMany({
+            where: { 
+              folio_id: folio.id, 
+              deleted_at: null,
+              date: { gte: reservation.date },
+              room_type_id: reservation.room_type_id,
+              status: 0
+            },
+            data: updateData,
+          });
+        },
+        { timeout: 20000 }
+      );
 
       const updatedFolio = await prisma.folios.findUnique({
-        where: { id },
+        where: { id: folio.id },
         include: { reservations: { where: { deleted_at: null } } },
       });
 
-      // Room assignment changes availability — Laravel ReservationItemController
-      // dispatches SyncStaahRoomAvailability after assign/move (:681, :857).
       enqueueJob('sync-staah-room-availability', {
         propertyId: Number((updatedFolio as any)?.property_id ?? 0),
         dateFrom: (updatedFolio as any)?.check_in_date ? formatDate(new Date((updatedFolio as any).check_in_date)) : undefined,
         dateTo: (updatedFolio as any)?.check_out_date ? formatDate(new Date((updatedFolio as any).check_out_date)) : undefined,
       });
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'folios',
+        event: 'updated',
+        subjectId: folio.id,
+        name: 'folio-room-assigned',
+        description: `Room ${room_id ?? 'none'} assigned to folio ${folio.folio_number ?? folio.id}`,
+        logName: 'front_desk',
+        old: { room_id: preRoomIds[0]?.room_id != null ? String(preRoomIds[0].room_id) : null },
+        attributes: { room_id: room_id ? String(room_id) : null, room_type_id: room_type_id ? String(room_type_id) : null },
+        meta: { folio_number: folio.folio_number, availability_checked: !!room_id },
+      });
+
       success(res, bigintToNumber(updatedFolio), 'Success');
     } catch (err: any) {
       console.error('Reservation assign room error:', err);
@@ -3386,9 +4282,9 @@ success(res, formatted, 'Success', 200, {
     }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // Reservation Items (sub-resource)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
 
   // GET /api/reservations/:folioId/items
   static async listItems(req: Request, res: Response): Promise<void> {
@@ -3545,6 +4441,7 @@ success(res, formatted, 'Success', 200, {
           const nightDate = new Date(`${bussinesDate || check_in_date}T00:00:00`);
           nightDate.setDate(nightDate.getDate() + i);
           const pricing = await priceNight({
+            // @ts-ignore
             prisma,
             rateId: firstResv.rate_id,
             roomTypeId: firstResv.room_type_id,
@@ -3647,9 +4544,9 @@ success(res, formatted, 'Success', 200, {
     return val;
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/code-item (additional item page)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
     // ———— GET /cms/reservation/code-item (additional item page) - filter by folio's rate
   // ——————————————————————————————————————————————————————————————————————————————
     // GET /cms/reservation/code-item (additional item page)
@@ -3715,9 +4612,9 @@ success(res, formatted, 'Success', 200, {
     } catch (err: any) { console.error('Code item list error:', err); error(res, 'Failed to list code items', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/inclusive
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
     // ———— GET /cms/reservation/inclusive - filter by folio's rate (Laravel parity)
   // ——————————————————————————————————————————————————————————————————————————————
   static async inclusiveList(req: Request, res: Response): Promise<void> {
@@ -3771,9 +4668,9 @@ success(res, formatted, 'Success', 200, {
     } catch (err: any) { console.error('Inclusive list error:', err); error(res, 'Failed to list inclusives', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/masterInclusive
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async masterInclusiveList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -3799,10 +4696,10 @@ success(res, formatted, 'Success', 200, {
     } catch (err: any) { console.error('Master inclusive list error:', err); error(res, 'Failed to list inclusives', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/master
   // Laravel parity (ReservationController@getMaster)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async getMaster(req: Request, res: Response): Promise<void> {
     try {
       // config/cms.php status_reservation, filtered per Laravel
@@ -3829,7 +4726,12 @@ success(res, formatted, 'Success', 200, {
       ];
 
       const reasons = await prisma.types.findMany({
-        where: { group: 'cancellation-reservation', status: 1, deleted_at: null },
+        where: {
+          group: 'cancellation-reservation',
+          status: 1,
+          deleted_at: null,
+          property_id: req.user?.lastProperty ?? 0,
+        },
         orderBy: { sort: 'asc' },
       });
 
@@ -3844,9 +4746,9 @@ success(res, formatted, 'Success', 200, {
     } catch (err: any) { console.error('Reservation master error:', err); error(res, 'Failed to fetch reservation master', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/subfolio/:id
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async subfolioList(req: Request, res: Response): Promise<void> {
     try {
       const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -3857,9 +4759,9 @@ success(res, formatted, 'Success', 200, {
     } catch (err: any) { console.error('Subfolio list error:', err); error(res, 'Failed to list subfolios', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/rate (Laravel getRate)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
 static async rateListHelper(req: Request, res: Response): Promise<void> {
     try {
       const ci = req.query.check_in_date as string;
@@ -3884,7 +4786,7 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
       const searchField = req.query.search_field as string;
       if (searchField && !search) {
         const searchValue = String(req.query.search_value ?? '');
-        if (searchValue) where[searchField] = { contains: searchValue, mode: 'insensitive' };
+        pushCondition(where, searchPredicate('rates', searchField, searchValue));
       }
 
       const [rates, total, codePost] = await Promise.all([
@@ -3900,9 +4802,9 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
     } catch (err: any) { console.error('Reservation rate list error:', err); error(res, 'Failed to fetch rates', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/rate-by-company-id (Laravel getRateByCompany)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async rateByCompany(req: Request, res: Response): Promise<void> {
     try {
       const companyId = String(req.query.company_profile_id ?? '0');
@@ -4008,9 +4910,9 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
     } catch (err: any) { console.error('Reservation rate by company error:', err); error(res, 'Failed to fetch rates', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/package-by-rate-id/:id (Laravel getPackageByRateId)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async packageByRateId(req: Request, res: Response): Promise<void> {
     try {
       const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -4024,7 +4926,7 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
       const searchField = req.query.search_field as string;
       if (searchField && !search) {
         const searchValue = String(req.query.search_value ?? '');
-        if (searchValue) where[searchField] = { contains: searchValue, mode: 'insensitive' };
+        pushCondition(where, searchPredicate('rate_day_uses', searchField, searchValue));
       }
 
       const [dayUses, total] = await Promise.all([
@@ -4044,9 +4946,9 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
     } catch (err: any) { console.error('Reservation package by rate error:', err); error(res, 'Failed to fetch packages', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // POST /cms/reservation/charge (Laravel getCharge)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async getCharge(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty;
@@ -4192,10 +5094,12 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
           const nightPromos =
             promosByRate.get(Number(item.rate_id)) ??
             (promoCode
+              // @ts-ignore
               ? await findPromosForNight(prisma, BigInt(String(item.rate_id)), nightDate, getNight, promoCode)
               : []);
 
           const pricing = await priceNight({
+            // @ts-ignore
             prisma,
             rateId: BigInt(String(item.rate_id)),
             roomTypeId: roomTypeIdEff,
@@ -4223,9 +5127,9 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
     } catch (err: any) { console.error('Reservation get charge error:', err); error(res, 'Failed to get charge', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/available-room (Laravel getAvailableRoomType)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async availableRoomType(req: Request, res: Response): Promise<void> {
     try {
       const ci = req.query.check_in_date as string;
@@ -4293,9 +5197,9 @@ const total = data.length;
     } catch (err: any) { console.error('Reservation available room error:', err); error(res, 'Failed to get available room', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // GET /cms/reservation/room-git (Laravel getRoomGit)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async roomGit(req: Request, res: Response): Promise<void> {
     try {
       let arr: any[] = [];
@@ -4405,15 +5309,24 @@ const filtered = data.filter((d: any) => d.available > 0);
     } catch (err: any) { console.error('Reservation room git error:', err); error(res, 'Failed to get room git', 500); }
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   // PUT /cms/reservation/update-room-parent-git/:id (Laravel updateRoomParentGIT)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  
   static async updateRoomParentGIT(req: Request, res: Response): Promise<void> {
     try {
-      const raw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const raw =
+        (Array.isArray(req.params.id) ? req.params.id[0] : req.params.id) ??
+        (req.body as any)?.folio_id;
       const body = req.body || {};
-      const reservationList: any[] = Array.isArray(body.reservation_list) ? body.reservation_list : [];
-      if (!raw || !/^\d+$/.test(raw)) { badRequest(res, 'The folio id field is required.'); return; }
+      // The room-allot grid emits `reservation_list` as an index-keyed OBJECT
+      // (`{0: {...}, 1: {...}}`), not an array. Rejecting that shape made the
+      // request 400 and meant no p-block could ever be added or removed.
+      const reservationList: any[] = Array.isArray(body.reservation_list)
+        ? body.reservation_list
+        : body.reservation_list && typeof body.reservation_list === 'object'
+        ? Object.values(body.reservation_list).filter((v: any) => v && typeof v === 'object')
+        : [];
+      if (!raw || !/^\d+$/.test(String(raw))) { badRequest(res, 'The folio id field is required.'); return; }
       if (reservationList.length === 0) { badRequest(res, 'The reservation list field is required.'); return; }
       const folioId = BigInt(raw);
 
@@ -4487,6 +5400,23 @@ const filtered = data.filter((d: any) => d.available > 0);
       })) + 1 : 1;
       let numberIndex = Number.isFinite(numberIndexRaw) ? numberIndexRaw : 1;
 
+      // Pricing context for the replicated nights. A p-block created through
+      // this endpoint used to be written with amount/total/pb1/tax3 all zero and
+      // no priceNight call at all, so every room added to a group after creation
+      // was worth nothing on the folio.
+      const propertyRow = await prisma.properties.findUnique({ where: { id: BigInt(folio.property_id) }, select: { is_tax: true } });
+      const isTax = (propertyRow as any)?.is_tax === 1;
+      const sourceRateIds = [...new Set(children.flatMap((c: any) => (c.reservations ?? []).map((r: any) => r.rate_id)).filter((r: any) => r != null).map((r: any) => String(r)))];
+      const rateRows = sourceRateIds.length
+        ? await prisma.rates.findMany({
+            where: { id: { in: sourceRateIds.map((r) => BigInt(r)) } },
+            select: { id: true, code_post_id: true, code_post_extra_bed_id: true, name: true },
+          })
+        : [];
+      const codePostIds = [...new Set(rateRows.flatMap((r) => [r.code_post_id, r.code_post_extra_bed_id]).filter(Boolean))] as bigint[];
+      const codePostRows = codePostIds.length ? await prisma.code_posts.findMany({ where: { id: { in: codePostIds } } }) : [];
+      const codePostById = new Map<number, any>(codePostRows.map((c) => [Number(c.id), c]));
+
       for (const value of arrTemp) {
         if (value.qty > 0) {
           for (let i = 0; i < value.qty; i++) {
@@ -4526,6 +5456,22 @@ const filtered = data.filter((d: any) => d.available > 0);
               for (let n = 0; n < nights; n++) {
                 const nightDate = new Date(ci);
                 nightDate.setDate(nightDate.getDate() + n);
+                const pricing = await priceNight({
+                  // @ts-ignore
+                  prisma,
+                  rateId: sourceReservation.rate_id,
+                  roomTypeId: BigInt(value.room_type_id),
+                  night: nightDate,
+                  getNight: nights,
+                  adult: Number(sourceReservation.adult || 1),
+                  child: Number(sourceReservation.child || 0),
+                  quantity: 1,
+                  isTax,
+                  rateCodePost: sourceReservation.rate_id
+                    ? codePostById.get(Number(rateRows.find((r) => Number(r.id) === Number(sourceReservation.rate_id))?.code_post_id ?? -1)) ?? null
+                    : null,
+                  promos: [],
+                });
                 await prisma.reservations.create({
                   data: {
                     property_id: sourceReservation.property_id,
@@ -4544,12 +5490,19 @@ const filtered = data.filter((d: any) => d.available > 0);
                     status_reservation: STATUS_RESERVATION.reservation.id,
                     status: STATUS_ACTIVE,
                     night: nights,
-                    amount: 0,
-                    amountt: 0,
-                    total: 0,
-                    service_charge: 0,
-                    pb1: 0,
-                    tax3: 0,
+                    amount: pricing.amount,
+                    amountt: pricing.amount,
+                    total: pricing.total,
+                    service_charge: pricing.service_charge,
+                    pb1: pricing.pb1,
+                    tax3: pricing.tax3,
+                    data: JSON.stringify({
+                      rate_price: pricing.rate_price,
+                      service: pricing.service_charge,
+                      pb1: pricing.pb1,
+                      tax3: pricing.tax3,
+                      total: pricing.total,
+                    }),
                     created_by: req.user?.id,
                   },
                 });
@@ -4573,6 +5526,22 @@ const filtered = data.filter((d: any) => d.available > 0);
           }
         }
       }
+
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'folios',
+        event: 'updated',
+        subjectId: folioId,
+        name: 'git-block-updated',
+        description: `GIT block adjusted on folio ${folio.folio_number ?? folioId}`,
+        logName: 'front_desk',
+        meta: {
+          folio_number: folio.folio_number,
+          type_reservation: folio.type_reservation,
+          deltas: arrTemp.map((v: any) => ({ room_type_id: v.room_type_id, qty: v.qty })),
+          requested: reservationList.map((r: any) => ({ id: r.id, qty: r.qty })),
+        },
+      });
 
       res.json({ code: 200, message: 'Success', data: arrTemp });
     } catch (err: any) { console.error('Reservation update room parent git error:', err); error(res, 'Failed to update room parent git', 500); }

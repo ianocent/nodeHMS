@@ -1,15 +1,10 @@
+import { prisma } from '../../config/prisma';
 // Laravel Jobs/CreateStaahBooking.php parity — async booking creation from the
 // STAAH webhook payload. Loads the pending staah_reservations row, runs the
 // shared creation core, and surfaces failures on the row for the UI.
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { createStaahBookingCore } from '../../controllers/staah-webhook.controller';
 import { enqueueJob } from '../../config/queue';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 export async function processCreateStaahBooking(job: any) {
   const data = job.data || {};

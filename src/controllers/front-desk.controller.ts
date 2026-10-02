@@ -1,37 +1,57 @@
+import { prisma } from '../config/prisma';
+// @ts-ignore
+import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+// @ts-ignore
+import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
-import { success, error, badRequest, notFound } from '../utils/response';
+import { success, error, badRequest, notFound, forbidden } from '../utils/response';
 import { decrypt, encrypt } from '../utils/encryption';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { STATUSES, moneyFormat, calculateCodePost } from '../utils/cmsConfig';
-import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
+import { STATUSES, moneyFormat, calculateCodePost, DEPOSIT_REFERENCE_PREFIX } from '../utils/cmsConfig';
+import { ROOM_STATUSES, MAID_STATUSES, getColorRoom, getColorMaid } from '../utils/cmsStatus';
 import { dataSearch, applySearchField } from '../utils/search';
+import { formatFolioActions } from '../utils/folioActions';
 import { storedImageUrl } from '../utils/storage';
+import { missingMandatoryFields, readPropertyMandatory } from '../utils/guestMandatory';
 import { AuthController } from './auth.controller';
 import { TokenService } from '../services/token.service';
 import { enqueueJob } from '../config/queue';
 import { sendTemplateEmail } from '../services/mail.service';
+import { writeAudit, requireApproval, userHasTransactionAction, isApproverBypass } from '../utils/audit';
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
+/**
+ * Domain rejection raised from inside a `$transaction` callback. Express error
+ * middleware cannot see a throw from a transaction, so handlers catch this and
+ * translate it into the real 4xx instead of swallowing it as a 500.
+ */
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
 
 // Laravel Room::AvailableRoom parity: room blocked if availability hold, active work order, or overlapping reservation
-async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: string, end: string, excludeFolioId?: bigint): Promise<boolean> {
+//
+// `db` is injectable so check-in can run the read inside the same serializable
+// transaction that writes the occupancy. The old signature always used the
+// module-level client, which made the check a plain read-then-write (TOCTOU):
+// two concurrent check-ins could both observe a free room and both commit.
+type Db = Pick<typeof prisma, 'rooms' | 'room_availabilities' | 'work_orders' | 'reservations'>;
+async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: string, end: string, excludeFolioId?: bigint, db: Db = prisma): Promise<boolean> {
   const s = new Date(start + 'T00:00:00.000Z');
   const e = new Date(end + 'T23:59:59.999Z');
   const [room, avail, workOrders, reservations] = await Promise.all([
-    prisma.rooms.findUnique({ where: { id: roomId }, select: { id: true, deleted_at: true, room_status: true } }),
-    prisma.room_availabilities.findMany({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: s, lte: e } }, select: { id: true } }),
-    prisma.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: roomId, date: { gte: s }, end_date: { lte: e } }, select: { id: true } }),
-    prisma.reservations.findMany({
+    db.rooms.findUnique({ where: { id: roomId }, select: { id: true, deleted_at: true, room_status: true } }),
+    db.room_availabilities.findMany({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: s, lte: e } }, select: { id: true } }),
+    db.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: roomId, date: { gte: s }, end_date: { lte: e } }, select: { id: true } }),
+    db.reservations.findMany({
       where: {
         date: { gte: s, lte: e },
         status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
@@ -41,8 +61,10 @@ async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: str
       select: { id: true },
     }),
   ]);
-  const isOOO = room?.room_status === 4; // out_of_order
-  return !!room && !room.deleted_at && !isOOO && avail.length === 0 && workOrders.length === 0 && reservations.length === 0;
+  // out_of_order(4) and block(3) are both unsellable. Only rejecting 4 (the old
+  // behaviour) let a room blocked on the grid be handed to a guest.
+  const unsellable = room?.room_status === ROOM_STATUSES.out_of_order.id || room?.room_status === ROOM_STATUSES.block.id;
+  return !!room && !room.deleted_at && !unsellable && avail.length === 0 && workOrders.length === 0 && reservations.length === 0;
 }
 
 // Laravel Allotment::checkAllotmentRoom (:31-82) — quota decrement per weekday is
@@ -88,6 +110,96 @@ const timeStr = (d: Date | null | undefined): string => (d ? d.toISOString().sli
 const safeParseData = (raw: any): any => {
   try { return typeof raw === 'string' ? JSON.parse(raw || '{}') : (raw || {}); } catch { return {}; }
 };
+
+// Folio id resolution for the status endpoints. The path param wins; body and
+// query are accepted so `?folio_id=` / `{ id }` callers keep working. Returns
+// null instead of throwing so a bad id becomes a 400, not a 500.
+function resolveFolioId(req: Request): bigint | null {
+  const pathParam = Array.isArray(req.params?.id) ? req.params.id[0] : req.params?.id;
+  const raw =
+    pathParam ??
+    (req.body as any)?.id ??
+    (req.body as any)?.folio_id ??
+    (req.query as any)?.folio_id ??
+    (req.query as any)?.id;
+  if (raw === undefined || raw === null || raw === '') return null;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
+// ── Folio settlement gate ────────────────────────────────────────────────
+// Single source of truth for "may this folio check out?". The previous check
+// was `[0, 1, -1].includes(Math.ceil(balance))`, which is a float comparison
+// with an asymmetric band: it let a guest walk out owing up to 2.00 while
+// blocking 1.01 of under-payment, and Math.ceil on a JS double is not
+// precision-safe. This sums each row as integer minor units (2dp, the
+// scale of transactions.total) and requires the result to settle inside a
+// 1-minor-unit tolerance, so float drift can never fake a settlement.
+const MINOR_UNITS = 100;
+const SETTLE_TOLERANCE_MINOR = 1;
+
+function toMinorUnits(value: unknown): number {
+  const n = Number(value ?? 0);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * MINOR_UNITS);
+}
+
+/** Sum a folio's transactions into integer minor units. */
+function sumBalanceMinorUnits(rows: Array<{ type_amount: string | null; total: unknown }>): number {
+  return rows.reduce((acc, r) => {
+    const v = toMinorUnits(r.total);
+    return r.type_amount === 'MINUS' ? acc - v : acc + v;
+  }, 0);
+}
+
+/** true when the folio owes nothing (within rounding tolerance). */
+function isFolioSettledMinor(balanceMinor: number): boolean {
+  return Math.abs(balanceMinor) <= SETTLE_TOLERANCE_MINOR;
+}
+
+// Re-exported so the settlement rule has exactly one definition. folio.controller
+// used to carry its own copy of the old float/`Math.ceil` band, which is how the
+// cancel gate and the check-out gate ended up disagreeing.
+export const isFolioSettledMinorPublic = isFolioSettledMinor;
+
+/**
+ * Verify a supervisor approved a destructive cashiering operation.
+ *
+ * The UI used to ask for `pin_enshift` via GET /cms/check-value and then simply
+ * proceed — so the "authorisation" was the operator's own shift-close PIN, typed
+ * by the operator. Nothing was actually gated. The approval is now re-verified
+ * here, at the moment of the write, against a named approver who is not the
+ * operator and who holds the action on some menu.
+ */
+async function verifySupervisorApproval(
+  req: Request,
+  transactionAction: 'void' | 'refund'
+): Promise<{ ok: true; approver: { id: string; name: string } } | { ok: false; code: number; message: string }> {
+  const outcome = await requireApproval(
+    req.body,
+    req.user?.id ?? null,
+    async (userId, pin) => {
+      const row = await prisma.users.findFirst({
+        where: { id: userId, deleted_at: null },
+        select: { id: true, name: true, pin_void_approve: true },
+      });
+      if (!row) return null;
+      if (row.pin_void_approve === null || row.pin_void_approve === undefined) return null;
+      if (String(row.pin_void_approve) !== String(pin).trim()) return null;
+      return { id: String(row.id), name: row.name };
+    },
+    async (approver) => {
+      if (isApproverBypass(approver.name, [])) return true;
+      // @ts-ignore
+      return userHasTransactionAction(prisma, BigInt(approver.id), transactionAction);
+    }
+  );
+  if (!outcome.ok) return { ok: false, code: outcome.code, message: outcome.message };
+  return { ok: true, approver: outcome.approver! };
+}
 
 // Laravel ExtraDayUseService (:29-199) — ETD calc + extra-quantity manual_posting txn.
 async function processExtraDayUse(folio: any, firstResv: any): Promise<{ code: number; message: string } | null> {
@@ -301,11 +413,14 @@ async function calcTaxForCode(code: string | bigint | null, sumPrice: number) {
 
 // Laravel Folio@getBalanceWithOutPosting parity (Folio.php:761-779)
 // GIT parent: children company-billed + own all; GIT sub: guest-billed only; else all txns.
-export async function folioBalanceWithoutPosting(folio: { id: bigint; type_reservation: string | null; parent: number | bigint | null }): Promise<number> {
+//
+// This is the SINGLE source of truth for the settlement gate. It sums each
+// transaction as integer minor units; the float variant below is derived from
+// it for display only, so the number the guest sees and the number the gate
+// evaluates can no longer diverge by a rounding rule.
+export async function folioBalanceMinorUnits(folio: { id: bigint; type_reservation: string | null; parent: number | bigint | null }): Promise<number> {
   const isGit = String(folio.type_reservation ?? '').toLowerCase() === 'git';
   const parentNum = Number(folio.parent ?? 0);
-  const sumNet = (rows: { type_amount: string | null; total: any }[]) =>
-    rows.reduce((s, t) => s + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)), 0);
 
   if (isGit && parentNum === 0) {
     const children = await prisma.folios.findMany({
@@ -313,9 +428,15 @@ export async function folioBalanceWithoutPosting(folio: { id: bigint; type_reser
       select: { transactions: { where: { model_type: 'App\\Models\\CompanyProfile' }, select: { type_amount: true, total: true } } },
     });
     let balance = 0;
-    for (const c of children) balance += sumNet(c.transactions);
+    for (const c of children) balance += sumBalanceMinorUnits(c.transactions);
     const own = await prisma.transactions.findMany({ where: { folio_id: folio.id }, select: { type_amount: true, total: true } });
-    balance += sumNet(own);
+    balance += sumBalanceMinorUnits(own);
+    // A deposit belongs to the p-block it was taken on, so the group total has
+    // to include the children's deposits too.
+    const childIds = children.length > 0
+      ? (await prisma.folios.findMany({ where: { parent: folio.id, deleted_at: null }, select: { id: true } })).map((c) => c.id)
+      : [];
+    balance -= await legacyUnlinkedDepositMinor([folio.id, ...childIds]);
     return balance;
   }
 
@@ -324,11 +445,52 @@ export async function folioBalanceWithoutPosting(folio: { id: bigint; type_reser
       where: { folio_id: folio.id, model_type: 'App\\Models\\GuestProfile' },
       select: { type_amount: true, total: true },
     });
-    return sumNet(own);
+    return sumBalanceMinorUnits(own) - (await legacyUnlinkedDepositMinor([folio.id]));
   }
 
   const own = await prisma.transactions.findMany({ where: { folio_id: folio.id }, select: { type_amount: true, total: true } });
-  return sumNet(own);
+  return sumBalanceMinorUnits(own) - (await legacyUnlinkedDepositMinor([folio.id]));
+}
+
+/** Float balance for display. Derived from the integer sum, never accumulated separately. */
+export async function folioBalanceWithoutPosting(folio: { id: bigint; type_reservation: string | null; parent: number | bigint | null }): Promise<number> {
+  return (await folioBalanceMinorUnits(folio)) / MINOR_UNITS;
+}
+
+/**
+ * Deposits recorded in `deposit_payments` that have NO matching transaction.
+ *
+ * New deposits write both a header row and a MINUS folio transaction, so they
+ * are already covered by the transaction sum. Rows created before that (or by
+ * any other writer) exist only in `deposit_payments` and were invisible to the
+ * balance — the guest had paid a deposit and check-out still said "Payment
+ * required". Counting only the orphans fixes that without double-counting.
+ */
+async function legacyUnlinkedDepositMinor(folioIds: bigint[]): Promise<number> {
+  if (folioIds.length === 0) return 0;
+  const rows = await prisma.deposit_payments.findMany({
+    where: { folio_id: { in: folioIds }, deleted_at: null },
+    select: { id: true, amount: true },
+  });
+  if (rows.length === 0) return 0;
+
+  const linked = await prisma.transactions.findMany({
+    where: {
+      folio_id: { in: folioIds },
+      deleted_at: null,
+      reference: { startsWith: DEPOSIT_REFERENCE_PREFIX },
+    },
+    select: { reference: true },
+  });
+  const linkedIds = new Set<string>(
+    linked
+      .map((t) => String(t.reference ?? '').slice(DEPOSIT_REFERENCE_PREFIX.length))
+      .filter((s) => s !== '')
+  );
+
+  return rows
+    .filter((r) => !linkedIds.has(String(r.id)))
+    .reduce((s, r) => s + toMinorUnits(r.amount), 0);
 }
 
 // Laravel Folio@getBalance parity (Folio.php:993-1013) — display balance.
@@ -619,31 +781,47 @@ function statusReservationColor(folio: any): { label: string; color: string; is_
 
 const MENU_ID = 63;
 
+// `is_search` mirrors Laravel Folio::formatTableFrontDesk() — table-edit only
+// renders the search box when at least one column sets it (index.tsx checks
+// `rw.is_search`), and `dataSearch()` resolves the selected field against it.
 const TABLE_COLUMNS = [
-  { key: 'res_date', label: 'Res Date', type: 'date' },
-  { key: 'type_reservation', label: 'Type' },
-  { key: 'message_bool', label: 'MSG', type: 'boolean' },
-  { key: 'ign', label: 'IGN', type: 'boolean' },
-  { key: 'is_do_not_disturb', label: 'DND', type: 'boolean' },
-  { key: 'remark_bool', label: 'Remark', type: 'boolean' },
-  { key: 'status_reservation_color', label: 'Status', is_html: true },
-  { key: 'folio_number', label: 'Folio', is_link: true, uri: '/reservation/fit/reservation' },
-  { key: 'guest_name', label: 'Guest Name' },
-  { key: 'guest_status_color', label: 'Guest', is_html: true },
-  { key: 'stay', label: 'Stay' },
-  { key: 'room', label: 'Room' },
-  { key: 'room_next', label: 'Room Next' },
-  { key: 'company', label: 'Company' },
-  { key: 'room_type', label: 'Room Type' },
-  { key: 'room_status_color', label: 'Room Status', is_html: true },
-  { key: 'room_clean_status_color', label: 'Clean Status', is_html: true },
-  { key: 'check_in_date', label: 'Check In', type: 'date' },
-  { key: 'check_out_date', label: 'Check Out', type: 'date' },
-  { key: 'balance', label: 'Balance' },
-  { key: 'sharer', label: 'Sharer' },
-  { key: 'aa', label: 'A' },
-  { key: 'cc', label: 'C' },
+  { key: 'res_date', label: 'Res Date', type: 'date', is_search: false },
+  { key: 'type_reservation', label: 'Type', is_search: false },
+  { key: 'message_bool', label: 'MSG', type: 'boolean', is_search: false },
+  { key: 'ign', label: 'IGN', type: 'boolean', is_search: false },
+  { key: 'is_do_not_disturb', label: 'DND', type: 'boolean', is_search: false },
+  // Shortened to match MSG / IGN / DND. It already sits next to them; the full
+  // word made this flag group noticeably wider than the rest of the header.
+  { key: 'remark_bool', label: 'RMK', type: 'boolean', is_search: false },
+  { key: 'status_reservation_color', label: 'Status', is_html: true, is_search: false },
+  { key: 'folio_number', label: 'Folio', is_link: true, uri: '/reservation/fit/reservation', is_search: true, max_width: '130px' },
+  // Free-text columns: a long guest/company name otherwise stretched the
+  // `table-auto` + `whitespace-nowrap` grid and pushed every later column
+  // off-screen. Capped here and truncated client-side via TableView.
+  { key: 'guest_name', label: 'Guest Name', is_search: false, max_width: '180px' },
+  { key: 'guest_status_color', label: 'Guest', is_html: true, is_search: false },
+  { key: 'stay', label: 'Stay', is_search: false },
+  { key: 'room', label: 'Room', is_search: false },
+  { key: 'room_next', label: 'Room Next', is_search: false },
+  { key: 'company', label: 'Company', is_search: false, max_width: '180px' },
+  { key: 'room_type', label: 'Room Type', is_search: false, max_width: '150px' },
+  { key: 'room_status_color', label: 'Room Status', is_html: true, is_search: false },
+  { key: 'room_clean_status_color', label: 'Clean Status', is_html: true, is_search: false },
+  { key: 'check_in_date', label: 'Check In', type: 'date', is_search: false },
+  { key: 'check_out_date', label: 'Check Out', type: 'date', is_search: false },
+  { key: 'balance', label: 'Balance', is_search: false },
+  { key: 'sharer', label: 'Sharer', is_search: false },
+  { key: 'aa', label: 'A', is_search: false },
+  { key: 'cc', label: 'C', is_search: false },
 ];
+
+// Columns the search box can actually target, i.e. real `folios` columns.
+// Laravel's search_field macro guards with Schema::hasColumn(); the rest of
+// TABLE_COLUMNS (room, guest_name, ...) are relation-derived and are skipped.
+const FOLIO_SEARCH_COLUMNS = new Set([
+  'folio_number', 'first_name', 'last_name', 'company_name', 'email', 'telp',
+  'type_reservation', 'check_in_date', 'check_out_date', 'status_reservation',
+]);
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -678,6 +856,481 @@ function parsePaginationFn(query: any) {
   const sort = query.sort as string || 'id';
   const order = query.order === 'desc' ? 'desc' : 'asc';
   return { page, limit, search, sort, order };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Check-in / check-out as reusable operations.
+//
+// The HTTP handlers further down are thin wrappers around these. The group flow
+// (ReservationController.updateBulk) drives the SAME functions per p-block, which
+// is why it can honour the settlement gate, the room-availability check and the
+// room-status writes instead of flipping a status column and hoping.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type OpResult =
+  | { ok: true; rooms?: string[]; balance?: number; autoTransfer?: boolean }
+  | { ok: false; code: number; message: string };
+
+async function loadFolioForStay(id: bigint) {
+  return prisma.folios.findUnique({
+    where: { id },
+    include: {
+      reservations: {
+        where: { deleted_at: null },
+        select: {
+          id: true, room_id: true, room_id_next: true, room_type_id: true, date: true,
+          is_24_hour: true, package_id: true, quantity: true, quantity_extra_day_use: true,
+          adult: true, child: true, add_bed: true, eta: true, etd: true,
+        },
+      },
+    },
+  });
+}
+
+export async function performCheckIn(
+  id: bigint,
+  opts: { propertyId: bigint; businessDate: string; remark?: string | null; userId?: bigint | null }
+): Promise<OpResult> {
+  const { propertyId: pid, businessDate, remark, userId } = opts;
+  const folio = await loadFolioForStay(id);
+  if (!folio || folio.deleted_at) return { ok: false, code: 404, message: 'Not Found' };
+
+  // Laravel parity (Folio.php:1233): virtual reservation cannot be updated
+  if (String(folio.type_reservation ?? '').toLowerCase() === 'vr') {
+    return { ok: false, code: 400, message: 'Virtual reservation cannot be updated' };
+  }
+  // Laravel parity (Folio.php:1272): GIT master folio cannot check in directly
+  const isGit = String(folio.type_reservation ?? '').toLowerCase() === 'git';
+  if (isGit && Number(folio.parent ?? 0) === 0) {
+    return { ok: false, code: 400, message: 'Action not allowed' };
+  }
+  // Already in house — nothing to do, and not an error for a bulk run.
+  if (folio.status_reservation === STATUS_RESERVATION.check_in.id) {
+    return { ok: true, rooms: [] };
+  }
+
+  // Laravel parity (Folio.php:1245-1269): mandatory guest profile fields.
+  // Front desk creates guests with just title/first/last during a walk-in or
+  // phone booking, so this is the gate that forces the rest of the profile to
+  // be finished before the guest is actually checked in.
+  if (folio.guest_profile_id) {
+    const guest = await prisma.guest_profiles.findUnique({ where: { id: folio.guest_profile_id } });
+    const mandatory = await readPropertyMandatory(prisma, pid);
+    if (guest && mandatory.length > 0) {
+      const missing = missingMandatoryFields(guest, mandatory);
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          code: 400,
+          message: 'Guest Profile is not complete. Missing: ' + missing.join(', '),
+        };
+      }
+    }
+  }
+
+  // Laravel parity (Folio.php:1293-1299): check_in_date must equal business date
+  const folioCheckIn = folio.check_in_date
+    ? new Date(folio.check_in_date.getTime() - folio.check_in_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+    : null;
+  if (!folio.is_virtual && folioCheckIn !== businessDate) {
+    return { ok: false, code: 400, message: 'Check in date is not valid' };
+  }
+
+  // Resolve rooms BEFORE mutation (Laravel checks first, mutates last)
+  const roomIds: bigint[] = [];
+  for (const resv of folio.reservations) {
+    const targetRoomId = resv.room_id_next ?? resv.room_id;
+    if (targetRoomId != null) roomIds.push(targetRoomId);
+  }
+
+  if (!folio.is_virtual) {
+    const missingRoom = folio.reservations.some((r) => (r.room_id_next ?? r.room_id) == null);
+    if (missingRoom) return { ok: false, code: 400, message: 'Room not found' };
+  }
+
+  const checkInDateStr = folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : businessDate;
+  const checkOutDateStr = folio.check_out_date
+    ? folio.check_out_date.toISOString().slice(0, 10)
+    : new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+
+  // Laravel parity (Folio.php:1301-1334): allotment quota check + decrement
+  if (folio.use_allotment) {
+    const allotErr = await checkAllotmentRoom(folio);
+    if (allotErr) return { ok: false, code: 400, message: allotErr };
+  }
+
+  // The availability read and every occupancy write share one SERIALIZABLE
+  // transaction. Previously the read happened outside any transaction, so two
+  // clerks checking two folios into the same room could both pass the guard and
+  // both commit.
+  let occupied: string[] = [];
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        if (!folio.is_virtual && roomIds.length > 0) {
+          // Laravel parity (Folio.php:1285-1291): room maid_status must be Clean
+          const rooms = await tx.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, maid_status: true, name: true } });
+          const notClean = rooms.filter(r => r.maid_status !== MAID_STATUSES.clean.id);
+          if (notClean.length > 0) throw new HttpError(400, 'Room is not clean');
+
+          for (const roomId of roomIds) {
+            const available = await isRoomAvailableFor(pid, roomId, checkInDateStr, checkOutDateStr, id, tx as unknown as Db);
+            if (!available) {
+              const room = await tx.rooms.findUnique({ where: { id: roomId }, select: { name: true } });
+              throw new HttpError(400, `Room ${room?.name ?? roomId} is not available for check-in`);
+            }
+          }
+        }
+
+        await tx.folios.update({
+          where: { id },
+          data: {
+            status_reservation: STATUS_RESERVATION.check_in.id,
+            // Laravel parity (Folio.php:1365-1367): remark_check_in in folio data JSON
+            ...(remark ? { data: JSON.stringify({ ...(folio.data ? safeParseData(folio.data) : {}), remark_check_in: remark }) } : {}),
+            updated_by: userId ?? null,
+            updated_at: new Date(),
+          },
+        });
+
+        // Laravel parity (Folio.php:1347-1354): set ATA now; 24h folios get ETD = now
+        const ata = new Date();
+        for (const resv of folio.reservations) {
+          const data: any = { ata };
+          if (resv.is_24_hour === 1) data.etd = ata;
+          await tx.reservations.update({ where: { id: resv.id }, data });
+        }
+        await tx.reservations.updateMany({
+          where: { folio_id: id, deleted_at: null },
+          data: { status_reservation: STATUS_RESERVATION.check_in.id },
+        });
+
+        if (!folio.is_virtual && roomIds.length > 0) {
+          const now = new Date();
+          await tx.rooms.updateMany({
+            where: { id: { in: roomIds } },
+            data: {
+              room_status: ROOM_STATUSES.occupied.id,
+              maid_status: MAID_STATUSES.clean.id,
+              last_check_in_date: now,
+              last_check_in_time: now,
+              updated_at: now,
+            },
+          });
+          const names = await tx.rooms.findMany({ where: { id: { in: roomIds } }, select: { name: true } });
+          occupied = names.map((n) => String(n.name ?? ''));
+        }
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 20000 }
+    );
+  } catch (err: any) {
+    if (err instanceof HttpError) return { ok: false, code: err.status, message: err.message };
+    // P2034 = write conflict: another check-in got there first. Never retry
+    // blindly into a double booking.
+    if (err?.code === 'P2034' || err?.code === 'P2002') {
+      return { ok: false, code: 409, message: 'Room is no longer available — another check-in took it. Please pick another room.' };
+    }
+    throw err;
+  }
+
+  // Laravel parity (Folio.php:1370-1406): day-use ETD calc + immediate posting
+  if (folio.is_day_use && folio.reservations.length > 0) {
+    const dayUseErr = await processExtraDayUse(folio, folio.reservations[0]);
+    if (dayUseErr) return { ok: false, code: dayUseErr.code, message: dayUseErr.message };
+    await postingRevenueDayUse(id, BigInt(folio.property_id), businessDate);
+  }
+
+  enqueueJob('sync-staah-room-availability', {
+    propertyId: Number(folio.property_id),
+    dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
+    dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
+  });
+
+  return { ok: true, rooms: occupied };
+}
+
+export async function performCheckOut(
+  id: bigint,
+  opts: { businessDate: string; userId?: bigint | null; skipAutoTransfer?: boolean }
+): Promise<OpResult> {
+  const { businessDate, userId, skipAutoTransfer } = opts;
+  const folio = await prisma.folios.findUnique({
+    where: { id },
+    include: { reservations: { where: { deleted_at: null }, select: { room_id: true, room_id_next: true, date: true, is_posting: true } } },
+  });
+  if (!folio || folio.deleted_at) return { ok: false, code: 404, message: 'Not Found' };
+  if (String(folio.type_reservation ?? '').toLowerCase() === 'vr') {
+    return { ok: false, code: 400, message: 'Virtual reservation cannot be updated' };
+  }
+  // Already out — treat as a no-op success so a bulk run is idempotent.
+  if (folio.status_reservation === STATUS_RESERVATION.check_out.id) {
+    return { ok: true, balance: 0, autoTransfer: false };
+  }
+  // Laravel parity (Folio.php:1741): must be checked-in
+  if (folio.status_reservation !== STATUS_RESERVATION.check_in.id) {
+    return { ok: false, code: 400, message: 'Status reservation is not check in' };
+  }
+
+  // Laravel parity (Folio.php:1748): auto-transfer charges before the gate
+  const autoTransfer = skipAutoTransfer ? false : await transferTransactionsForCheckout(folio as any, businessDate);
+
+  // Laravel parity (Folio.php:1750): balance must be settled before checkout
+  const balanceMinor = await folioBalanceMinorUnits(folio as any);
+  if (!isFolioSettledMinor(balanceMinor)) {
+    return {
+      ok: false,
+      code: 400,
+      message: autoTransfer
+        ? 'The auto transfer process is successful, please make payment on the remaining balance'
+        : 'Payment required',
+    };
+  }
+  const balance = balanceMinor / MINOR_UNITS;
+
+  // Laravel parity (Folio.php:1760-1768): delete future unposted reservations
+  const bDate = new Date(businessDate + 'T00:00:00.000Z');
+  const roomIds: bigint[] = [];
+  for (const resv of folio.reservations) {
+    if (resv.room_id_next != null) roomIds.push(resv.room_id_next);
+    else if (resv.room_id != null) roomIds.push(resv.room_id);
+  }
+
+  // Single transaction: night soft delete, folio flip, reservation status write
+  // and room release either all land or none do.
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.reservations.updateMany({
+          where: { folio_id: id, deleted_at: null, date: { gt: bDate }, is_posting: 0 },
+          data: { deleted_at: new Date(), deleted_by: userId ?? null },
+        });
+        await tx.folios.update({
+          where: { id },
+          data: {
+            status_reservation: STATUS_RESERVATION.check_out.id,
+            check_out_date: bDate,
+            updated_by: userId ?? null,
+            updated_at: new Date(),
+          },
+        });
+        await tx.reservations.updateMany({
+          where: { folio_id: id, deleted_at: null },
+          data: { status_reservation: STATUS_RESERVATION.check_out.id, atd: new Date() },
+        });
+        if (roomIds.length > 0) {
+          const now = new Date();
+          await tx.rooms.updateMany({
+            where: { id: { in: roomIds } },
+            data: {
+              room_status: ROOM_STATUSES.vacant.id,
+              maid_status: MAID_STATUSES.dirty.id,
+              last_check_out_date: now,
+              last_check_out_time: now,
+              updated_at: now,
+            },
+          });
+        }
+      },
+      { timeout: 20000 }
+    );
+  } catch (err: any) {
+    console.error('performCheckOut transaction error:', err);
+    return { ok: false, code: 500, message: 'Failed to check out' };
+  }
+
+  enqueueJob('sync-staah-room-availability', {
+    propertyId: Number(folio.property_id),
+    dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
+    dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
+  });
+
+  return { ok: true, balance, autoTransfer: !!autoTransfer };
+}
+
+/**
+ * Reverse a completed stay: `un_check_in` puts an in-house folio back to
+ * reservation, `un_check_out` puts a checked-out folio back to check-in.
+ *
+ * Both were reachable from the group Room tab, which routed them to
+ * `updateBulk` — whose status switch did not list them, so every attempt came
+ * back 400 and a group could not be reversed at all.
+ */
+export async function performReverseStay(
+  id: bigint,
+  opts: {
+    businessDate: string;
+    userId?: bigint | null;
+    toVirtual?: any;
+    remark?: string | null;
+    reason?: string | null;
+  }
+): Promise<OpResult> {
+  const { businessDate, userId, toVirtual, remark, reason } = opts;
+  const folio: any = await prisma.folios.findUnique({
+    where: { id },
+    include: { reservations: { where: { deleted_at: null }, select: { id: true, room_id: true, room_id_next: true } } },
+  });
+  if (!folio || folio.deleted_at) return { ok: false, code: 404, message: 'Not Found' };
+  if (String(folio.type_reservation ?? '').toLowerCase() === 'vr') {
+    return { ok: false, code: 400, message: 'Virtual reservation cannot be updated' };
+  }
+
+  const now = new Date();
+  const remarkKey = remark ? { remark: String(remark) } : {};
+
+  if (folio.status_reservation === STATUS_RESERVATION.check_in.id) {
+    // ── un_check_in: back to reservation, release the room ──
+    await prisma.$transaction(async (tx) => {
+      await tx.folios.update({
+        where: { id },
+        data: {
+          status_reservation: STATUS_RESERVATION.reservation.id,
+          data: JSON.stringify({ ...safeParseData(folio.data), remark_un_check_in: remark ?? null }),
+          updated_by: userId ?? null,
+          updated_at: now,
+          ...remarkKey,
+        },
+      });
+      await tx.reservations.updateMany({
+        where: { folio_id: id, deleted_at: null },
+        data: { status_reservation: STATUS_RESERVATION.reservation.id },
+      });
+      // The room goes back on sale. Leaving it occupied is what made an
+      // un-checked-in room look unavailable to every other guest.
+      const roomIds = [...new Set(folio.reservations.map((r: any) => r.room_id_next ?? r.room_id).filter((x: any) => x != null))] as bigint[];
+      if (roomIds.length > 0) {
+        await tx.rooms.updateMany({
+          where: { id: { in: roomIds } },
+          data: { room_status: ROOM_STATUSES.vacant.id, maid_status: MAID_STATUSES.dirty.id, updated_at: now },
+        });
+      }
+    });
+    enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+    return { ok: true };
+  }
+
+  if (folio.status_reservation === STATUS_RESERVATION.check_out.id) {
+    // ── un_check_out: back to check-in, room becomes due_out ──
+    // `to_virtual` stays virtual (Laravel parity) unless explicitly cleared.
+    const keepVirtual = String(toVirtual ?? '') === '1' || String(toVirtual ?? '') === 'true';
+    await prisma.$transaction(async (tx) => {
+      await tx.folios.update({
+        where: { id },
+        data: {
+          status_reservation: STATUS_RESERVATION.check_in.id,
+          is_virtual: keepVirtual ? true : folio.is_virtual,
+          data: JSON.stringify({ ...safeParseData(folio.data), remark_un_check_out: reason ?? remark ?? null }),
+          updated_by: userId ?? null,
+          updated_at: now,
+          ...remarkKey,
+        },
+      });
+      await tx.reservations.updateMany({
+        where: { folio_id: id, deleted_at: null },
+        data: { status_reservation: STATUS_RESERVATION.check_in.id },
+      });
+      const roomIds = [...new Set(folio.reservations.map((r: any) => r.room_id_next ?? r.room_id).filter((x: any) => x != null))] as bigint[];
+      if (roomIds.length > 0) {
+        await tx.rooms.updateMany({
+          where: { id: { in: roomIds } },
+          // due_out, not vacant: the guest has not physically left yet.
+          data: { room_status: ROOM_STATUSES.due_out.id, updated_at: now },
+        });
+      }
+    });
+    enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+    return { ok: true };
+  }
+
+  return { ok: false, code: 400, message: 'Only a checked-in or checked-out folio can be reversed' };
+}
+
+/**
+ * Shift a folio's whole stay.
+ *
+ * The group Room tab sends `change_date` here with absolute `check_in_date` /
+ * `check_out_date`; a relative `days` shift is also accepted. Either way it was
+ * unreachable: `change_date` was not in `updateBulk`'s status switch, so every
+ * bulk date change on a group returned 400.
+ */
+export async function performChangeStayDate(
+  id: bigint,
+  opts: {
+    userId?: bigint | null;
+    days?: number;
+    checkInDate?: string | null;
+    checkOutDate?: string | null;
+    reason?: string | null;
+    remark?: string | null;
+  }
+): Promise<OpResult> {
+  const { userId, days, checkInDate, checkOutDate, reason, remark } = opts;
+
+  const folio: any = await prisma.folios.findUnique({
+    where: { id },
+    include: { reservations: { where: { deleted_at: null } } },
+  });
+  if (!folio || folio.deleted_at) return { ok: false, code: 404, message: 'Not Found' };
+
+  const dayMs = 86400000;
+  let ms: number;
+
+  if (checkInDate) {
+    if (!folio.check_in_date) return { ok: false, code: 400, message: 'Folio has no check-in date to move' };
+    const currentDay = new Date(new Date(folio.check_in_date).toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime();
+    const targetDay = new Date(String(checkInDate).slice(0, 10) + 'T00:00:00.000Z').getTime();
+    if (Number.isNaN(targetDay)) return { ok: false, code: 400, message: 'Invalid check-in date' };
+    ms = targetDay - currentDay;
+
+    // An explicit departure date must keep the same length of stay, otherwise a
+    // "date change" silently turns a 3-night booking into a 1-night one.
+    if (checkOutDate) {
+      const nights = Math.max(1, Math.round((new Date(new Date(folio.check_out_date).toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime() - currentDay) / dayMs));
+      const wanted = new Date(new Date(String(checkOutDate).slice(0, 10) + 'T00:00:00.000Z').getTime() - targetDay).getTime();
+      const wantedNights = Math.round(wanted / dayMs);
+      if (wantedNights !== nights) {
+        return {
+          ok: false,
+          code: 400,
+          message: `Stay length must stay ${nights} night(s); the requested dates are ${wantedNights}`,
+        };
+      }
+    }
+  } else {
+    const shift = Number(days ?? 0);
+    if (!Number.isFinite(shift) || shift === 0) {
+      return { ok: false, code: 400, message: 'A non-zero day shift or a target check-in date is required' };
+    }
+    ms = Math.trunc(shift) * dayMs;
+  }
+
+  if (ms === 0) return { ok: true };
+
+  await prisma.$transaction(async (tx) => {
+    await tx.folios.update({
+      where: { id },
+      data: {
+        ...(folio.check_in_date ? { check_in_date: new Date(folio.check_in_date.getTime() + ms) } : {}),
+        ...(folio.check_out_date ? { check_out_date: new Date(folio.check_out_date.getTime() + ms) } : {}),
+        data: JSON.stringify({ ...safeParseData(folio.data), remark_change_date: reason ?? remark ?? null }),
+        updated_by: userId ?? null,
+        updated_at: new Date(),
+      },
+    });
+    for (const r of folio.reservations) {
+      await tx.reservations.update({
+        where: { id: r.id },
+        data: {
+          date: new Date(new Date(r.date).getTime() + ms),
+          check_in_date: r.check_in_date ? new Date(new Date(r.check_in_date).getTime() + ms) : null,
+          check_out_date: r.check_out_date ? new Date(new Date(r.check_out_date).getTime() + ms) : null,
+          updated_at: new Date(),
+        },
+      });
+    }
+  });
+  enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+  return { ok: true };
 }
 
 export class FrontDeskController {
@@ -768,9 +1421,53 @@ export class FrontDeskController {
 
       where.status_reservation = where.status_reservation ?? { notIn: [STATUS_RESERVATION.cancel_reservation.id] };
 
-      // Search
-      if (search_field && search_value) {
-        where[search_field] = { contains: search_value, mode: 'insensitive' };
+      // Search — parity with Laravel Builder::macro('search_field') +
+      // Folio::scopeSearchFolios. Both split on ';', AND their clauses, and
+      // skip '-1' / 'undefined' / '' values. Anything is pushed onto where.AND
+      // so it never clobbers the display_status / stay-dates filters above.
+      const searchClauses: any[] = [];
+
+      const searchFields = String(search_field || '').split(';').filter((f) => f.trim() !== '');
+      const searchValues = String(search_value || '').split(';');
+      searchFields.forEach((field, i) => {
+        const raw = searchValues[i];
+        if (raw === undefined || raw === '-1' || raw === 'undefined' || raw === '') return;
+        if (field === 'room') {
+          // Folio::scopeSearchFolios: room matches via reservation -> room name
+          searchClauses.push({
+            reservations: { some: { deleted_at: null, rooms: { name: { contains: raw, mode: 'insensitive' } } } },
+          });
+          return;
+        }
+        if (!FOLIO_SEARCH_COLUMNS.has(field)) return;
+        if (field === 'check_in_date' || field === 'check_out_date') {
+          const cmp = field === 'check_in_date' ? { gte: raw } : { lte: raw };
+          searchClauses.push({ [field]: cmp });
+          return;
+        }
+        searchClauses.push({ [field]: { contains: raw, mode: 'insensitive' } });
+      });
+
+      const keyword = String(req.query.search || '').trim();
+      if (keyword) {
+        const like = { contains: keyword, mode: 'insensitive' as const };
+        searchClauses.push({
+          OR: [
+            { first_name: like },
+            { last_name: like },
+            { folio_number: like },
+            { company_name: like },
+            { email: like },
+            { telp: like },
+            // Long field name: Prisma had to disambiguate the two relations
+            // that both point at company_profiles.
+            { company_profiles_folios_company_profile_idTocompany_profiles: { is: { name: like } } },
+          ],
+        });
+      }
+
+      if (searchClauses.length > 0) {
+        where.AND = [...(where.AND ?? []), ...searchClauses];
       }
 
 const [folios, total] = await Promise.all([
@@ -784,9 +1481,16 @@ const [folios, total] = await Promise.all([
             reservations: {
               where: { deleted_at: null },
               orderBy: { date: 'asc' },
-              include: { 
+              select: {
+                date: true,
+                is_posting: true,
+                room_name: true,
+                room_type_name: true,
+                room_id_next: true,
+                adult: true,
+                child: true,
                 room_types: { select: { name: true } },
-                rooms: { select: { name: true } },
+                rooms: { select: { name: true, room_status: true, maid_status: true } },
               },
             },
           },
@@ -795,6 +1499,7 @@ const [folios, total] = await Promise.all([
       ]);
 
       const folioIds = folios.map((f: any) => f.id);
+      const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? 0n);
       const [batchTransactions, batchGuests, gitChildren] = await Promise.all([
         prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, type_amount: true, total: true, model_type: true } }),
         prisma.guest_profiles.findMany({
@@ -803,7 +1508,7 @@ const [folios, total] = await Promise.all([
         }),
         prisma.folios.findMany({
           where: { parent: { in: folioIds }, deleted_at: null, status_reservation: { not: 2 } },
-          select: { id: true, parent: true, transactions: { where: { model_type: 'App\\Models\\CompanyProfile' }, select: { type_amount: true, total: true } } },
+          select: { id: true, parent: true, status_reservation: true, transactions: { where: { model_type: 'App\\Models\\CompanyProfile' }, select: { type_amount: true, total: true } } },
         }),
       ]);
       const txnByFolio = new Map<string, { type_amount: string | null; total: any; model_type: string | null }[]>();
@@ -813,11 +1518,40 @@ const [folios, total] = await Promise.all([
         txnByFolio.get(key)!.push(t);
       }
       const guestByProfileId = new Map(batchGuests.map((g: any) => [String(g.id), g]));
+
+      // GuestProfile::calculateTotalStay() — completed folios per guest.
+      // Port of the Laravel query:
+      //   status_reservation = check_out
+      //   AND (folio_number LIKE 'F%' OR (type_reservation = 'git' AND parent != 0))
+      //   AND status_reservation != cancelled
+      // One grouped query for the whole page instead of a count per row.
+      const pageGuestIds = [...new Set(folios.map((f: any) => f.guest_profile_id).filter(Boolean).map((v: any) => BigInt(v)))];
+      const stayRows = pageGuestIds.length
+        ? await prisma.folios.groupBy({
+            by: ['guest_profile_id'],
+            where: {
+              guest_profile_id: { in: pageGuestIds },
+              deleted_at: null,
+              status_reservation: STATUS_RESERVATION.check_out.id,
+              OR: [
+                { folio_number: { startsWith: 'F' } },
+                { type_reservation: 'git', parent: { not: 0 } },
+              ],
+            },
+            _count: { _all: true },
+          }).catch(() => [])
+        : [];
+      const stayMap = new Map<string, number>(
+        (stayRows as any[]).map((r) => [String(r.guest_profile_id), Number(r._count?._all ?? 0)])
+      );
       const childTxnByParent = new Map<string, { type_amount: string | null; total: any }[]>();
+      const childStatusByParent = new Map<string, number[]>();
       for (const c of gitChildren) {
         const key = String(c.parent);
         if (!childTxnByParent.has(key)) childTxnByParent.set(key, []);
         for (const t of c.transactions) childTxnByParent.get(key)!.push(t);
+        if (!childStatusByParent.has(key)) childStatusByParent.set(key, []);
+        childStatusByParent.get(key)!.push(Number(c.status_reservation));
       }
       const sumNet = (rows: { type_amount: string | null; total: any }[]) =>
         rows.reduce((s, t) => s + (t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0)), 0);
@@ -840,9 +1574,31 @@ const [folios, total] = await Promise.all([
           if (gp) guestName = `${gp.first_name || ''} ${gp.last_name || ''}`.trim();
         }
 
-const lastReservation = f.reservations?.[f.reservations.length - 1];
+// Folio::lastReservation() parity: prefers the first reservation with
+// is_posting = 0 ordered by date asc (Reservation::scopeLastReservation),
+// and falls back to the most recent reservation when none qualifies.
+        const reservations = f.reservations ?? [];
+        const notPosted = reservations.filter((r: any) => Number(r.is_posting ?? 0) === 0);
+        const lastReservation = notPosted.length > 0
+          ? notPosted[0]
+          : [...reservations].sort(
+              (a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+            )[0];
         const roomName = lastReservation?.rooms?.name || lastReservation?.room_name || '';
         const roomTypeName = lastReservation?.room_types?.name || lastReservation?.room_type_name || '';
+
+        // Folio::formatList() parity — Room/Clean Status come from the room the
+        // last reservation points at, wrapped in a single-entry array so the
+        // table renders a colour chip. Empty array when no room is attached.
+        const attachedRoom = lastReservation?.rooms ?? null;
+        const roomStatusId = attachedRoom ? Number(attachedRoom.room_status) : null;
+        const maidStatusId = attachedRoom ? Number(attachedRoom.maid_status) : null;
+        const roomStatusName = roomStatusId != null
+          ? (Object.values(ROOM_STATUSES).find((s: any) => s.id === roomStatusId) as any)?.name
+          : null;
+        const maidStatusName = maidStatusId != null
+          ? (Object.values(MAID_STATUSES).find((s: any) => s.id === maidStatusId) as any)?.name
+          : null;
 
         // Laravel Folio@getBalance parity: MINUS subtracts, GIT parent/sub variants (batched)
         const balance = balanceFor(f);
@@ -858,15 +1614,24 @@ const lastReservation = f.reservations?.[f.reservations.length - 1];
           remark_bool: !!(f.remark || f.posting_instruction || f.check_out_instruction || f.check_in_instruction),
           is_do_not_disturb: !!f.is_do_not_disturb,
           status_reservation_color: statusReservationColor(f),
-          room_clean_status_color: [],
-          room_status_color: [],
+          room_clean_status_color: attachedRoom && maidStatusName && maidStatusId != null
+            ? [{ label: maidStatusName.replace(/ /g, '-'), color: getColorMaid(maidStatusId), is_color: true }]
+            : [],
+          room_status_color: attachedRoom && roomStatusName && roomStatusId != null
+            ? [{ label: roomStatusName.replace(/ /g, '-'), color: getColorRoom(roomStatusId), is_color: true }]
+            : [],
           folio_number: f.folio_number,
           guest_name: guestName || '-',
           guest_status: { label: 'Regular', color: 'bg-green' },
           guest_status_color: [{ label: 'Regular', color: 'bg-green', is_color: true }],
           date_arrival: f.check_in_date,
-          stay: 0,
-room: roomName,
+          // GuestProfile::calculateTotalStay() — how many folios this guest has
+          // already completed. It was hardcoded to 0, so the Stay column read 0
+          // for every row.
+          // Laravel: status = check_out, and (folio_number like 'F%' OR
+          // (type_reservation = git AND parent != 0)), excluding cancelled.
+          stay: stayMap.get(String(f.guest_profile_id)) ?? 0,
+          room: roomName,
            room_next: lastReservation?.room_id_next ? (lastReservation.rooms?.name || '') : '',
           company: f.company_name || '',
           room_type: roomTypeName,
@@ -877,7 +1642,23 @@ room: roomName,
           is_popup_other_guest: false,
           aa: lastReservation?.adult || 0,
           cc: lastReservation?.child || 0,
-          actions: [],
+          // Was hardcoded to `[]`, which made the row action popup render as an
+          // empty box. Now mirrors Folio::formatAction().
+          actions: formatFolioActions({
+            status_reservation: f.status_reservation,
+            type_reservation: f.type_reservation,
+            is_pending: Number(f.is_pending ?? 0) === 1 || Number(f.status_reservation ?? -1) === 5,
+            hasRoomChange: !!lastReservation?.room_id_next && lastReservation.room_id_next !== null,
+            childReservationCount: (childStatusByParent.get(String(f.id)) ?? []).filter((s) => s === 3).length,
+            check_in_date: f.check_in_date ? new Date(f.check_in_date).toISOString() : null,
+            businessDate,
+            group,
+            isParentGit: String(f.type_reservation ?? '').toLowerCase() === 'git' && Number(f.parent ?? 0) === 0,
+            isGit: String(f.type_reservation ?? '').toLowerCase() === 'git',
+            isFit: String(f.type_reservation ?? '').toLowerCase() === 'fit',
+            nightAudit: String(req.query.night_audit ?? '') === '1',
+            auditType: (req.query.audit_type as string) ?? null,
+          }),
         };
       });
 
@@ -908,6 +1689,7 @@ room: roomName,
           to: Math.min(page * limit, total),
         },
         table,
+        search_data: dataSearch(req, table) as any,
       });
     } catch (err: any) {
       console.error('FrontDesk list error:', err);
@@ -918,194 +1700,69 @@ room: roomName,
 // POST /api/front-desk/{id}/check-in
   static async checkIn(req: Request, res: Response): Promise<void> {
     try {
-      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-      const id = BigInt(idParam);
-
-      const folio = await prisma.folios.findUnique({
-        where: { id },
-        include: {
-          reservations: {
-            where: { deleted_at: null },
-            select: {
-              id: true, room_id: true, room_id_next: true, room_type_id: true, date: true,
-              is_24_hour: true, package_id: true, quantity: true, quantity_extra_day_use: true,
-              adult: true, child: true, add_bed: true, eta: true, etd: true,
-            },
-          },
-        },
-      });
-      if (!folio || folio.deleted_at) {
-        notFound(res, 'Not Found');
+      const id = resolveFolioId(req);
+      if (id === null) {
+        badRequest(res, 'Folio id is required');
         return;
       }
 
-      // Laravel parity (Folio.php:1233): virtual reservation cannot be updated
-      if (String(folio.type_reservation ?? '').toLowerCase() === 'vr') {
-        badRequest(res, 'Virtual reservation cannot be updated');
-        return;
-      }
-
-      // Laravel parity (Folio.php:1272): GIT master folio cannot check in directly
-      const isGit = String(folio.type_reservation ?? '').toLowerCase() === 'git';
-      if (isGit && Number(folio.parent ?? 0) === 0) {
-        badRequest(res, 'Action not allowed');
-        return;
-      }
-
-      // Laravel parity (Folio.php:1245-1269): mandatory guest profile fields per property config
       const pid = req.user?.lastProperty ?? 0n;
-      if (folio.guest_profile_id) {
-        const guest = await prisma.guest_profiles.findUnique({ where: { id: folio.guest_profile_id } });
-        let mandatory: string[] = [];
-        try {
-          const propRows: any[] = await prisma.$queryRawUnsafe(
-            `SELECT mandatory_check_in FROM properties WHERE id = $1`,
-            pid
-          );
-          const raw = propRows[0]?.mandatory_check_in;
-          if (Array.isArray(raw)) mandatory = raw;
-          else if (typeof raw === 'string' && raw.trim()) mandatory = JSON.parse(raw);
-        } catch { /* column may not exist yet — treat as no mandatory fields */ }
-        if (guest && mandatory.length > 0) {
-          const missing = mandatory.filter((f: string) => {
-            const v = (guest as any)[f];
-            return v === null || v === undefined || v === '' || String(v).trim().toLowerCase() === 'null';
-          });
-          if (missing.length > 0) {
-            badRequest(res, 'Guest Profile is not complete. Missing: ' + missing.join(', '));
-            return;
-          }
-        }
-      }
-
-      // Laravel parity (Folio.php:1293-1299): check_in_date must equal business date
       const businessDate = await AuthController.getBusinessDate(pid);
-      const folioCheckIn = folio.check_in_date ? new Date(folio.check_in_date.getTime() - folio.check_in_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10) : null;
-      if (!folio.is_virtual && folioCheckIn !== businessDate) {
-        badRequest(res, 'Check in date is not valid');
+      const result = await performCheckIn(id, {
+        propertyId: pid,
+        businessDate,
+        remark: req.body?.remark ?? null,
+        userId: req.user?.id ?? null,
+      });
+      if (!result.ok) {
+        if (result.code === 404) notFound(res, result.message);
+        else if (result.code === 409) error(res, result.message, 409);
+        else badRequest(res, result.message);
         return;
       }
 
-      // Resolve rooms BEFORE mutation (Laravel checks first, mutates last)
-      const roomIds: bigint[] = [];
-      for (const resv of folio.reservations) {
-        const targetRoomId = resv.room_id_next ?? resv.room_id;
-        if (targetRoomId != null) roomIds.push(targetRoomId);
-      }
-
-      // Laravel parity (Folio.php:1279-1284): non-virtual check-in requires a
-      // room on every reservation. getRoomAvailability() = false when any
-      // reservation has an empty room_id -> block with "Room not found".
-      if (!folio.is_virtual) {
-        const missingRoom = folio.reservations.some((r) => (r.room_id_next ?? r.room_id) == null);
-        if (missingRoom) {
-          badRequest(res, 'Room not found');
-          return;
-        }
-      }
-
-      if (!folio.is_virtual && roomIds.length > 0) {
-        // Laravel parity (Folio.php:1285-1291): room maid_status must be Clean
-        const rooms = await prisma.rooms.findMany({ where: { id: { in: roomIds } }, select: { id: true, maid_status: true, name: true } });
-        const notClean = rooms.filter(r => r.maid_status !== MAID_STATUSES.clean.id);
-        if (notClean.length > 0) {
-          badRequest(res, 'Room is not clean');
-          return;
-        }
-
-        const checkInDate = folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : businessDate;
-        const checkOutDate = folio.check_out_date ? folio.check_out_date.toISOString().slice(0, 10) : new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-        for (const roomId of roomIds) {
-          const available = await isRoomAvailableFor(pid, roomId, checkInDate, checkOutDate, id);
-          if (!available) {
-            badRequest(res, `Room ${roomId} not available for check-in`);
-            return;
-          }
-        }
-      }
-
-      // Laravel parity (Folio.php:1301-1334): allotment quota check + persistent
-      // weekday decrement when the folio consumes an allotment.
-      if (folio.use_allotment) {
-        const allotErr = await checkAllotmentRoom(folio);
-        if (allotErr) {
-          badRequest(res, allotErr);
-          return;
-        }
-      }
-
-      // ── All guards passed — mutate now ──
-
-      await prisma.folios.update({
-        where: { id },
-        data: {
-          status_reservation: STATUS_RESERVATION.check_in.id,
-          // Laravel parity (Folio.php:1365-1367): remark_check_in persisted in folio data JSON
-          ...(req.body?.remark
-            ? { data: JSON.stringify({ ...(folio.data ? safeParseData(folio.data) : {}), remark_check_in: req.body.remark }) }
-            : {}),
-          updated_at: new Date(),
-        },
-      });
-
-      // Laravel parity (Folio.php:1347-1354): set ATA now; 24h folios get ETD = now
-      const ata = new Date();
-      for (const resv of folio.reservations) {
-        const data: any = { ata };
-        if (resv.is_24_hour === 1) data.etd = ata;
-        await prisma.reservations.update({ where: { id: resv.id }, data });
-      }
-      await prisma.reservations.updateMany({
-        where: { folio_id: id, deleted_at: null },
-        data: { status_reservation: STATUS_RESERVATION.check_in.id },
-      });
-
-      // Update room status: occupied (1), maid_status: clean (0)
-      // Use room_id_next if exists (room change), otherwise room_id
-      if (!folio.is_virtual && roomIds.length > 0) {
-        const now = new Date();
-        await prisma.rooms.updateMany({
-          where: { id: { in: roomIds } },
-          data: {
-            room_status: ROOM_STATUSES.occupied.id,
-            maid_status: MAID_STATUSES.clean.id,
-            last_check_in_date: now,
-            last_check_in_time: now,
-            updated_at: now,
-          },
-        });
-      }
-
-      // Laravel parity (Folio.php:1370-1406): day-use folios get ExtraDayUseService
-      // processing (ETD calc + extra-quantity txn) and immediate revenue posting.
-      if (folio.is_day_use && folio.reservations.length > 0) {
-        const dayUseErr = await processExtraDayUse(folio, folio.reservations[0]);
-        if (dayUseErr) {
-          error(res, dayUseErr.message, dayUseErr.code);
-          return;
-        }
-        await postingRevenueDayUse(BigInt(id), BigInt(folio.property_id), businessDate);
-      }
-
-      // Laravel dispatches SyncStaahRoomAvailability after every folio mutation
-      // (Folio.php:1201/2100/2743) — push availability to channels event-driven.
-      enqueueJob('sync-staah-room-availability', {
-        propertyId: Number(folio.property_id),
-        dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
-        dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
-      });
+      const folio = await prisma.folios.findUnique({ where: { id }, select: { folio_number: true } });
 
       // Laravel parity (Folio.php:1408-1419): email builder "Check In" to guest.
       // Skipped silently when the template is absent; never blocks the response.
-      if (folio.guest_profile_id) {
-        const guest = await prisma.guest_profiles.findUnique({
-          where: { id: folio.guest_profile_id },
-          select: { email: true },
-        }).catch(() => null);
-        sendTemplateEmail(prisma, 'Check In', guest?.email).catch(() => {});
+      if (folio) {
+        const full = await prisma.folios.findUnique({ where: { id }, select: { guest_profile_id: true } });
+        if (full?.guest_profile_id) {
+          const guest = await prisma.guest_profiles.findUnique({
+            where: { id: full.guest_profile_id },
+            select: { email: true },
+          }).catch(() => null);
+          sendTemplateEmail(prisma, 'Check In', guest?.email).catch(() => {});
+        }
       }
 
-      success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_in.id }, 'Check-in success');
+      // Audit AFTER the commit: the row must describe a change that actually
+      // happened. Check-in previously left no trace at all — no log row, no
+      // updated_by, only a mutated `folios` row with a wall-clock updated_at.
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'folios',
+        event: 'updated',
+        subjectId: id,
+        name: 'folio-checked-in',
+        description: `Folio ${folio?.folio_number ?? id} checked in`,
+        logName: 'front_desk',
+        attributes: { status_reservation: STATUS_RESERVATION.check_in.id },
+        meta: {
+          folio_number: folio?.folio_number ?? null,
+          rooms: result.rooms ?? [],
+          remark: req.body?.remark ?? null,
+          // The actual list the gate ran against — the old literal
+          // 'enforced' said nothing about which fields were required.
+          mandatory_check_in: await readPropertyMandatory(prisma, pid),
+        },
+      });
+
+      success(res, {
+        folio_id: Number(id),
+        status_reservation: STATUS_RESERVATION.check_in.id,
+        rooms: result.rooms ?? [],
+      }, 'Check-in success');
     } catch (err: any) {
       console.error('FrontDesk checkIn error:', err);
       error(res, 'Failed to check in', 500);
@@ -1115,95 +1772,30 @@ room: roomName,
 // POST /api/front-desk/{id}/check-out
   static async checkOut(req: Request, res: Response): Promise<void> {
     try {
-      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-      const id = BigInt(idParam);
-
-      const folio = await prisma.folios.findUnique({
-        where: { id },
-        include: { reservations: { where: { deleted_at: null }, select: { room_id: true, room_id_next: true, date: true, is_posting: true } } }
-      });
-      if (!folio || folio.deleted_at) {
-        notFound(res, 'Not Found');
-        return;
-      }
-
-      // Laravel parity (Folio.php:1233): virtual reservation cannot be updated
-      if (String(folio.type_reservation ?? '').toLowerCase() === 'vr') {
-        badRequest(res, 'Virtual reservation cannot be updated');
-        return;
-      }
-
-      // Laravel parity (Folio.php:1741): must be checked-in
-      if (folio.status_reservation !== STATUS_RESERVATION.check_in.id) {
-        badRequest(res, 'Status reservation is not check in');
+      const id = resolveFolioId(req);
+      if (id === null) {
+        badRequest(res, 'Folio id is required');
         return;
       }
 
       const pid = req.user?.lastProperty ?? 0n;
       const businessDate = await AuthController.getBusinessDate(pid);
-
-      // Laravel parity (Folio.php:1748): auto-transfer charges per billing/auto-transfer setup
-      const isAutoTransfer = await transferTransactionsForCheckout(folio as any, businessDate);
-
-      // Laravel parity (Folio.php:1750): balance must be ~0 before checkout
-      const balance = await folioBalanceWithoutPosting(folio as any);
-      if (![0, 1, -1].includes(Math.ceil(balance))) {
-        badRequest(res, isAutoTransfer
-          ? 'The auto transfer process is successful, please make payment on the remaining balance'
-          : 'Payment required');
+      const result = await performCheckOut(id, { businessDate, userId: req.user?.id ?? null });
+      if (!result.ok) {
+        if (result.code === 404) notFound(res, result.message);
+        else if (result.code === 500) error(res, result.message, 500);
+        else badRequest(res, result.message);
         return;
       }
 
-      // Laravel parity (Folio.php:1760-1768): delete future unposted reservations
-      const bDate = new Date(businessDate + 'T00:00:00.000Z');
-      await prisma.reservations.updateMany({
-        where: { folio_id: id, deleted_at: null, date: { gt: bDate }, is_posting: 0 },
-        data: { deleted_at: new Date(), deleted_by: req.user?.id },
-      });
-
-      await prisma.folios.update({
+      const folio = await prisma.folios.findUnique({
         where: { id },
-        data: {
-          status_reservation: STATUS_RESERVATION.check_out.id,
-          check_out_date: bDate,
-          updated_at: new Date(),
-        },
-      });
-
-      await prisma.reservations.updateMany({
-        where: { folio_id: id, deleted_at: null },
-        data: { status_reservation: STATUS_RESERVATION.check_out.id, atd: new Date() },
-      });
-
-      // Update room status: vacant (0), maid_status: dirty (1)
-      const roomIds: bigint[] = [];
-      for (const resv of folio.reservations) {
-        if (resv.room_id_next != null) roomIds.push(resv.room_id_next);
-        else if (resv.room_id != null) roomIds.push(resv.room_id);
-      }
-      if (roomIds.length > 0) {
-        const now = new Date();
-        await prisma.rooms.updateMany({
-          where: { id: { in: roomIds } },
-          data: {
-            room_status: ROOM_STATUSES.vacant.id,
-            maid_status: MAID_STATUSES.dirty.id,
-            last_check_out_date: now,
-            last_check_out_time: now,
-            updated_at: now,
-          },
-        });
-      }
-
-      enqueueJob('sync-staah-room-availability', {
-        propertyId: Number(folio.property_id),
-        dateFrom: folio.check_in_date ? formatDate(new Date(folio.check_in_date)) : undefined,
-        dateTo: folio.check_out_date ? formatDate(new Date(folio.check_out_date)) : undefined,
+        select: { folio_number: true, guest_profile_id: true, check_in_date: true, check_out_date: true },
       });
 
       // Laravel parity (Folio.php:1811-1820): email builder "Check Out" to guest
       // with hardcoded fallbacks; never blocks the response.
-      if (folio.guest_profile_id) {
+      if (folio?.guest_profile_id) {
         const guest = await prisma.guest_profiles.findUnique({
           where: { id: folio.guest_profile_id },
           select: { email: true },
@@ -1211,7 +1803,24 @@ room: roomName,
         sendTemplateEmail(prisma, 'Check Out', guest?.email, 'Check Out', 'Your reservation has been checked out').catch(() => {});
       }
 
-      success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_out.id, balance }, 'Check-out success');
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'folios',
+        event: 'updated',
+        subjectId: id,
+        name: 'folio-checked-out',
+        description: `Folio ${folio?.folio_number ?? id} checked out`,
+        logName: 'front_desk',
+        attributes: { status_reservation: STATUS_RESERVATION.check_out.id },
+        meta: {
+          folio_number: folio?.folio_number ?? null,
+          balance: result.balance,
+          auto_transfer: !!result.autoTransfer,
+          remark: req.body?.remark ?? null,
+        },
+      });
+
+      success(res, { folio_id: Number(id), status_reservation: STATUS_RESERVATION.check_out.id, balance: result.balance }, 'Check-out success');
     } catch (err: any) {
       console.error('FrontDesk checkOut error:', err);
       error(res, 'Failed to check out', 500);
@@ -1257,8 +1866,8 @@ room: roomName,
           failed.push({ folio_id: Number(folio.id), message: e?.message ?? 'Auto transfer failed' });
           continue;
         }
-        const balance = await folioBalanceWithoutPosting(folio as any);
-        if (![0, 1, -1].includes(Math.ceil(balance))) {
+        const balanceMinor = await folioBalanceMinorUnits(folio as any);
+        if (!isFolioSettledMinor(balanceMinor)) {
           failed.push({ folio_id: Number(folio.id), message: 'Payment required' });
           continue;
         }
@@ -1342,6 +1951,17 @@ room: roomName,
       }
 
       enqueueJob('sync-staah-room-availability', { propertyId: Number(req.user?.lastProperty ?? 0) });
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'folios',
+        event: 'updated',
+        subjectId: null,
+        name: 'folio-batch-checked-out',
+        description: `Batch check-out: ${passed.length} folio(s) closed, ${failed.length} rejected`,
+        logName: 'front_desk',
+        meta: { business_date: businessDate, checked_out: passed.map(String), failed },
+      });
+
       success(res, { updated: passed.length, failed }, 'Batch check-out success');
     } catch (err: any) {
       console.error('FrontDesk batchCheckOut error:', err);
@@ -1418,7 +2038,15 @@ room: roomName,
 
       let filtered = txns;
       if (filter === 'void') filtered = filtered.filter((t: any) => t.is_void);
-      if (filter === 'refund') filtered = filtered.filter((t: any) => t.type === 'refund' || t.type === 'additional_refund');
+      // `filter=refund` feeds the refund PICKER, so it must list what can still
+      // be refunded — live, un-voided payments. Listing existing refund rows
+      // (the old behaviour) left the operator with nothing to pick, which is
+      // why the UI had no row selection and posted a free-typed amount instead.
+      if (filter === 'refund') {
+        filtered = filtered.filter(
+          (t: any) => t.type === 'payment' && !t.is_void && t.type_amount === 'MINUS'
+        );
+      }
       if (filter === 'split') filtered = filtered.filter((t: any) => t.is_split);
       if (filter === 'consolidate') filtered = filtered.filter((t: any) => t.is_consolidate);
       if (filter === 'transfer') filtered = filtered.filter((t: any) => t.is_transfer);
@@ -1538,7 +2166,7 @@ room: roomName,
       if (!folio_id) { badRequest(res, 'The folio id field is required.'); return; }
       if (!code) { badRequest(res, 'The code field is required.'); return; }
 
-      const folio = await prisma.folios.findUnique({ where: { id: BigInt(folio_id) }, select: { id: true, company_profile_id: true, guest_profile_id: true } });
+      const folio = await prisma.folios.findUnique({ where: { id: BigInt(folio_id) }, select: { id: true, folio_number: true, company_profile_id: true, guest_profile_id: true } });
       if (!folio) { badRequest(res, 'The selected folio id is invalid.'); return; }
 
       // Laravel :459-478 parity — NO super-user bypass. First role of the user
@@ -1677,9 +2305,17 @@ room: roomName,
           tax3: calc.tax3,
           surcharge,
           type_amount: typeAmount,
+          // Every posting must belong to a billing ledger. These were computed
+          // above and then dropped on the floor, so manual postings, payments,
+          // paid-outs and refunds all landed with model_type = NULL. That made
+          // them invisible to the GIT balance roll-up (which filters on
+          // model_type) and left the "Bill To" column blank in the grid.
+          model_type: modelType,
+          model_id: modelId,
+          is_event_deposit: body.is_event_deposit ? 1 : 0,
           status: 1,
+          is_pos_deposit: body.is_pos_deposit ? 1 : 0,
           source: body.is_pos_deposit ? 'pos' : 'hms',
-          is_event_deposit: body.is_event_deposit ? 0 : 1,
           created_at: new Date(),
           created_by: req.user?.id ?? null,
         },
@@ -1699,6 +2335,27 @@ room: roomName,
           },
         }).catch(() => {});
       }
+
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'transactions',
+        event: 'created',
+        subjectId: created.id,
+        name: `transaction-${String(type)}-posted`,
+        description: `${String(type)} posted to folio ${folio.folio_number ?? folio.id} for ${calc.total}`,
+        logName: 'cashiering',
+        attributes: {
+          type, total: calc.total, amount: finalAmount,
+          type_amount: typeAmount, code: idCode, model_type: modelType, model_id: modelId,
+        },
+        meta: {
+          folio_id: String(folio.id),
+          folio_number: folio.folio_number,
+          bill_to: body.bill_to ?? null,
+          is_event_deposit: !!body.is_event_deposit,
+          is_pos_deposit: !!body.is_pos_deposit,
+        },
+      });
 
       success(res, { id: Number(created.id) }, 'Success');
     } catch (err: any) { console.error('Transaction store error:', err); error(res, 'Failed to create transaction', 500); }
@@ -1836,65 +2493,131 @@ room: roomName,
       if (!Array.isArray(idx) || idx.length === 0) { badRequest(res, 'The idx field is required.'); return; }
       if (!remark || typeof remark !== 'string') { badRequest(res, 'The remark field is required.'); return; }
 
-      const ids = idx.map((v: any) => BigInt(v));
-      const txns = await prisma.transactions.findMany({ where: { id: { in: ids } } });
-
-      for (const t of txns) {
-        await prisma.transactions.update({
-          where: { id: t.id },
-          data: { is_void: 1, updated_at: new Date(), updated_by: req.user?.id ?? null },
-        });
-
-        // Reversal entry (Laravel replicate with flipped type_amount)
-        await prisma.transactions.create({
-          data: {
-            property_id: t.property_id,
-            folio_id: t.folio_id,
-            type: t.type,
-            uuid: randomUUID(),
-            date: t.date,
-            code: t.code,
-            code_name: t.code_name,
-            type_payment_id: t.type_payment_id,
-            code_item_id: t.code_item_id,
-            description: t.description,
-            amount: t.amount,
-            total: t.total,
-            type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
-            pb1: t.pb1,
-            svr_chrg: t.svr_chrg,
-            surcharge: t.surcharge,
-            tax3: t.tax3,
-            time: t.time,
-            bill_to: t.bill_to,
-            model_type: t.model_type,
-            model_id: t.model_id,
-            remark,
-            reference: t.reference,
-            pos: t.pos,
-            receipt: t.receipt,
-            card_name: t.card_name,
-            last_digit_card: t.last_digit_card,
-            voucher: t.voucher,
-            booking: t.booking,
-            is_posting: t.is_posting,
-            is_endshift: t.is_endshift,
-            is_void: 1,
-            is_transfer: t.is_transfer,
-            is_consolidate: t.is_consolidate,
-            is_split: t.is_split,
-            is_has_inclusive: t.is_has_inclusive,
-            is_end_of_day: 0,
-            void_code: String(t.id),
-            status: t.status,
-            source: t.source,
-            created_at: new Date(),
-            created_by: req.user?.id ?? null,
-          },
-        });
+      // A void restates recognised revenue, so it needs someone other than the
+      // operator to authorise it. Checked before any read of the transactions so
+      // a rejected void leaks nothing about the folio.
+      const approval = await verifySupervisorApproval(req, 'void');
+      if (!approval.ok) {
+        if (approval.code === 403) forbidden(res, approval.message);
+        else badRequest(res, approval.message);
+        return;
       }
 
-      success(res, null, 'Success');
+      const ids = idx.map((v: any) => BigInt(v));
+      const txns = await prisma.transactions.findMany({ where: { id: { in: ids } } });
+      if (txns.length === 0) { badRequest(res, 'No matching transactions found.'); return; }
+
+      // Idempotency: the reversal is what keeps the folio balanced, and the
+      // balance query ignores is_void. Voiding twice therefore appended a second
+      // reversal and drove the balance to -2x the charge. Refuse instead.
+      const alreadyVoided = txns.filter((t) => t.is_void);
+      if (alreadyVoided.length > 0) {
+        badRequest(
+          res,
+          'Already voided: ' + alreadyVoided.map((t) => String(t.id)).join(', ')
+        );
+        return;
+      }
+
+      // A reversal inherits is_posting from the source, so voiding after the
+      // shift/night close would silently restate recognised revenue with no way
+      // to reopen the period. Require an un-posted transaction.
+      const posted = txns.filter((t) => t.is_posting === 1 || t.is_end_of_day === 1);
+      if (posted.length > 0) {
+        badRequest(
+          res,
+          'Cannot void a posted transaction: ' + posted.map((t) => String(t.id)).join(', ')
+        );
+        return;
+      }
+
+      // Whole batch in one transaction — void is two writes per row, and a
+      // failure between them left the original flagged with no reversal.
+      try {
+        await prisma.$transaction(
+          async (tx) => {
+            for (const t of txns) {
+              await tx.transactions.update({
+                where: { id: t.id },
+                data: { is_void: 1, updated_at: new Date(), updated_by: req.user?.id ?? null },
+              });
+
+              // Reversal entry (Laravel replicate with flipped type_amount)
+              await tx.transactions.create({
+                data: {
+                  property_id: t.property_id,
+                  folio_id: t.folio_id,
+                  type: t.type,
+                  uuid: randomUUID(),
+                  date: t.date,
+                  code: t.code,
+                  code_name: t.code_name,
+                  type_payment_id: t.type_payment_id,
+                  code_item_id: t.code_item_id,
+                  description: t.description,
+                  amount: t.amount,
+                  total: t.total,
+                  type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
+                  pb1: t.pb1,
+                  svr_chrg: t.svr_chrg,
+                  surcharge: t.surcharge,
+                  tax3: t.tax3,
+                  time: t.time,
+                  bill_to: t.bill_to,
+                  model_type: t.model_type,
+                  model_id: t.model_id,
+                  remark,
+                  reference: t.reference,
+                  pos: t.pos,
+                  receipt: t.receipt,
+                  card_name: t.card_name,
+                  last_digit_card: t.last_digit_card,
+                  voucher: t.voucher,
+                  booking: t.booking,
+                  is_posting: t.is_posting,
+                  is_endshift: t.is_endshift,
+                  is_void: 1,
+                  is_transfer: t.is_transfer,
+                  is_consolidate: t.is_consolidate,
+                  is_split: t.is_split,
+                  is_has_inclusive: t.is_has_inclusive,
+                  is_end_of_day: 0,
+                  void_code: String(t.id),
+                  status: t.status,
+                  source: t.source,
+                  created_at: new Date(),
+                  created_by: req.user?.id ?? null,
+                },
+              });
+            }
+          },
+          { timeout: 20000 }
+        );
+      } catch (txErr: any) {
+        console.error('Transaction void transaction error:', txErr);
+        error(res, 'Failed to void transactions', 500);
+        return;
+      }
+
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'transactions',
+        event: 'updated',
+        subjectId: txns[0].id,
+        name: 'transactions-voided',
+        description: `${txns.length} transaction(s) voided: ${txns.map((t) => t.id).join(', ')}`,
+        logName: 'cashiering',
+        meta: {
+          transaction_ids: txns.map((t) => Number(t.id)),
+          folio_ids: [...new Set(txns.map((t) => String(t.folio_id)))],
+          remark,
+          reversal_rows: txns.length,
+          approved_by: approval.approver.id,
+          approved_by_name: approval.approver.name,
+        },
+      });
+
+      success(res, { voided: txns.map((t) => Number(t.id)), approved_by: approval.approver }, 'Success');
     } catch (err: any) { console.error('Transaction void bulk error:', err); error(res, 'Failed to void transactions', 500); }
   }
 
@@ -1920,10 +2643,10 @@ room: roomName,
       const businessDate = await AuthController.getBusinessDate(pid);
       const bDate = new Date(businessDate + 'T00:00:00.000Z');
 
-      const copyBreakdowns = async (fromTxnId: bigint, toTxnId: bigint, targetFid: bigint | null, reversed: boolean, isTransfer: number, remarkSuffix: string) => {
-        const rows = await prisma.transaction_breakdowns.findMany({ where: { transaction_id: fromTxnId } });
+      const copyBreakdowns = async (fromTxnId: bigint, toTxnId: bigint, targetFid: bigint | null, reversed: boolean, isTransfer: number, remarkSuffix: string, db: Pick<typeof prisma, 'transaction_breakdowns'> = prisma) => {
+        const rows = await db.transaction_breakdowns.findMany({ where: { transaction_id: fromTxnId } });
         for (const b of rows) {
-          await prisma.transaction_breakdowns.create({
+          await db.transaction_breakdowns.create({
             data: {
               property_id: b.property_id,
               transaction_id: toTxnId,
@@ -1949,76 +2672,184 @@ room: roomName,
         }
       };
 
-      for (const t of txns) {
-        const isRoomRevenue = t.type === 'room_revenue';
-        const newDate = isRoomRevenue ? bDate : t.date;
+      // Transfer is a void+repost pair per row. All of it (3 transaction rows
+      // plus breakdown copies per source) runs in ONE transaction so a failure
+      // part-way cannot leave a reversal on the source with nothing on the
+      // target — which is an unbalanced folio with no trace of why.
+      const toSuffix = `To - ${targetFolio.folio_number ?? ''}`;
+      const fromSuffix = `from - ${txns[0]?.folios?.folio_number ?? ''}`;
+      try {
+        await prisma.$transaction(
+          async (tx) => {
+            for (const t of txns) {
+              const isRoomRevenue = t.type === 'room_revenue';
+              const newDate = isRoomRevenue ? bDate : t.date;
 
-        // reversal row on source folio
-        const voidRow = await prisma.transactions.create({
-          data: {
-            property_id: t.property_id, folio_id: t.folio_id, type: t.type, uuid: randomUUID(),
-            date: newDate, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
-            code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
-            type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
-            pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
-            time: t.time, bill_to: t.bill_to, model_type: t.model_type, model_id: t.model_id,
-            remark: `To - ${targetFolio.folio_number ?? ''}`,
-            is_transfer: 1, is_end_of_day: 0, void_code: String(t.id),
-            status: t.status, source: t.source, created_at: new Date(), created_by: req.user?.id ?? null,
+              // reversal row on source folio
+              const voidRow = await tx.transactions.create({
+                data: {
+                  property_id: t.property_id, folio_id: t.folio_id, type: t.type, uuid: randomUUID(),
+                  date: newDate, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
+                  code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
+                  type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
+                  pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
+                  time: t.time, bill_to: t.bill_to, model_type: t.model_type, model_id: t.model_id,
+                  remark: toSuffix,
+                  is_transfer: 1, is_end_of_day: 0, void_code: String(t.id),
+                  status: t.status, source: t.source, created_at: new Date(), created_by: req.user?.id ?? null,
+                },
+              });
+              await copyBreakdowns(t.id, voidRow.id, null, true, 1, toSuffix, tx);
+
+              // new row on target folio. model_type/model_id follow the
+              // transaction's own billing, falling back to the target company —
+              // the old code hardcoded CompanyProfile regardless of what was
+              // actually being moved.
+              const movedType = t.model_type ?? 'App\\Models\\CompanyProfile';
+              const movedId = t.model_id ?? targetFolio.company_profile_id;
+              const newRow = await tx.transactions.create({
+                data: {
+                  property_id: t.property_id, folio_id: targetFolio.id, type: t.type, uuid: randomUUID(),
+                  date: newDate, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
+                  code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
+                  type_amount: t.type_amount,
+                  pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
+                  time: t.time, bill_to: t.bill_to,
+                  model_type: movedType, model_id: movedId,
+                  remark: t.remark ? `${t.remark} - ${fromSuffix}` : fromSuffix,
+                  is_transfer: 2, is_end_of_day: 0, void_code: String(t.id),
+                  status: t.status, source: t.source, created_at: new Date(), created_by: req.user?.id ?? null,
+                },
+              });
+              await copyBreakdowns(t.id, newRow.id, targetFolio.id, false, 2, fromSuffix, tx);
+
+              await tx.transactions.update({ where: { id: t.id }, data: { is_transfer: 1, remark: toSuffix } });
+            }
           },
-        });
-        await copyBreakdowns(t.id, voidRow.id, null, true, 1, `To - ${targetFolio.folio_number ?? ''}`);
-
-        // new row on target folio
-        const newRow = await prisma.transactions.create({
-          data: {
-            property_id: t.property_id, folio_id: targetFolio.id, type: t.type, uuid: randomUUID(),
-            date: newDate, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
-            code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
-            type_amount: t.type_amount,
-            pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
-            time: t.time, bill_to: t.bill_to,
-            model_type: 'App\\Models\\CompanyProfile', model_id: targetFolio.company_profile_id,
-            remark: t.remark ? `${t.remark} - from - ${t.folios?.folio_number ?? ''}` : `from - ${t.folios?.folio_number ?? ''}`,
-            is_transfer: 2, is_end_of_day: 0, void_code: String(t.id),
-            status: t.status, source: t.source, created_at: new Date(), created_by: req.user?.id ?? null,
-          },
-        });
-        await copyBreakdowns(t.id, newRow.id, targetFolio.id, false, 2, `from - ${t.folios?.folio_number ?? ''}`);
-
-        await prisma.transactions.update({ where: { id: t.id }, data: { is_transfer: 1, remark: `To - ${targetFolio.folio_number ?? ''}` } });
+          { timeout: 30000 }
+        );
+      } catch (txErr: any) {
+        console.error('Transaction transfer transaction error:', txErr);
+        error(res, 'Failed to transfer transactions', 500);
+        return;
       }
 
-      success(res, null, 'Success');
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'transactions',
+        event: 'updated',
+        subjectId: txns[0].id,
+        name: 'transactions-transferred',
+        description: `${txns.length} transaction(s) transferred to folio ${targetFolio.folio_number ?? targetFolio.id}`,
+        logName: 'cashiering',
+        meta: {
+          transaction_ids: txns.map((t) => Number(t.id)),
+          from_folio_ids: [...new Set(txns.map((t) => String(t.folio_id)))],
+          to_folio_id: String(targetFolio.id),
+          to_folio_number: targetFolio.folio_number,
+          target_company_id: String(targetFolio.company_profile_id),
+        },
+      });
+
+      success(res, { transferred: txns.map((t) => Number(t.id)) }, 'Success');
     } catch (err: any) { console.error('Transaction transfer error:', err); error(res, 'Failed to transfer transactions', 500); }
   }
 
   // POST /transaction/refund — Laravel TransactionController@refund parity (:895-927)
   // body: { idx: number[], remark? } — void + replicate with type='refund' and reversed type_amount.
+  //
+  // A refund is a REVERSAL of a specific payment, never a free-typed amount.
+  // The UI used to post straight to transactionStore with type='refund', which
+  // produced a PLUS row linked to nothing: no void_code, no is_void on the
+  // original, no cap against the amount actually taken, so the operator could
+  // mint a credit by "refunding" money that was never received.
   static async transactionRefund(req: Request, res: Response): Promise<void> {
     try {
       const { idx, remark } = req.body;
       if (!Array.isArray(idx) || idx.length === 0) { badRequest(res, 'The idx field is required.'); return; }
 
-      const txns = await prisma.transactions.findMany({ where: { id: { in: idx.map((v: any) => BigInt(v)) } } });
-      for (const t of txns) {
-        await prisma.transactions.update({ where: { id: t.id }, data: { is_void: 1, updated_at: new Date(), updated_by: req.user?.id ?? null } });
-        await prisma.transactions.create({
-          data: {
-            property_id: t.property_id, folio_id: t.folio_id, type: 'refund', uuid: randomUUID(),
-            date: t.date, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
-            code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
-            type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
-            pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
-            time: t.time, bill_to: t.bill_to, model_type: t.model_type, model_id: t.model_id,
-            remark: remark ?? t.remark, void_code: String(t.id), is_void: 1,
-            is_transfer: t.is_transfer, is_consolidate: t.is_consolidate, is_split: t.is_split,
-            is_has_inclusive: t.is_has_inclusive, is_end_of_day: t.is_end_of_day,
-            status: t.status, source: t.source, created_at: new Date(), created_by: req.user?.id ?? null,
-          },
-        });
+      // Refunding pays money back out, so it carries the same second-pair-of-eyes
+      // requirement as a void.
+      const approval = await verifySupervisorApproval(req, 'refund');
+      if (!approval.ok) {
+        if (approval.code === 403) forbidden(res, approval.message);
+        else badRequest(res, approval.message);
+        return;
       }
-      success(res, null, 'Success');
+
+      const ids = idx.map((v: any) => {
+        try { return BigInt(v); } catch { return null; }
+      }).filter((v): v is bigint => v !== null);
+      if (ids.length === 0) { badRequest(res, 'No valid transaction selected.'); return; }
+
+      const txns = await prisma.transactions.findMany({ where: { id: { in: ids } } });
+      if (txns.length !== ids.length) { badRequest(res, 'One or more selected transactions no longer exist.'); return; }
+
+      // Only payments can be refunded, and only once.
+      const notPayments = txns.filter((t) => t.type !== 'payment');
+      if (notPayments.length > 0) {
+        badRequest(res, 'Only payment transactions can be refunded.');
+        return;
+      }
+      const alreadyVoided = txns.filter((t) => t.is_void);
+      if (alreadyVoided.length > 0) {
+        badRequest(res, 'One or more selected payments have already been voided or refunded.');
+        return;
+      }
+      const posted = txns.filter((t) => t.is_end_of_day === 1);
+      if (posted.length > 0) {
+        badRequest(res, 'Cannot refund a transaction that has already been posted by night audit.');
+        return;
+      }
+
+      // Whole transaction: flag + reversal must both land or neither, or the
+      // folio balance is silently wrong.
+      try {
+        await prisma.$transaction(
+          async (tx) => {
+            for (const t of txns) {
+              await tx.transactions.update({ where: { id: t.id }, data: { is_void: 1, updated_at: new Date(), updated_by: req.user?.id ?? null } });
+              await tx.transactions.create({
+                data: {
+                  property_id: t.property_id, folio_id: t.folio_id, type: 'refund', uuid: randomUUID(),
+                  date: t.date, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
+                  code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
+                  type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
+                  pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
+                  time: t.time, bill_to: t.bill_to, model_type: t.model_type, model_id: t.model_id,
+                  remark: remark ?? t.remark, void_code: String(t.id), is_void: 1,
+                  is_transfer: t.is_transfer, is_consolidate: t.is_consolidate, is_split: t.is_split,
+                  is_has_inclusive: t.is_has_inclusive, is_end_of_day: t.is_end_of_day,
+                  status: t.status, source: t.source, created_at: new Date(), created_by: req.user?.id ?? null,
+                },
+              });
+            }
+          },
+          { timeout: 20000 }
+        );
+      } catch (txErr: any) {
+        console.error('Transaction refund transaction error:', txErr);
+        error(res, 'Failed to refund transactions', 500);
+        return;
+      }
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'transactions',
+        event: 'updated',
+        subjectId: txns[0].id,
+        name: 'transactions-refunded',
+        description: `${txns.length} payment(s) refunded: ${txns.map((t) => t.id).join(', ')}`,
+        logName: 'cashiering',
+        meta: {
+          transaction_ids: txns.map((t) => Number(t.id)),
+          refunded_total: txns.reduce((s, t) => s + Number(t.total ?? 0), 0),
+          folio_ids: [...new Set(txns.map((t) => String(t.folio_id)))],
+          remark: remark ?? null,
+          approved_by: approval.approver.id,
+          approved_by_name: approval.approver.name,
+        },
+      });
+      success(res, { refunded: txns.map((t) => Number(t.id)), approved_by: approval.approver }, 'Success');
     } catch (err: any) { console.error('Transaction refund error:', err); error(res, 'Failed to refund transactions', 500); }
   }
 
@@ -2035,52 +2866,97 @@ room: roomName,
       if (!folio) { badRequest(res, 'The selected folio id is invalid.'); return; }
 
       const txns = await prisma.transactions.findMany({ where: { id: { in: idx.map((v: any) => BigInt(v)) } } });
-      let total = 0;
-      for (const t of txns) total += t.type_amount === 'MINUS' ? -Number(t.total ?? 0) : Number(t.total ?? 0);
-      const amountAbs = total > 0 ? total : total * -1;
+      if (txns.length === 0) { badRequest(res, 'No matching transactions found.'); return; }
+      const alreadyDone = txns.filter((t) => t.is_consolidate);
+      if (alreadyDone.length > 0) {
+        badRequest(res, 'Already consolidated: ' + alreadyDone.map((t) => String(t.id)).join(', '));
+        return;
+      }
+      let totalMinor = 0;
+      for (const t of txns) totalMinor += t.type_amount === 'MINUS' ? -toMinorUnits(t.total) : toMinorUnits(t.total);
+      const amountAbs = Math.abs(totalMinor) / MINOR_UNITS;
 
       const calc = await calcTaxForCode(code, amountAbs);
 
-      const newTxn = await prisma.transactions.create({
-        data: {
-          property_id: req.user?.lastProperty ?? 0n,
-          folio_id: folio.id,
-          date: new Date(),
-          code: calc.code,
-          type: 'consolidate',
-          total: calc.total,
-          svr_chrg: calc.svr_chrg,
-          pb1: calc.pb1,
-          surcharge: 0,
-          tax3: calc.tax3,
-          amount: calc.amount,
-          type_amount: total > 0 ? 'PLUS' : 'MINUS',
-          status: 1,
-          is_consolidate: 1,
-          created_at: new Date(),
-          created_by: req.user?.id ?? null,
+      // The merged line inherits the billing ledger of the rows it replaces.
+      // It used to be created with no model_type/model_id, so a consolidated
+      // charge was billed to nobody and vanished from the GIT roll-up.
+      const lead = txns[0];
+
+      // One merged row + a reversal per source. All-or-nothing.
+      let newTxnId: bigint;
+      try {
+        newTxnId = await prisma.$transaction(
+          async (tx) => {
+            const merged = await tx.transactions.create({
+              data: {
+                property_id: req.user?.lastProperty ?? 0n,
+                folio_id: folio.id,
+                date: new Date(),
+                code: calc.code,
+                code_name: lead.code_name ?? null,
+                type: 'consolidate',
+                total: calc.total,
+                svr_chrg: calc.svr_chrg,
+                pb1: calc.pb1,
+                surcharge: 0,
+                tax3: calc.tax3,
+                amount: calc.amount,
+                type_amount: totalMinor > 0 ? 'PLUS' : 'MINUS',
+                bill_to: lead.bill_to,
+                model_type: lead.model_type ?? 'App\\Models\\CompanyProfile',
+                model_id: lead.model_id,
+                status: 1,
+                is_consolidate: 1,
+                created_at: new Date(),
+                created_by: req.user?.id ?? null,
+              },
+            });
+
+            for (const t of txns) {
+              await tx.transactions.update({ where: { id: t.id }, data: { is_consolidate: 1, remark: remark ?? t.remark, updated_at: new Date() } });
+              await tx.transactions.create({
+                data: {
+                  property_id: t.property_id, folio_id: t.folio_id, type: t.type, uuid: randomUUID(),
+                  date: t.date, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
+                  code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
+                  type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
+                  pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
+                  time: t.time, bill_to: t.bill_to, model_type: t.model_type, model_id: t.model_id,
+                  remark: remark ?? t.remark, void_code: String(t.id), is_void: 1, is_consolidate: 1,
+                  is_transfer: t.is_transfer, is_split: t.is_split, is_has_inclusive: t.is_has_inclusive,
+                  is_end_of_day: t.is_end_of_day, status: t.status, source: t.source,
+                  created_at: new Date(), created_by: req.user?.id ?? null,
+                },
+              });
+            }
+            return merged.id;
+          },
+          { timeout: 30000 }
+        );
+      } catch (txErr: any) {
+        console.error('Transaction consolidate transaction error:', txErr);
+        error(res, 'Failed to consolidate transactions', 500);
+        return;
+      }
+
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'transactions',
+        event: 'created',
+        subjectId: newTxnId,
+        name: 'transactions-consolidated',
+        description: `${txns.length} transaction(s) consolidated into #${newTxnId} on folio ${folio.id}`,
+        logName: 'cashiering',
+        attributes: { total: calc.total, amount: calc.amount, type_amount: totalMinor > 0 ? 'PLUS' : 'MINUS' },
+        meta: {
+          source_ids: txns.map((t) => Number(t.id)),
+          folio_id: String(folio.id),
+          merged_into_code: calc.code,
         },
       });
 
-      for (const t of txns) {
-        await prisma.transactions.update({ where: { id: t.id }, data: { is_consolidate: 1, remark: remark ?? t.remark, updated_at: new Date() } });
-        await prisma.transactions.create({
-          data: {
-            property_id: t.property_id, folio_id: t.folio_id, type: t.type, uuid: randomUUID(),
-            date: t.date, code: t.code, code_name: t.code_name, type_payment_id: t.type_payment_id,
-            code_item_id: t.code_item_id, description: t.description, amount: t.amount, total: t.total,
-            type_amount: t.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
-            pb1: t.pb1, svr_chrg: t.svr_chrg, surcharge: t.surcharge, tax3: t.tax3,
-            time: t.time, bill_to: t.bill_to, model_type: t.model_type, model_id: t.model_id,
-            remark: remark ?? t.remark, void_code: String(t.id), is_void: 1, is_consolidate: 1,
-            is_transfer: t.is_transfer, is_split: t.is_split, is_has_inclusive: t.is_has_inclusive,
-            is_end_of_day: t.is_end_of_day, status: t.status, source: t.source,
-            created_at: new Date(), created_by: req.user?.id ?? null,
-          },
-        });
-      }
-
-      success(res, { id: Number(newTxn.id) }, 'Success');
+      success(res, { id: Number(newTxnId) }, 'Success');
     } catch (err: any) { console.error('Transaction consolidate error:', err); error(res, 'Failed to consolidate transactions', 500); }
   }
 
@@ -2094,68 +2970,115 @@ room: roomName,
       if (amount === undefined || amount === null || Number(amount) < 0) { badRequest(res, 'The amount must be at least 0'); return; }
       if (!code) { badRequest(res, 'The code field is required.'); return; }
 
-      const trxId = BigInt(idx[idx.length - 1]);
+      // The UI renders this as a radio, but a request can still carry several
+      // ids. Silently splitting only the last one and ignoring the rest made the
+      // caller believe every selected row was split.
+      if (idx.length > 1) {
+        badRequest(res, 'Split works on one transaction at a time. Select a single row.');
+        return;
+      }
+
+      const trxId = BigInt(idx[0]);
       const orig = await prisma.transactions.findFirst({ where: { id: trxId, folio_id: BigInt(folio_id) } });
       if (!orig) { badRequest(res, 'Transaction Not Found'); return; }
+      if (orig.is_split || orig.is_void) { badRequest(res, 'Transaction was already split or voided.'); return; }
 
-      await prisma.transactions.update({ where: { id: orig.id }, data: { is_split: 1, updated_at: new Date() } });
-
+      // Validate BEFORE mutating. The old order wrote is_split=1 first, so a
+      // rejected split left the original permanently flagged with no children.
       if (Number(amount) > Number(orig.total ?? 0)) {
         badRequest(res, 'Total Input is more than transaction total');
         return;
       }
 
       const amountOrigin = Number(amount);
-
-      // first: new txn for the split-off amount with the requested code post
-      const calc1 = await calcTaxForCode(code, amountOrigin);
-      await prisma.transactions.create({
-        data: {
-          property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
-          date: orig.date, code: calc1.code, code_name: orig.code_name, type_payment_id: orig.type_payment_id,
-          description: orig.description,
-          amount: calc1.amount, total: calc1.total, pb1: calc1.pb1, svr_chrg: calc1.svr_chrg,
-          surcharge: 0, tax3: calc1.tax3,
-          time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
-          remark: remark ?? orig.remark,
-          type_amount: orig.type_amount,
-          is_split: 0, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
-          status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
-        },
-      });
-
-      // second: remainder on the original code post
       const remainder = Number(orig.total ?? 0) - amountOrigin;
-      const calc2 = await calcTaxForCode(orig.code, remainder);
-      await prisma.transactions.create({
-        data: {
-          property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
-          date: orig.date, code: String(orig.code ?? calc2.code), code_name: orig.code_name, type_payment_id: orig.type_payment_id,
-          code_item_id: orig.code_item_id,
-          description: orig.description,
-          amount: remainder, total: remainder, pb1: orig.pb1, svr_chrg: orig.svr_chrg,
-          surcharge: orig.surcharge, tax3: orig.tax3,
-          time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
-          remark: remark ?? orig.remark,
-          type_amount: orig.type_amount,
-          is_split: 0, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
-          status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
-        },
-      });
 
-      // third: reversal of the original
-      await prisma.transactions.create({
-        data: {
-          property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
-          date: orig.date, code: orig.code, code_name: orig.code_name, type_payment_id: orig.type_payment_id,
-          code_item_id: orig.code_item_id, description: orig.description, amount: orig.amount, total: orig.total,
-          type_amount: orig.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
-          pb1: orig.pb1, svr_chrg: orig.svr_chrg, surcharge: orig.surcharge, tax3: orig.tax3,
-          time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
-          remark: orig.remark, void_code: String(orig.id), is_void: 1,
-          is_transfer: orig.is_transfer, is_consolidate: orig.is_consolidate, is_split: orig.is_split,
-          is_has_inclusive: orig.is_has_inclusive, is_end_of_day: orig.is_end_of_day,
-          status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
+      // Both halves get their own tax computation. The remainder previously used
+      // the raw figure and copied the original's pb1/svr_chrg/tax3 verbatim, so
+      // the two children did not add up to the parent's tax.
+      const calc1 = await calcTaxForCode(code, amountOrigin);
+      const calc2 = await calcTaxForCode(orig.code, remainder);
+
+      // split-off + remainder + reversal, atomically.
+      try {
+        await prisma.$transaction(
+          async (tx) => {
+            await tx.transactions.update({ where: { id: orig.id }, data: { is_split: 1, updated_at: new Date() } });
+
+            // first: new txn for the split-off amount with the requested code post
+            await tx.transactions.create({
+              data: {
+                property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
+                date: orig.date, code: calc1.code, code_name: orig.code_name, type_payment_id: orig.type_payment_id,
+                description: orig.description,
+                amount: calc1.amount, total: calc1.total, pb1: calc1.pb1, svr_chrg: calc1.svr_chrg,
+                surcharge: 0, tax3: calc1.tax3,
+                time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
+                remark: remark ?? orig.remark,
+                type_amount: orig.type_amount,
+                // is_split: 1 marks these as the children of a split, so the
+                // folio view can still tell them apart from ordinary postings.
+                is_split: 1, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
+                status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
+              },
+            });
+
+            // second: remainder on the original code post
+            await tx.transactions.create({
+              data: {
+                property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
+                date: orig.date, code: String(orig.code ?? calc2.code), code_name: orig.code_name, type_payment_id: orig.type_payment_id,
+                code_item_id: orig.code_item_id,
+                description: orig.description,
+                amount: calc2.amount, total: calc2.total, pb1: calc2.pb1, svr_chrg: calc2.svr_chrg,
+                surcharge: 0, tax3: calc2.tax3,
+                time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
+                remark: remark ?? orig.remark,
+                type_amount: orig.type_amount,
+                is_split: 1, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
+                status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
+              },
+            });
+
+            // third: reversal of the original
+            await tx.transactions.create({
+              data: {
+                property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
+                date: orig.date, code: orig.code, code_name: orig.code_name, type_payment_id: orig.type_payment_id,
+                code_item_id: orig.code_item_id, description: orig.description, amount: orig.amount, total: orig.total,
+                type_amount: orig.type_amount === 'MINUS' ? 'PLUS' : 'MINUS',
+                pb1: orig.pb1, svr_chrg: orig.svr_chrg, surcharge: orig.surcharge, tax3: orig.tax3,
+                time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
+                remark: orig.remark, void_code: String(orig.id), is_void: 1,
+                is_transfer: orig.is_transfer, is_consolidate: orig.is_consolidate, is_split: orig.is_split,
+                is_has_inclusive: orig.is_has_inclusive, is_end_of_day: orig.is_end_of_day,
+                status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
+              },
+            });
+          },
+          { timeout: 20000 }
+        );
+      } catch (txErr: any) {
+        console.error('Transaction split transaction error:', txErr);
+        error(res, 'Failed to split transaction', 500);
+        return;
+      }
+
+      // @ts-ignore
+      await writeAudit(prisma, req, {
+        table: 'transactions',
+        event: 'updated',
+        subjectId: orig.id,
+        name: 'transaction-split',
+        description: `Transaction #${orig.id} split into ${amountOrigin} + ${remainder} on folio ${orig.folio_id}`,
+        logName: 'cashiering',
+        old: { total: orig.total, is_split: orig.is_split },
+        attributes: { total: orig.total, is_split: 1 },
+        meta: {
+          split_amount: amountOrigin,
+          remainder,
+          new_code: calc1.code,
+          remark: remark ?? null,
         },
       });
 
@@ -2208,7 +3131,7 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
         { label: 'Overwrite Time', key: 'time', type: 'none', is_search: false },
       ];
 
-      applySearchField(where, req, table);
+      applySearchField(where, req, table, 'transaction_temps');
 
       const [data, total] = await Promise.all([
         prisma.transaction_temps.findMany({

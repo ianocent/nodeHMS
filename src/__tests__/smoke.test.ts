@@ -550,7 +550,8 @@ describe('Guest Document CRUD', () => {
 
   test('POST /api/guests/1/documents creates', async () => {
     const res = await request(app).post('/api/guests/1/documents').send({ file: 'test.pdf', description: 'Test doc' });
-    expect(res.status).toBe(201);
+    // Laravel GuestProfileDocumentController@store returns 'code' => 200.
+    expect(res.status).toBe(200);
     expectLaravelFormat(res);
     const doc = parseBody(res).data;
     if (doc?.id) createdId = doc.id;

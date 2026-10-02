@@ -1,15 +1,10 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 import { success, error, badRequest } from '../utils/response';
 import { firebaseService } from '../services/firebase.service';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 export class FirebaseController {
   // Test send to current user

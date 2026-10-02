@@ -1,13 +1,17 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../utils/response';
-import { folioBalanceWithoutPosting, transferTransactionsForCheckout } from './front-desk.controller';
+import {
+  folioBalanceMinorUnits,
+  isFolioSettledMinorPublic,
+  transferTransactionsForCheckout,
+} from './front-desk.controller';
 import { AuthController } from './auth.controller';
 import { enqueueJob } from '../config/queue';
 import { priceNight } from '../utils/reservationPricing';
 import { availableRoom } from '../utils/roomAvailability';
+import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
+import { writeAudit } from '../utils/audit';
 
 // Wrapper for drag/copy rebuild — priced per-night row creation against an arbitrary tx client.
 function priceNightPublic(tx: any, opts: {
@@ -32,9 +36,6 @@ function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const STATUS_RESERVATION: Record<string, { id: number; code: string; name: string }> = {
   check_in: { id: 0, code: 'check_in', name: 'Check In' },
@@ -114,6 +115,51 @@ function formatFolioBrief(f: any) {
     company_profile_id: f.company_profile_id ? Number(f.company_profile_id) : null,
   };
 }
+
+/**
+ * One named audit row per folio status action.
+ *
+ * A status change here is a real operational event (un-check-in, un-check-out,
+ * room change, cancellation), and these used to leave nothing behind but a
+ * mutated row with a wall-clock `updated_at` and no actor.
+ */
+async function auditFolioStatus(
+  req: Request,
+  before: any,
+  after: any,
+  action: string | null | undefined,
+  extra: { reason?: any; remark?: any; to_virtual?: any; [k: string]: any } = {}
+): Promise<void> {
+  if (!action) return;
+  // @ts-ignore
+  await writeAudit(prisma, req, {
+    table: 'folios',
+    event: 'updated',
+    subjectId: after?.id ?? before?.id ?? null,
+    name: `folio-${String(action).replace(/_/g, '-')}`,
+    description: `Folio ${before?.folio_number ?? after?.id ?? ''}: ${action}`,
+    logName: 'front_desk',
+    old: {
+      status_reservation: before?.status_reservation ?? null,
+      check_in_date: before?.check_in_date ?? null,
+      check_out_date: before?.check_out_date ?? null,
+    },
+    attributes: {
+      status_reservation: after?.status_reservation ?? null,
+      check_in_date: after?.check_in_date ?? null,
+      check_out_date: after?.check_out_date ?? null,
+    },
+    meta: {
+      folio_number: before?.folio_number ?? null,
+      action,
+      reason: extra.reason ?? null,
+      remark: extra.remark ?? null,
+      to_virtual: extra.to_virtual ?? null,
+    },
+  });
+}
+
+export { auditFolioStatus };
 
 export class FolioController {
   static async search(req: Request, res: Response): Promise<void> {
@@ -345,6 +391,7 @@ export class FolioController {
           where: {
             deleted_at: null,
             status: 1,
+            property_id: propertyId ?? 0,
             group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source', 'guest-status', 'cancellation-reservation'] },
           },
           select: { id: true, name: true, group: true },
@@ -507,7 +554,13 @@ export class FolioController {
 
         await prisma.folios.update({ where: { id }, data: updateData });
         const updated: any = await prisma.folios.findUnique({ where: { id } });
-        success(res, bigintToNumber(updated), 'Status updated successfully');
+        await auditFolioStatus(req, folio, updated, status_reservation, { reason, to_virtual });
+      await auditFolioStatus(req, folio, updated, status_reservation, {
+        reason,
+        remark: (req.body as any)?.remark ?? null,
+        to_virtual,
+      });
+      success(res, bigintToNumber(updated), 'Status updated successfully');
         return;
       }
 
@@ -743,8 +796,8 @@ export class FolioController {
           badRequest(res, 'Failed to cancel reservation, only reservation and pending status can be canceled');
           return;
         }
-        const balance = await folioBalanceWithoutPosting(folio);
-        if (![0, 1, -1].includes(Math.ceil(balance))) {
+        const balanceMinor = await folioBalanceMinorUnits(folio);
+        if (!isFolioSettledMinorPublic(balanceMinor)) {
           badRequest(res, 'Payment required');
           return;
         }
@@ -901,6 +954,7 @@ export class FolioController {
             for (const r of childResvs) {
               const rid = r.room_id_next ?? r.room_id;
               if (rid == null) continue;
+              // @ts-ignore
               const ok = await availableRoom(prisma, rid, bStart, bEnd, id);
               if (!ok) {
                 badRequest(res, 'Room Not Available');
@@ -912,12 +966,48 @@ export class FolioController {
         }
       }
 
-      if (status_reservation === 'check_in' && !check_in_date) {
-        updateData.check_in_date = new Date();
+      // Fallback timestamps use the BUSINESS date, not the wall clock. A hotel
+      // that runs past midnight would otherwise stamp "today" and silently
+      // truncate a multi-night stay. An already-booked departure is left alone:
+      // check-out is when the guest leaves, not when the record was touched.
+      const pidForDates = req.user?.lastProperty ?? 0n;
+      const businessDateStr = await AuthController.getBusinessDate(pidForDates);
+      const businessDateObj = new Date(businessDateStr + 'T00:00:00.000Z');
+
+      if (status_reservation === 'check_in' && !check_in_date && !folio.check_in_date) {
+        updateData.check_in_date = businessDateObj;
       }
 
-      if (status_reservation === 'check_out' && !check_out_date) {
-        updateData.check_out_date = new Date();
+      if (status_reservation === 'check_out' && !check_out_date && !folio.check_out_date) {
+        updateData.check_out_date = businessDateObj;
+      }
+
+      // This endpoint is still reachable for check-out (bulk flows, GIT parent
+      // cascades, direct calls). It must release the room, otherwise the folio
+      // says the guest left while the grid still shows the room occupied.
+      if (status_reservation === 'check_out') {
+        const resvs = await prisma.reservations.findMany({
+          where: { folio_id: id, deleted_at: null },
+          select: { room_id: true, room_id_next: true },
+        });
+        const roomIds = new Set<bigint>();
+        for (const r of resvs) {
+          const rid = r.room_id_next ?? r.room_id;
+          if (rid != null) roomIds.add(rid);
+        }
+        if (roomIds.size > 0) {
+          const now = new Date();
+          await prisma.rooms.updateMany({
+            where: { id: { in: [...roomIds] } },
+            data: {
+              room_status: ROOM_STATUSES.vacant.id,
+              maid_status: MAID_STATUSES.dirty.id,
+              last_check_out_date: now,
+              last_check_out_time: now,
+              updated_at: now,
+            },
+          });
+        }
       }
 
       await prisma.folios.update({ where: { id }, data: updateData });

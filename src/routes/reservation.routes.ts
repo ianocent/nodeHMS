@@ -85,6 +85,10 @@ router.get('/reservation/package-by-rate-id', authMiddleware, requirePermission(
 router.post('/reservation/charge', authMiddleware, requirePermission(60, 'view'), ReservationController.getCharge);
 router.get('/reservation/available-room', authMiddleware, requirePermission(60, 'view'), ReservationController.availableRoomType);
 router.get('/reservation/room-git', authMiddleware, requirePermission(60, 'view'), ReservationController.roomGit);
+// `:id` is required by the handler (it identifies the GIT parent folio). The
+// route previously omitted it, so every subfolio add/remove from the Room tab
+// failed with "The folio id field is required." — the feature was unreachable.
+router.put('/reservation/update-room-parent-git/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.updateRoomParentGIT);
 router.put('/reservation/update-room-parent-git', authMiddleware, requirePermission(60, 'edit'), ReservationController.updateRoomParentGIT);
 // Laravel ReservationItemController::updateVR (cms.php:1028 resource update)
 router.post('/reservation/:id/update-vr', authMiddleware, requirePermission(60, 'edit'), ReservationController.updateVR);
@@ -101,6 +105,8 @@ router.post('/reservation/:id/restore', authMiddleware, requirePermission(60, 'e
 router.post('/reservation/:id/unassign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.unassignRoom);
 router.post('/reservation/:id/replicate', authMiddleware, requirePermission(60, 'add'), ReservationController.replicate);
 router.post('/reservation/:id/assign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.assignRoom);
+// Laravel ReservationController@unAssignRoom (cms.php:989) — param named {folio}
+router.post('/reservation/un-assign-room/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.unassignRoom);
 
 // update-status (mirror Laravel ReservationController@updateStatus)
 router.post('/reservation/update-status/:folio', authMiddleware, requirePermission(60, 'edit'), FolioController.updateStatus);

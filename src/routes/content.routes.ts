@@ -11,6 +11,7 @@ router.get('/content/content-list/create', authMiddleware, requirePermission(69,
 router.post('/content/content-list', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
 router.get('/content/content-list/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
 router.get('/content/content-list/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.get('/content/content-list/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
 router.put('/content/content-list/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
 router.delete('/content/content-list/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
 
@@ -22,6 +23,7 @@ router.get('/content/room/config-pax', authMiddleware, requirePermission(69, 'vi
 router.get('/content/seo-home/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
 router.get('/content/seo-home/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
 router.get('/content/seo-home/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.get('/content/seo-home/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
 router.post('/content/seo-home', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
 router.put('/content/seo-home/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
 router.delete('/content/seo-home/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
@@ -29,6 +31,7 @@ router.delete('/content/seo-home/:id', authMiddleware, requirePermission(69, 'de
 router.get('/content/room/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
 router.get('/content/room/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
 router.get('/content/room/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.get('/content/room/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
 router.post('/content/room', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
 router.put('/content/room/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
 router.delete('/content/room/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
@@ -36,6 +39,7 @@ router.delete('/content/room/:id', authMiddleware, requirePermission(69, 'delete
 router.get('/content/room/config-pax/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
 router.get('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
 router.get('/content/room/config-pax/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
+router.get('/content/room/config-pax/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
 router.post('/content/room/config-pax', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
 router.put('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
 router.delete('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
@@ -46,6 +50,7 @@ router.get('/content/banner/create', authMiddleware, requirePermission(69, 'add'
 router.post('/content/banner', authMiddleware, requirePermission(69, 'add'), ContentController.bannerStore);
 router.get('/content/banner/:id', authMiddleware, requirePermission(69, 'view'), ContentController.bannerForm);
 router.get('/content/banner/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.bannerForm);
+router.get('/content/banner/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.bannerForm);
 router.put('/content/banner/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.bannerUpdate);
 router.delete('/content/banner/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.bannerDestroy);
 
@@ -55,6 +60,7 @@ router.get('/cancelation-rule/create', authMiddleware, requirePermission(69, 'ad
 router.post('/cancelation-rule', authMiddleware, requirePermission(69, 'add'), ContentController.cancelationRuleStore);
 router.get('/cancelation-rule/:id', authMiddleware, requirePermission(69, 'view'), ContentController.cancelationRuleForm);
 router.get('/cancelation-rule/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.cancelationRuleForm);
+router.get('/cancelation-rule/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.cancelationRuleForm);
 router.put('/cancelation-rule/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.cancelationRuleUpdate);
 router.delete('/cancelation-rule/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.cancelationRuleDestroy);
 
@@ -64,6 +70,7 @@ router.get('/cancelation-rule-date/create', authMiddleware, requirePermission(69
 router.post('/cancelation-rule-date', authMiddleware, requirePermission(69, 'add'), ContentController.cancelationRuleDateStore);
 router.get('/cancelation-rule-date/:id', authMiddleware, requirePermission(69, 'view'), ContentController.cancelationRuleForm);
 router.get('/cancelation-rule-date/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.cancelationRuleForm);
+router.get('/cancelation-rule-date/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.cancelationRuleForm);
 router.put('/cancelation-rule-date/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.cancelationRuleDateUpdate);
 router.delete('/cancelation-rule-date/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.cancelationRuleDateDestroy);
 
@@ -73,6 +80,7 @@ router.get('/email/email-builder/create', authMiddleware, requirePermission(69, 
 router.post('/email/email-builder', authMiddleware, requirePermission(69, 'add'), ContentController.emailBuilderStore);
 router.get('/email/email-builder/:id', authMiddleware, requirePermission(69, 'view'), ContentController.emailBuilderForm);
 router.get('/email/email-builder/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.emailBuilderForm);
+router.get('/email/email-builder/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.emailBuilderForm);
 router.put('/email/email-builder/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.emailBuilderUpdate);
 router.delete('/email/email-builder/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.emailBuilderDestroy);
 
@@ -82,6 +90,7 @@ router.get('/email/email-group/create', authMiddleware, requirePermission(69, 'a
 router.post('/email/email-group', authMiddleware, requirePermission(69, 'add'), ContentController.emailGroupStore);
 router.get('/email/email-group/:id', authMiddleware, requirePermission(69, 'view'), ContentController.emailGroupForm);
 router.get('/email/email-group/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.emailGroupForm);
+router.get('/email/email-group/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.emailGroupForm);
 router.put('/email/email-group/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.emailGroupUpdate);
 router.delete('/email/email-group/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.emailGroupDestroy);
 

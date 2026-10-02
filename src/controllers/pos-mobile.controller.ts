@@ -1,14 +1,9 @@
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
 import { randomUUID, createHash } from 'crypto';
-import { Pool } from 'pg';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { moneyFormat } from '../utils/cmsConfig';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const STATUS_RESERVATION = { check_in: 0, check_out: 1, cancel_reservation: 2, reservation: 3, in_house: 4, pending: 5 };
 const STATUS_ACTIVE = 1;

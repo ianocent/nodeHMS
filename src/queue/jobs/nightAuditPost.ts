@@ -1,12 +1,7 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
+import { prisma } from '../../config/prisma';
 import { calculateCodePost } from '../../utils/cmsConfig';
 import { storeSystemBalance } from '../../controllers/system.controller';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 const ROOM_STATUSES = {
   vacant: { id: 0, name: 'Vacant' },
@@ -272,28 +267,32 @@ export async function processNightAuditPost(job: any) {
       }
 
       // 3. Room status transitions
-      // 3a. Vacant + available tomorrow -> Block
       const availTomorrow = (await prisma.room_availabilities.findMany({
         where: { property_id: pid, date: nextRange },
       })).map((a) => a.room_id);
-      const roomsVacant = await prisma.rooms.findMany({ where: { property_id: pid, room_status: 0, id: { in: availTomorrow } } });
-      if (roomsVacant.length > 0) {
-        await prisma.rooms.updateMany({ where: { id: { in: roomsVacant.map((r) => r.id) } }, data: { room_status: 3 } });
-      }
 
-      // 3b. Blocked + NOT available tomorrow -> Vacant + Dirty
-      const roomsBlock = await prisma.rooms.findMany({ where: { property_id: pid, room_status: 3, NOT: { id: { in: availTomorrow } } } });
-      if (roomsBlock.length > 0) {
-        await prisma.rooms.updateMany({ where: { id: { in: roomsBlock.map((r) => r.id) } }, data: { room_status: 0, maid_status: 1 } });
-      }
-
-      // 3c. Vacant + active work order -> OOO (4)
+      // 3a. Vacant + active work order -> OOO (4) — MUST run before the block pass.
+      // A room under repair is physically unusable, not merely held. Running
+      // vacant→block first moved it to status 3, so this query (status 0) never
+      // matched and the work order vanished from the housekeeping board.
       const workOrderRooms = (await prisma.work_orders.findMany({
         where: { property_id: pid, date: nextRange, end_date: null },
       })).map((w) => Number(w.room_id)).filter((x) => x > 0);
       const roomsOOO = await prisma.rooms.findMany({ where: { property_id: pid, room_status: 0, id: { in: workOrderRooms } } });
       if (roomsOOO.length > 0) {
         await prisma.rooms.updateMany({ where: { id: { in: roomsOOO.map((r) => r.id) } }, data: { room_status: 4 } });
+      }
+
+      // 3b. Vacant + available tomorrow -> Block (never overrides OOO)
+      const roomsVacant = await prisma.rooms.findMany({ where: { property_id: pid, room_status: 0, id: { in: availTomorrow } } });
+      if (roomsVacant.length > 0) {
+        await prisma.rooms.updateMany({ where: { id: { in: roomsVacant.map((r) => r.id) } }, data: { room_status: 3 } });
+      }
+
+      // 3c. Blocked + NOT available tomorrow -> Vacant + Dirty
+      const roomsBlock = await prisma.rooms.findMany({ where: { property_id: pid, room_status: 3, NOT: { id: { in: availTomorrow } } } });
+      if (roomsBlock.length > 0) {
+        await prisma.rooms.updateMany({ where: { id: { in: roomsBlock.map((r) => r.id) } }, data: { room_status: 0, maid_status: 1 } });
       }
 
       // 4. LogAudit upsert

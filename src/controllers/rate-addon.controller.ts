@@ -1,13 +1,10 @@
-﻿import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
-import { success, error, badRequest, notFound, validationError } from '../utils/response';
+import { prisma } from '../config/prisma';
+import { activeWhere } from '../utils/querySafety';
+import { Request, Response } from 'express';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { moneyFormat } from '../utils/cmsConfig';
+import { error, notFound, success, validationError } from '../utils/response';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -31,6 +28,48 @@ function bigintToNumber(val: any): any {
 
 const STATUS = { active: 1, inactive: 0 };
 
+/**
+ * Laravel App\Models\BarInclusive::formatTable() parity. `related` is only
+ * ['description', 'cost'] here (the rate version also cascades frequency/cost_on,
+ * which BarInclusive does not).
+ */
+const BAR_INCLUSIVE_TABLE = [
+  {
+    label: 'Stock',
+    key: 'stock',
+    type: 'select',
+    options: [],
+    is_search: false,
+    is_related: true,
+    related: ['description', 'cost']
+  },
+  { label: 'Description', key: 'description', type: 'text', is_search: false },
+  { label: 'Cost', key: 'cost', type: 'text', is_search: false },
+  {
+    label: 'Frequency',
+    key: 'frequency',
+    type: 'select',
+    options: [
+      { value: 'Daily', label: 'Daily' },
+      { value: 'Once', label: 'Once' },
+      { value: 'Twice', label: 'Twice' }
+    ],
+    is_search: false
+  },
+  {
+    label: 'Cost On',
+    key: 'cost_on',
+    type: 'select',
+    options: [
+      { value: 'Actual Day', label: 'Actual Day' },
+      { value: 'Next Day', label: 'Next Day' }
+    ],
+    is_search: false
+  },
+  { label: 'Status', key: 'status', type: 'badge', is_search: false },
+  { label: 'Action', key: 'action', type: 'action', is_search: false }
+];
+
 export class RateAddonController {
   /**
    * GET /api/rates/:rateId/inclusives
@@ -38,8 +77,8 @@ export class RateAddonController {
    */
   static async inclusiveList(req: Request, res: Response): Promise<void> {
     try {
-      const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
-      if (!rateIdParam || !/^\d+$/.test(String(rateIdParam))) {
+      const rateIdParam = String(req.query.rate_id ?? req.query.id ?? req.query.data ?? req.params.rateId ?? '');
+      if (!/^\d+$/.test(rateIdParam)) {
         success(res, [], 'Success', 200, {
           table: [],
           permission: { view: true, add: true, edit: true, delete: true },
@@ -58,9 +97,10 @@ export class RateAddonController {
         orderBy: { sort: 'asc' }
       });
 
-      const [codePosts, roomTypes] = await Promise.all([
-        prisma.code_posts.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.room_types.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } })
+      const [codePosts, roomTypes, codeItems] = await Promise.all([
+        prisma.code_posts.findMany({ where: activeWhere('code_posts', {}, propertyId ?? null), select: { id: true, name: true } }),
+        prisma.room_types.findMany({ where: activeWhere('room_types', {}, propertyId ?? null), select: { id: true, name: true } }),
+        prisma.code_items.findMany({ where: activeWhere('code_items', { property_id: propertyId ?? 0n }, propertyId ?? null), select: { id: true, name: true, description: true, cost: true } })
       ]);
 
       const data = inclusives.map(i => ({
@@ -71,22 +111,57 @@ export class RateAddonController {
         cost: Number(i.cost)
       }));
 
+      // PHP RateInclusive::formatTable() parity
       const table = [
-        { label: 'Description', key: 'description', type: 'none', is_search: false },
-        { label: 'Stock', key: 'stock', type: 'none', is_search: false },
-        { label: 'Frequency', key: 'frequency', type: 'none', is_search: false },
-        { label: 'Cost', key: 'cost', type: 'none', is_search: false },
-        { label: 'Cost On', key: 'cost_on', type: 'none', is_search: false },
+        {
+          label: 'Stock',
+          key: 'stock',
+          type: 'select',
+          options: codeItems.map((c: any) => ({
+            value: Number(c.id),
+            label: c.name,
+            description: c.description ?? '',
+            cost: moneyFormat(Number(c.cost)),
+            frequency: { value: 'Daily', label: 'Daily' },
+            cost_on: { value: 'Actual Day', label: 'Actual Day' }
+          })),
+          is_search: false,
+          is_related: true,
+          related: ['description', 'cost', 'frequency', 'cost_on']
+        },
+        { label: 'Description', key: 'description', type: 'text', is_search: false },
+        { label: 'Cost', key: 'cost', type: 'number', is_search: false },
+        {
+          label: 'Frequency',
+          key: 'frequency',
+          type: 'select',
+          options: [
+            { value: 'Daily', label: 'Daily' },
+            { value: 'Once', label: 'Once' },
+            { value: 'Twice', label: 'Twice' }
+          ],
+          is_search: false
+        },
+        {
+          label: 'Cost On',
+          key: 'cost_on',
+          type: 'select',
+          options: [
+            { value: 'Actual Day', label: 'Actual Day' },
+            { value: 'Next Day', label: 'Next Day' }
+          ],
+          is_search: false
+        },
         { label: 'Status', key: 'status', type: 'badge', is_search: false },
         { label: 'Action', key: 'action', type: 'action', is_search: false }
       ];
 
       const permFlags = getPermissionFlags(req.user, 86);
       const permission = {
-        view: true,
-        add: req.user?.superUser || permFlags.add,
-        edit: req.user?.superUser || permFlags.edit,
-        delete: req.user?.superUser || permFlags.delete
+        view: 1,
+        add: req.user?.superUser || permFlags.add ? 1 : 0,
+        edit: req.user?.superUser || permFlags.edit ? 1 : 0,
+        delete: req.user?.superUser || permFlags.delete ? 1 : 0
       };
 
       const master = {
@@ -215,6 +290,243 @@ export class RateAddonController {
   }
 
   /**
+   * GET /api/bar/inclusives?bar_id=N
+   * List BAR inclusives.
+   *
+   * These live in `bar_inclusives`, NOT in `rate_inclusives`. The BAR form's
+   * Inclusive table posts to this endpoint but the handler used to be an alias
+   * of the rate one, so it wrote rows into `rate_inclusives` (whose columns do
+   * include `stock`) instead of the bar table. That made BAR Setup "Inclusive"
+   * impossible to store: the row landed in the wrong table, and anything
+   * pointed straight at `bar_inclusives` had no `stock` column to write to.
+   * See sql/2026-10-03_bar_inclusives_parity.sql for the column additions.
+   *
+   * Table shape follows Laravel App\Models\BarInclusive::formatTable().
+   */
+  static async barInclusiveList(req: Request, res: Response): Promise<void> {
+    try {
+      const barIdRaw = String(req.query.bar_id ?? req.query.data ?? '');
+      if (!/^\d+$/.test(barIdRaw)) {
+        success(res, [], 'Success', 200, {
+          table: BAR_INCLUSIVE_TABLE,
+          permission: { view: true, add: true, edit: true, delete: true },
+          master: { code_items: [] },
+        });
+        return;
+      }
+      const barId = BigInt(barIdRaw);
+      const propertyId = req.user?.lastProperty;
+
+      const where: any = { bar_id: barId, deleted_at: null };
+      if (propertyId) where.property_id = propertyId;
+
+      const [inclusives, codeItems] = await Promise.all([
+        prisma.bar_inclusives.findMany({
+          where,
+          orderBy: [{ sort: 'asc' }, { id: 'desc' }],
+          include: { code_items: { select: { id: true, name: true, description: true, cost: true } } },
+        }),
+        prisma.code_items.findMany({
+          where: activeWhere('code_items', { property_id: propertyId ?? 0n }, propertyId ?? null),
+          select: { id: true, name: true, description: true, cost: true },
+          orderBy: { name: 'asc' },
+        }),
+      ]);
+
+      // Laravel BarInclusive::formatData() returns stock/cost_on/frequency as
+      // {value, label} objects; TableView renders the label for those columns.
+      const data = inclusives.map((i: any) => ({
+        ...i,
+        id: Number(i.id),
+        property_id: Number(i.property_id),
+        bar_id: Number(i.bar_id),
+        stock: i.stock != null ? Number(i.stock) : null,
+        stock_label: i.code_items?.name ?? null,
+        frequency: i.frequency ? { value: i.frequency, label: i.frequency } : null,
+        cost_on: i.cost_on ? { value: i.cost_on, label: i.cost_on } : null,
+        code_items: undefined,
+      }));
+
+      const permFlags = getPermissionFlags(req.user, 87);
+      success(res, bigintToNumber(data), 'Success', 200, {
+        table: BAR_INCLUSIVE_TABLE,
+        permission: {
+          view: 1,
+          add: req.user?.superUser || permFlags.add ? 1 : 0,
+          edit: req.user?.superUser || permFlags.edit ? 1 : 0,
+          delete: req.user?.superUser || permFlags.delete ? 1 : 0
+        },
+        master: { code_items: codeItems.map((c: any) => ({ value: Number(c.id), label: c.name })) },
+      });
+    } catch (err: any) {
+      console.error('Bar inclusive list error:', err);
+      error(res, 'Failed to fetch bar inclusives', 500);
+    }
+  }
+
+  /**
+   * POST /api/bar/inclusives?bar_id=N
+   * Store a BAR inclusive row into `bar_inclusives`.
+   */
+  static async barInclusiveStore(req: Request, res: Response): Promise<void> {
+    try {
+      const barIdRaw = String(req.query.bar_id ?? req.query.data ?? req.params.barId ?? '');
+      if (!/^\d+$/.test(barIdRaw)) { notFound(res, 'Bar not found'); return; }
+      const barId = BigInt(barIdRaw);
+      const propertyId = req.user?.lastProperty;
+
+      const bar = await prisma.bars.findFirst({
+        where: { id: barId, ...(propertyId ? { property_id: propertyId } : {}) },
+        select: { id: true },
+      });
+      if (!bar) { notFound(res, 'Bar not found'); return; }
+
+      const body = (req.body ?? {}) as any;
+      const description = typeof body.description === 'object' && body.description !== null ? body.description.value : body.description;
+      const stockRaw = typeof body.stock === 'object' && body.stock !== null ? body.stock.value : body.stock;
+      const frequency = typeof body.frequency === 'object' && body.frequency !== null ? body.frequency.value : body.frequency;
+      const costOn = typeof body.cost_on === 'object' && body.cost_on !== null ? body.cost_on.value : body.cost_on;
+      const cost = typeof body.cost === 'object' && body.cost !== null ? body.cost.value : body.cost;
+
+      const errors: Record<string, string[]> = {};
+      if (!description) errors.description = ['The description field is required.'];
+      if (stockRaw === undefined || stockRaw === null || stockRaw === '') errors.stock = ['The stock field is required.'];
+      if (frequency === undefined || frequency === null || frequency === '') errors.frequency = ['The frequency field is required.'];
+      if (cost === undefined || cost === null || cost === '') errors.cost = ['The cost field is required.'];
+      if (costOn === undefined || costOn === null || costOn === '') errors.cost_on = ['The cost on field is required.'];
+
+      if (Object.keys(errors).length > 0) {
+        validationError(res, errors);
+        return;
+      }
+
+      // `stock` is a code_items.id. When the picked item is missing we store 0
+      // rather than failing: the column is NOT NULL DEFAULT 0 in the Laravel
+      // migration, and 0 is not a valid code_items.id so no FK is violated.
+      const stockNum = Number(stockRaw);
+      const stock = Number.isFinite(stockNum) && stockNum > 0 ? BigInt(stockNum) : BigInt(0);
+
+      const created = await prisma.bar_inclusives.create({
+        data: {
+          property_id: BigInt(propertyId!),
+          bar_id: barId,
+          description,
+          frequency,
+          cost: cost === undefined || cost === null ? null : String(cost),
+          cost_on: costOn,
+          stock,
+          status: STATUS.active,
+          created_at: new Date(),
+          created_by: req.user?.id ? BigInt(req.user.id) : undefined,
+        },
+      });
+
+      success(res, bigintToNumber({ ...created, id: Number(created.id) }), 'Success', 200);
+    } catch (err: any) {
+      console.error('Bar inclusive store error:', err);
+      error(res, 'Failed to create bar inclusive', 500);
+    }
+  }
+
+  /**
+   * PUT /api/bar/inclusives/:id
+   */
+  static async barInclusiveUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = BigInt(idParam);
+      const propertyId = req.user?.lastProperty;
+
+      const existing = await prisma.bar_inclusives.findFirst({
+        where: { id, deleted_at: null, ...(propertyId ? { property_id: propertyId } : {}) },
+      });
+      if (!existing) { notFound(res, 'Bar inclusive not found'); return; }
+
+      const body = (req.body ?? {}) as any;
+      const unwrap = (v: any) => (typeof v === 'object' && v !== null ? v.value : v);
+      const data: any = {};
+      const description = unwrap(body.description);
+      const frequency = unwrap(body.frequency);
+      const costOn = unwrap(body.cost_on);
+      const cost = unwrap(body.cost);
+      const stock = unwrap(body.stock);
+
+      if (description !== undefined) data.description = description;
+      if (frequency !== undefined) data.frequency = frequency;
+      if (costOn !== undefined) data.cost_on = costOn;
+      if (cost !== undefined) data.cost = cost === null ? null : String(cost);
+      if (stock !== undefined) {
+        const n = Number(stock);
+        data.stock = Number.isFinite(n) && n > 0 ? BigInt(n) : BigInt(0);
+      }
+      if (body.sort !== undefined) data.sort = body.sort;
+      if (body.status !== undefined) {
+        const s = unwrap(body.status);
+        data.status = Array.isArray(s) ? (s[0]?.value ?? STATUS.active) : (s ?? STATUS.active);
+      }
+      data.updated_at = new Date();
+      data.updated_by = req.user?.id ? BigInt(req.user.id) : undefined;
+
+      const updated = await prisma.bar_inclusives.update({ where: { id }, data });
+      success(res, bigintToNumber({ ...updated, id: Number(updated.id) }), 'Success');
+    } catch (err: any) {
+      console.error('Bar inclusive update error:', err);
+      error(res, 'Failed to update bar inclusive', 500);
+    }
+  }
+
+  /**
+   * DELETE /api/bar/inclusives/:id  (soft delete)
+   */
+  static async barInclusiveDestroy(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = BigInt(idParam);
+      const propertyId = req.user?.lastProperty;
+
+      const existing = await prisma.bar_inclusives.findFirst({
+        where: { id, deleted_at: null, ...(propertyId ? { property_id: propertyId } : {}) },
+      });
+      if (!existing) { notFound(res, 'Bar inclusive not found'); return; }
+
+      await prisma.bar_inclusives.update({
+        where: { id },
+        data: {
+          deleted_at: new Date(),
+          status: STATUS.inactive,
+          deleted_by: req.user?.id ? BigInt(req.user.id) : undefined,
+        },
+      });
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Bar inclusive destroy error:', err);
+      error(res, 'Failed to delete bar inclusive', 500);
+    }
+  }
+
+  /**
+   * DELETE /api/bar/inclusives/:id/delete  (force delete)
+   */
+  static async barInclusiveDelete(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const id = BigInt(idParam);
+      const propertyId = req.user?.lastProperty;
+
+      const existing = await prisma.bar_inclusives.findFirst({
+        where: { id, ...(propertyId ? { property_id: propertyId } : {}) },
+      });
+      if (!existing) { notFound(res, 'Bar inclusive not found'); return; }
+
+      await prisma.bar_inclusives.delete({ where: { id } });
+      success(res, null, 'Success');
+    } catch (err: any) {
+      console.error('Bar inclusive delete error:', err);
+      error(res, 'Failed to delete bar inclusive', 500);
+    }
+  }
+
+  /**
    * DELETE /api/rate-inclusives/:id/force
    * Force delete rate inclusive
    */
@@ -244,8 +556,8 @@ export class RateAddonController {
    */
   static async extraBedList(req: Request, res: Response): Promise<void> {
     try {
-      const rateIdParam = Array.isArray(req.params.rateId) ? req.params.rateId[0] : req.params.rateId;
-      if (!rateIdParam || !/^\d+$/.test(String(rateIdParam))) {
+      const rateIdParam = String(req.query.rate_id ?? req.query.id ?? req.query.data ?? req.params.rateId ?? '');
+      if (!/^\d+$/.test(rateIdParam)) {
         success(res, [], 'Success', 200, {
           table: [],
           permission: { view: true, add: true, edit: true, delete: true },
@@ -264,25 +576,76 @@ export class RateAddonController {
         orderBy: { sort: 'asc' }
       });
 
-      const [codePosts, roomTypes] = await Promise.all([
-        prisma.code_posts.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.room_types.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } })
+      const [codePosts, roomTypes, codeItems] = await Promise.all([
+        prisma.code_posts.findMany({ where: activeWhere('code_posts', {}, propertyId ?? null), select: { id: true, name: true } }),
+        prisma.room_types.findMany({ where: activeWhere('room_types', {}, propertyId ?? null), select: { id: true, name: true } }),
+        prisma.code_items.findMany({ where: activeWhere('code_items', { property_id: propertyId ?? 0n }, propertyId ?? null), select: { id: true, name: true, description: true, cost: true } })
       ]);
 
+      const stockNameById = new Map(codeItems.map((c: any) => [String(c.id), c.name]));
+
+      // Laravel RateExtraBedInclusive::formatData() wraps stock / frequency / cost_on
+      // as {value,label}. Spreading the raw row left `stock` as a bare id, so the grid
+      // rendered the id instead of the Code Item name.
       const data = extraBeds.map(e => ({
-        ...e,
         id: Number(e.id),
         property_id: Number(e.property_id),
         rate_id: Number(e.rate_id),
-        cost: Number(e.cost)
+        stock: { value: e.stock, label: stockNameById.get(String(e.stock)) ?? null },
+        frequency: { value: e.frequency, label: e.frequency },
+        description: e.description,
+        cost_on: { value: e.cost_on, label: e.cost_on },
+        cost: Number(e.cost),
+        created_at: e.created_at,
+        status: Number(e.status ?? 0),
+        sort: e.sort
       }));
 
+      // Laravel RateExtraBedInclusive::formatTable() is the same shape as
+      // RateInclusive::formatTable(): a `select` stock column backed by CodeItem with
+      // is_related filling description/cost/frequency/cost_on. Every column here used to
+      // be type 'none', which made the whole grid read-only - nothing could be picked
+      // or added, which is why "Inclusive Extra Bed" never appeared.
       const table = [
-        { label: 'Description', key: 'description', type: 'none', is_search: false },
-        { label: 'Stock', key: 'stock', type: 'none', is_search: false },
-        { label: 'Frequency', key: 'frequency', type: 'none', is_search: false },
-        { label: 'Cost', key: 'cost', type: 'none', is_search: false },
-        { label: 'Cost On', key: 'cost_on', type: 'none', is_search: false },
+        {
+          label: 'Stock',
+          key: 'stock',
+          type: 'select',
+          options: codeItems.map((c: any) => ({
+            value: Number(c.id),
+            label: c.name,
+            description: c.description ?? '',
+            cost: moneyFormat(Number(c.cost)),
+            frequency: { value: 'Daily', label: 'Daily' },
+            cost_on: { value: 'Actual Day', label: 'Actual Day' }
+          })),
+          is_search: false,
+          is_related: true,
+          related: ['description', 'cost', 'frequency', 'cost_on']
+        },
+        { label: 'Description', key: 'description', type: 'text', is_search: false },
+        { label: 'Cost', key: 'cost', type: 'number', is_search: false },
+        {
+          label: 'Frequency',
+          key: 'frequency',
+          type: 'select',
+          options: [
+            { value: 'Daily', label: 'Daily' },
+            { value: 'Once', label: 'Once' },
+            { value: 'Twice', label: 'Twice' }
+          ],
+          is_search: false
+        },
+        {
+          label: 'Cost On',
+          key: 'cost_on',
+          type: 'select',
+          options: [
+            { value: 'Actual Day', label: 'Actual Day' },
+            { value: 'Next Day', label: 'Next Day' }
+          ],
+          is_search: false
+        },
         { label: 'Status', key: 'status', type: 'badge', is_search: false },
         { label: 'Action', key: 'action', type: 'action', is_search: false }
       ];
@@ -471,8 +834,8 @@ export class RateAddonController {
       });
 
       const [codePosts, roomTypes] = await Promise.all([
-        prisma.code_posts.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } }),
-        prisma.room_types.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } })
+        prisma.code_posts.findMany({ where: activeWhere('code_posts', {}, propertyId ?? null), select: { id: true, name: true } }),
+        prisma.room_types.findMany({ where: activeWhere('room_types', {}, propertyId ?? null), select: { id: true, name: true } })
       ]);
 
       const data = relations.map(r => ({

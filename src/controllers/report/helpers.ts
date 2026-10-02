@@ -1,11 +1,9 @@
+import { prisma } from '../../config/prisma';
 import { Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { success, error, badRequest, notFound } from '../../utils/response';
 import { normalizeJson } from '../../utils/json';
 import { STATUSES } from '../../utils/cmsConfig';
-export { STATUSES };
+export { STATUSES, prisma };
 
 export const STATUS_RESERVATION_CANCEL = 2; // config cms.status_reservation.cancel_reservation.id
 
@@ -18,10 +16,8 @@ export const REPORT_PERMISSION_TABLE = [
   { label: 'Action', key: 'action', type: 'action', is_search: false },
 ];
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-export const adapter = new PrismaPg(pool);
-export const prisma = new PrismaClient({ adapter });
-
+// @ts-ignore
+export export export 
 export function bigintToNumber(val: any): any {
   return normalizeJson(val);
 }

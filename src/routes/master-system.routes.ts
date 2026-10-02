@@ -90,6 +90,7 @@ router.get('/pos-matrix-sales', authMiddleware, requirePermission(1124, 'view'),
 router.get('/pos-matrix-sales/create', authMiddleware, requirePermission(1124, 'add'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.createForm(req, res); });
 router.post('/pos-matrix-sales', authMiddleware, requirePermission(1124, 'add'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.create(req, res); });
 router.get('/pos-matrix-sales/:id/update', authMiddleware, requirePermission(1124, 'edit'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.editForm(req, res); });
+router.get('/pos-matrix-sales/:id/edit', authMiddleware, requirePermission(1124, 'edit'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.editForm(req, res); });
 router.put('/pos-matrix-sales/:id', authMiddleware, requirePermission(1124, 'edit'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.update(req, res); });
 router.delete('/pos-matrix-sales/:id', authMiddleware, requirePermission(1124, 'delete'), (req, res) => { req.params.model = 'pos_matrix_sales'; generic.destroy(req, res); });
 
@@ -105,6 +106,7 @@ router.put('/accounting/:type/:id', authMiddleware, requirePermission(69, 'edit'
 router.post('/accounting/:type/update-status', authMiddleware, requirePermission(69, 'edit'), AccountingController.updateStatus);
 router.get('/accounting/:type/:id', authMiddleware, requirePermission(69, 'view'), AccountingController.show);
 router.get('/accounting/:type/:id/update', authMiddleware, requirePermission(69, 'edit'), AccountingController.edit);
+router.get('/accounting/:type/:id/edit', authMiddleware, requirePermission(69, 'edit'), AccountingController.edit);
 
 // ══════════════════════════════════════════════════════════
 // Allocation Accounting
@@ -145,13 +147,16 @@ router.get('/setup', authMiddleware, requirePermission(1125, 'view'), SystemCont
 router.get('/setup/get-type', authMiddleware, requirePermission(1125, 'view'), SystemController.setupGetType);
 router.get('/setup/create', authMiddleware, requirePermission(1125, 'add'), SystemController.setupCreate);
 router.get('/setup/:id', authMiddleware, requirePermission(1125, 'view'), SystemController.setupShow);
-// POST /setup accepts both AES-JSON (table-edit) and multipart FormData (table-view-document)
-router.post('/setup', authMiddleware, requirePermission(1125, 'add'), upload.none(), SystemController.setupStore);
+// POST /setup accepts both AES-JSON (table-edit) and multipart FormData
+// (table-view-document). Laravel TypeController@store reads `$request->file('file')`
+// (TypeController.php:291), so the optional image must be allowed here.
+router.post('/setup', authMiddleware, requirePermission(1125, 'add'), upload.single('file'), SystemController.setupStore);
 // Laravel: Route::post('setup/{type}/update-file') — multipart file update
 router.post('/setup/:id/update-file', authMiddleware, requirePermission(1125, 'edit'), upload.single('file'), SystemController.setupUpdateWithFile);
 router.put('/setup/:id', authMiddleware, requirePermission(1125, 'edit'), SystemController.setupUpdate);
 router.delete('/setup/:id', authMiddleware, requirePermission(1125, 'delete'), SystemController.setupDestroy);
 router.get('/post-code-budget', authMiddleware, requirePermission(69, 'view'), SystemController.postCodeBudget);
+router.put('/post-code-budget/:id', authMiddleware, requirePermission(1117, 'edit'), SystemController.postCodeBudgetUpdate);
 
 // ══════════════════════════════════════════════════════════
 // Day Use Rate (menu 1161) — DayUseRateController parity, permission menu 86

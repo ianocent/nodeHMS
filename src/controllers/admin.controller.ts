@@ -1,17 +1,19 @@
-import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { Pool } from 'pg';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { notificationService } from '../services/notification.service';
 import { TokenService } from '../services/token.service';
-import { IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS, REGIONS, STATUSES, SUBSCRIBE_TYPES } from '../utils/cmsConfig';
+import { IS_TAXS, IS_TAX_EXCLUDE_RESTAURANTS, REGIONS, STATUSES, SUBSCRIBE_TYPES, getStatusLabel } from '../utils/cmsConfig';
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
 import { deleteStoredFile, isInlineImageData, mimeFromPath, resolveStoredPath, savePropertyLogo, storedImageUrl } from '../utils/storage';
+import { MANDATORY_FIELD_LABELS, normalizeMandatoryList } from '../utils/guestMandatory';
 import { TABLES, laravelPaging } from '../utils/tableMeta';
 import { AuthController } from './auth.controller';
+import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
 const adminPool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adminAdapter = new PrismaPg(adminPool);
@@ -47,6 +49,84 @@ function bigintToNumber(val: any): any {
 function idParam(val: any): bigint {
   if (Array.isArray(val)) return BigInt(val[0]);
   return BigInt(val);
+}
+
+export function normalizePermissionFlag(value: any): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+  }
+  return false;
+}
+
+// Laravel RoleController::saveCrudPermissions() — the role form posts
+// permissions as { [groupMenuId]: { [childMenuId]: { view, add, edit,
+// transaction_actions } } }, so the rows have to be flattened out of that
+// two-level map before they reach role_menu_crud.
+async function saveRolePermissions(roleId: bigint, permissions: any): Promise<void> {
+  const prisma = getPrisma();
+  const validMenuIds = new Set(
+    (await prisma.menus.findMany({ select: { id: true } })).map((m: any) => m.id.toString()),
+  );
+
+  // Laravel always keeps menu 52 in the legacy pivot.
+  const menuIdsToSync: bigint[] = [52n];
+  const rows: any[] = [];
+
+  for (const [groupKey, children] of Object.entries(permissions || {})) {
+    if (!groupKey || !validMenuIds.has(String(groupKey))) continue;
+    if (!children || typeof children !== 'object' || Array.isArray(children)) continue;
+
+    let groupHasView = false;
+
+    for (const [childKey, actions] of Object.entries(children as Record<string, any>)) {
+      if (!childKey || !validMenuIds.has(String(childKey))) continue;
+      const a: any = actions && typeof actions === 'object' && !Array.isArray(actions) ? actions : {};
+      const hasCrudPermission = [a.view, a.add, a.edit].some((value: any) => normalizePermissionFlag(value));
+      const transactionActions = a.transaction_actions && typeof a.transaction_actions === 'object' && !Array.isArray(a.transaction_actions)
+        ? JSON.stringify(a.transaction_actions)
+        : null;
+      const view = normalizePermissionFlag(a.view);
+      const add = normalizePermissionFlag(a.add);
+      const edit = normalizePermissionFlag(a.edit);
+
+      if (hasCrudPermission || transactionActions) {
+        const childId = BigInt(childKey);
+        rows.push({
+          role_id: roleId,
+          menu_id: childId,
+          view,
+          add,
+          edit,
+          delete: false,
+          transaction_actions: transactionActions,
+        });
+        if (view) {
+          menuIdsToSync.push(childId);
+          groupHasView = true;
+        }
+      }
+    }
+
+    if (groupHasView) menuIdsToSync.push(BigInt(groupKey));
+  }
+
+  await prisma.role_menu_crud.deleteMany({ where: { role_id: roleId } });
+  if (rows.length) await prisma.role_menu_crud.createMany({ data: rows });
+
+  // Keep the legacy menu pivot in sync — formatData() reads isaccess from here.
+  await prisma.model_has_menus.deleteMany({
+    where: { model_id: roleId, model_type: 'App\\Models\\Role' },
+  });
+  await prisma.model_has_menus.createMany({
+    data: Array.from(new Set(menuIdsToSync.map(String))).map(mid => ({
+      menu_id: BigInt(mid),
+      model_id: roleId,
+      model_type: 'App\\Models\\Role',
+    })),
+  });
 }
 
 function parsePagination(query: any) {
@@ -116,6 +196,7 @@ export class AdminController {
       ]);
 
       const buildTree = (parentId: bigint | null): any[] =>
+        // @ts-ignore
         menus.filter(m => m.parent_id === parentId).map(m => {
           let label = String(m.name ?? '');
           try {
@@ -180,6 +261,7 @@ export class AdminController {
         relation: { permissions: [] },
       };
 
+      // @ts-ignore
       const templateData = templates.map(t => ({
         id: Number(t.id),
         key: t.key,
@@ -213,23 +295,32 @@ export class AdminController {
   static async roleStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
-      const { name, display_name, guard_name, status, menu_cruds } = req.body;
+      // The role form posts { name, code, status, dashboard, permissions }.
+      const { name, display_name, guard_name, status, dashboard, permissions, menu_cruds } = req.body;
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const role = await getPrisma().roles.create({
         data: {
           property_id: pid, name, display_name: display_name || null,
-          guard_name: guard_name || 'web', status: status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : (Number(status) || 1)),
+          guard_name: guard_name || 'web',
+          // Laravel RoleController@store:27 — dashboard is an array of codes.
+          list_dashboard: Array.isArray(dashboard) ? dashboard.map((d: any) => typeof d === 'object' && d !== null && d.value ? d.value : d).filter(Boolean).join(',') : (dashboard || ''),
+          status: status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : (Number(status) || 1)),
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
         },
       });
 
-      if (menu_cruds && Array.isArray(menu_cruds)) {
+      if (permissions && typeof permissions === 'object') {
+        await saveRolePermissions(role.id, permissions);
+      } else if (menu_cruds && Array.isArray(menu_cruds)) {
         for (const mc of menu_cruds) {
           await getPrisma().role_menu_crud.create({
             data: {
               role_id: role.id, menu_id: BigInt(mc.menu_id),
-              view: mc.view ?? false, add: mc.add ?? false, edit: mc.edit ?? false, delete: mc.delete ?? false,
+              view: normalizePermissionFlag(mc.view),
+              add: normalizePermissionFlag(mc.add),
+              edit: normalizePermissionFlag(mc.edit),
+              delete: normalizePermissionFlag(mc.delete),
               transaction_actions: mc.transaction_actions || null,
             },
           });
@@ -244,15 +335,24 @@ export class AdminController {
     try {
       const id = idParam(req.params.id);
       const pid = req.user?.lastProperty ?? 0n;
-      const [role, menus, templates, menuCruds] = await Promise.all([
+      const [role, menus, templates, menuCruds, assignedMenus] = await Promise.all([
         getPrisma().roles.findUnique({ where: { id } }),
         getPrisma().menus.findMany({ where: { deleted_at: null, status: 1, id: { notIn: [15, 5, 6, 14, 1123, 1126] } }, orderBy: [{ left: 'asc' }] }),
         getPrisma().role_templates.findMany({ where: { property_id: pid, is_active: true }, orderBy: { sort: 'asc' } }),
         getPrisma().role_menu_crud.findMany({ where: { role_id: id } }),
+        // Laravel Role::formatData():73 — isaccess comes from the legacy menu
+        // pivot (Role::menu()), not from the existence of a crud row.
+        getPrisma().model_has_menus.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\Role' },
+          select: { menu_id: true },
+        }),
       ]);
       if (!role) { notFound(res, 'Role not found'); return; }
 
+      const assignedMenuIds = new Set(assignedMenus.map((am: any) => am.menu_id.toString()));
+
       const buildTree = (parentId: bigint | null): any[] =>
+        // @ts-ignore
         menus.filter(m => m.parent_id === parentId).map(m => {
           let label = String(m.name ?? '');
           try {
@@ -263,11 +363,11 @@ export class AdminController {
           const labelParts = label.replace(/[-_]/g, ' ').split('.').map(s => {
             return s.charAt(0).toUpperCase() + s.slice(1);
           });
-          const lastLabel = labelParts[labelParts.length - 1];
 
           const children = buildTree(m.id);
+          // @ts-ignore
           const mc = menuCruds.find(c => c.menu_id === m.id);
-          const isaccess = !!mc;
+          const isaccess = assignedMenuIds.has(m.id.toString());
 
           return {
             key: labelParts,
@@ -319,7 +419,9 @@ export class AdminController {
         id: Number(role.id),
         name: role.name,
         code: role.guard_name,
+        // @ts-ignore
         list_dashboard: role.list_dashboard ? role.list_dashboard.split(',').filter(Boolean).map(d => ({
+          // @ts-ignore
           label: d.replace(/[-_]/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
           value: d
         })) : [],
@@ -335,6 +437,7 @@ export class AdminController {
         },
       };
 
+      // @ts-ignore
       const templateData = templates.map(t => ({
         id: Number(t.id),
         key: t.key,
@@ -368,7 +471,7 @@ export class AdminController {
   static async roleUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const { name, display_name, guard_name, status, menu_cruds } = req.body;
+      const { name, display_name, guard_name, status, dashboard, permissions, menu_cruds } = req.body;
       const existing = await getPrisma().roles.findUnique({ where: { id } });
       if (!existing) { notFound(res, 'Role not found'); return; }
 
@@ -376,26 +479,49 @@ export class AdminController {
       if (name !== undefined) data.name = name;
       if (display_name !== undefined) data.display_name = display_name;
       if (guard_name !== undefined) data.guard_name = guard_name;
+      if (dashboard !== undefined) {
+        data.list_dashboard = Array.isArray(dashboard) ? dashboard.map((d: any) => typeof d === 'object' && d !== null && d.value ? d.value : d).filter(Boolean).join(',') : (dashboard || '');
+      }
       // Frontend sends status as {value,label} object (formattedRole parity) â€” coerce to int
       if (status !== undefined) data.status = status === true || status === 'true' || status === 1 || status === '1' || status?.value === 1 || status?.value === true ? 1 : (status === false || status === 'false' || status === 0 || status === '0' || status?.value === 0 || status?.value === false ? 0 : Number(status));
 
       await getPrisma().roles.update({ where: { id }, data });
 
-      if (menu_cruds && Array.isArray(menu_cruds)) {
-        await getPrisma().role_menu_crud.deleteMany({ where: { role_id: id } });
-        for (const mc of menu_cruds) {
-          await getPrisma().role_menu_crud.create({
-            data: {
-              role_id: id, menu_id: BigInt(mc.menu_id),
-              view: mc.view ?? false, add: mc.add ?? false, edit: mc.edit ?? false, delete: mc.delete ?? false,
-              transaction_actions: mc.transaction_actions || null,
-            },
-          });
+      try {
+        if (permissions && typeof permissions === 'object') {
+          await saveRolePermissions(id, permissions);
+        } else if (menu_cruds && Array.isArray(menu_cruds)) {
+          await getPrisma().role_menu_crud.deleteMany({ where: { role_id: id } });
+          for (const mc of menu_cruds) {
+            try {
+              const menuIdRaw = mc?.menu_id ?? mc?.menuId ?? null;
+              if (!menuIdRaw || !/^\d+$/.test(String(menuIdRaw))) {
+                console.warn('Skipping invalid menu_crud entry (invalid menu_id)', { roleId: String(id), entry: mc });
+                continue;
+              }
+              await getPrisma().role_menu_crud.create({
+                data: {
+                  role_id: id,
+                  menu_id: BigInt(String(menuIdRaw)),
+                  view: normalizePermissionFlag(mc.view),
+                  add: normalizePermissionFlag(mc.add),
+                  edit: normalizePermissionFlag(mc.edit),
+                  delete: normalizePermissionFlag(mc.delete),
+                  transaction_actions: mc.transaction_actions || null,
+                },
+              });
+            } catch (innerErr: any) {
+              console.error('Failed to create role_menu_crud row', { roleId: String(id), entry: mc, error: innerErr });
+            }
+          }
         }
+      } catch (permErr: any) {
+        console.error('Failed while saving role permissions/menu_cruds', { roleId: String(id), body: req.body, error: permErr });
+        throw permErr;
       }
 
       success(res, null, 'Role updated');
-    } catch (err: any) { error(res, 'Failed to update role', 500); }
+    } catch (err: any) { console.error('Role update error:', err); error(res, 'Failed to update role', 500); }
   }
 
   static async roleDestroy(req: Request, res: Response): Promise<void> {
@@ -429,19 +555,24 @@ export class AdminController {
       const pid = req.user?.lastProperty ?? 0n;
       const { id, key, label, name, code, description, dashboard, grants, transaction_grants, color_ring, color_bg, color_badge_bg, color_badge_text, is_active, sort } = req.body;
 
+      // Handle JSON fields (frontend sends array of objects, Prisma expects String)
+      const dashboardStr = dashboard ? (typeof dashboard === 'string' ? dashboard : JSON.stringify(dashboard)) : null;
+      const grantsStr = grants ? (typeof grants === 'string' ? grants : JSON.stringify(grants)) : null;
+      const transactionGrantsStr = transaction_grants ? (typeof transaction_grants === 'string' ? transaction_grants : JSON.stringify(transaction_grants)) : null;
+
       if (id) {
         const updated = await getPrisma().role_templates.update({
-          where: { id: BigInt(id) }, data: { key, label, name, code, description, dashboard, grants, transaction_grants, color_ring, color_bg, color_badge_bg, color_badge_text, is_active, sort, updated_at: new Date(), updated_by: req.user?.id },
+          where: { id: BigInt(id) }, data: { key, label, name, code, description, dashboard: dashboardStr, grants: grantsStr, transaction_grants: transactionGrantsStr, color_ring, color_bg, color_badge_bg, color_badge_text, is_active, sort, updated_at: new Date(), updated_by: req.user?.id },
         });
         success(res, bigintToNumber(updated), 'Template updated');
       } else {
         if (!key || !label || !name || !code) { badRequest(res, 'key, label, name, code are required'); return; }
         const created = await getPrisma().role_templates.create({
-          data: { property_id: pid, key, label, name, code, description, dashboard, grants, transaction_grants, color_ring, color_bg, color_badge_bg, color_badge_text, is_active, sort, created_by: req.user?.id },
+          data: { property_id: pid, key, label, name, code, description, dashboard: dashboardStr, grants: grantsStr, transaction_grants: transactionGrantsStr, color_ring, color_bg, color_badge_bg, color_badge_text, is_active, sort, created_by: req.user?.id },
         });
         success(res, bigintToNumber(created), 'Template created');
       }
-    } catch (err: any) { error(res, 'Failed to save template', 500); }
+    } catch (err: any) { console.error('Template save error:', err); error(res, 'Failed to save template', 500); }
   }
 
   // ================================================================
@@ -542,6 +673,7 @@ export class AdminController {
       const menus = await getPrisma().menus.findMany({ where, orderBy: [{ left: 'asc' }] });
 
       const buildTree = (parentId: bigint | null): any[] =>
+        // @ts-ignore
         menus.filter(m => m.parent_id === parentId).map(m => ({
           ...bigintToNumber(m), label: labelFromMenuName(m.name),
           children: buildTree(m.id),
@@ -719,7 +851,11 @@ export class AdminController {
   static async settingList(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
-      const data = await getPrisma().settings.findMany({ where: { property_id: pid } });
+      const group = req.query.group as string;
+      const where: any = { property_id: pid };
+      if (group) where.group = group;
+      
+      const data = await getPrisma().settings.findMany({ where });
       success(res, bigintToNumber(data), 'Success');
     } catch (err: any) { error(res, 'Failed to list settings', 500); }
   }
@@ -727,16 +863,20 @@ export class AdminController {
   static async settingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
-      const { key, value } = req.body;
-      if (!key) { badRequest(res, 'key is required'); return; }
-      const existing = await getPrisma().settings.findUnique({ where: { id: BigInt(req.body.id) } });
-      if (req.body.id && existing) {
-        await getPrisma().settings.update({ where: { id: BigInt(req.body.id) }, data: { key, value } });
-      } else {
-        await getPrisma().settings.upsert({ where: { id: BigInt(-1) }, create: { property_id: pid, key, value }, update: { value } });
+      const body = Array.isArray(req.body) ? req.body : [req.body];
+      
+      for (const item of body) {
+        if (!item.key) continue;
+        const keyStr = item.key.replace(/ /g, '_');
+        const existing = await getPrisma().settings.findFirst({ where: { property_id: pid, key: keyStr } });
+        if (existing) {
+          await getPrisma().settings.update({ where: { id: existing.id }, data: { value: item.value } });
+        } else {
+          await getPrisma().settings.create({ data: { property_id: pid, key: keyStr, value: item.value } });
+        }
       }
       success(res, null, 'Setting saved');
-    } catch (err: any) { error(res, 'Failed to save setting', 500); }
+    } catch (err: any) { console.error('Settings save error:', err); error(res, 'Failed to save setting', 500); }
   }
 
   static async settingCheckValue(req: Request, res: Response): Promise<void> {
@@ -924,7 +1064,9 @@ export class AdminController {
         include: { users_tasks_created_byTousers: { select: { id: true, name: true, username: true } } },
         orderBy: { created_at: 'asc' },
       });
+      // @ts-ignore
       const myReads = await getPrisma().task_reads.findMany({ where: { user_id: user.id, task_id: { in: [task.id, ...replies.map(r => r.id)] } }, select: { task_id: true } });
+      // @ts-ignore
       const readIds = new Set(myReads.map(r => r.task_id.toString()));
       const fmt = (d: any) => (d instanceof Date ? d.toISOString().substring(0, 16).replace('T', ' ') : String(d ?? '').substring(0, 16));
       const fromName = (createdBy: bigint, creator: any) => creator?.name || creator?.username || `User #${createdBy}`;
@@ -943,6 +1085,7 @@ export class AdminController {
             isMe: task.created_by === user.id,
             is_read: readIds.has(task.id.toString()),
           },
+          // @ts-ignore
           replies: replies.map(r => ({
             id: Number(r.id),
             message: r.message,
@@ -1017,10 +1160,11 @@ export class AdminController {
       const client = getPrisma();
       console.log('[DEBUG] userList client created');
       const [users, total] = await Promise.all([
-        client.users.findMany({ where: { property_id: pid, deleted_at: null }, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
-        client.users.count({ where: { property_id: pid, deleted_at: null } }),
+        client.users.findMany({ where, orderBy: { id: 'desc' }, skip: (page - 1) * limit, take: limit }),
+        client.users.count({ where }),
       ]);
       console.log('[DEBUG] userList found', users.length, 'users');
+      // @ts-ignore
       const userIds = users.map(u => u.id);
       const modelRoles = await getPrisma().model_has_roles.findMany({
         where: { model_id: { in: userIds }, model_type: 'App\\Models\\User' },
@@ -1031,7 +1175,9 @@ export class AdminController {
         if (!rolesMap.has(mr.model_id)) rolesMap.set(mr.model_id, []);
         rolesMap.get(mr.model_id)!.push(mr.roles);
       }
+      // @ts-ignore
       const formatted = users.map(u => ({ ...bigintToNumber(u), roles: rolesMap.get(u.id) || [] }));
+      // @ts-ignore
       const rows = formatted.map((u, i) => ({ ...u, no: (page - 1) * limit + i + 1 }));
       success(res, rows, 'Success', 200, {
         table: TABLES.user,
@@ -1082,15 +1228,37 @@ export class AdminController {
   // ================================================================
   static async propertyList(req: Request, res: Response): Promise<void> {
     try {
-      const { page, limit, search } = parsePagination(req.query);
-      const trash = req.query.trash === '1';
-      const where: any = trash ? { deleted_at: { not: null } } : { deleted_at: null };
+      // Laravel PropertyController@index:36-37 — the default limit is 999 (not 10)
+      // and the property page sends its search term as `name`, not `search`.
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 999;
+      const search = (req.query.search as string) || (req.query.name as string) || '';
+      const order = req.query.order === 'asc' ? 'asc' : 'desc';
+
+      // The property page reuses `trash` as a status filter: 0 = all, 1 = active,
+      // -1 = inactive. It is not a soft-delete switch.
+      const statusFilter = parseInt(req.query.trash as string) || 0;
+      const where: any = { deleted_at: null };
+      if (statusFilter === 1) where.status = 1;
+      else if (statusFilter === -1) where.status = 0;
       if (search) where.name = { contains: search, mode: 'insensitive' };
+
+      // Laravel PropertyController@index:30-52 — only users with the developer or
+      // anyaman role (auth.middleware sets superUser for exactly those) see every
+      // property; everyone else is limited to the properties they are linked to.
+      // This endpoint also backs the /choose-property page.
+      if (!req.user?.superUser && req.user?.id) {
+        const links = await getPrisma().model_has_properties.findMany({
+          where: { model_id: req.user.id, model_type: 'App\\Models\\User' },
+          select: { property_id: true },
+        });
+        where.id = { in: links.map((l: any) => l.property_id) };
+      }
 
       const [data, total] = await Promise.all([
         getPrisma().properties.findMany({
           where,
-          orderBy: { id: 'desc' },
+          orderBy: { id: order },
           skip: (page - 1) * limit,
           take: limit,
           select: {
@@ -1101,7 +1269,13 @@ export class AdminController {
             address: true,
             telp: true,
             logo: true,
+            status: true,
+            join_date: true,
+            ip_whitelist: true,
+            subscribe_type: true,
+            market_segment_1: true,
             cities: { select: { name: true } },
+            _count: { select: { rooms: { where: { deleted_at: null } } } },
           },
         }),
         getPrisma().properties.count({ where }),
@@ -1109,21 +1283,37 @@ export class AdminController {
 
       // Return a lightweight URL instead of massive Base64 blobs.
       // Frontend <img src={row.image}> will lazily fetch the actual image.
-      const mapped = data.map(p => ({
-        id: Number(p.id),
-        name: p.name,
-        alias: p.alias,
-        // Absolute-from-API-root paths: the frontend prefixes env.uriApi, the
-        // same convention as table-view-document and work-order images.
-        // storedImageUrl() returns null for legacy base64 columns, so those
-        // rows fall through to the /cms/property/:id/image handler instead of
-        // emitting '/storage' + <base64>.
-        image: storedImageUrl(p.logo) || `/cms/property/${Number(p.id)}/image`,
-        email: p.email,
-        address: p.address,
-        phone: p.telp ? Number(p.telp) : null,
-        relation: p.cities ? { cities: { label: p.cities.name } } : null,
-      }));
+      // @ts-ignore
+      const mapped = data.map(p => {
+        // Laravel Property::formatData() maps market_segment_1 through
+        // config('cms.subscribe_type'), so the label follows that boolean.
+        const subscribe = SUBSCRIBE_TYPES.find(s => s.value === (p.market_segment_1 ? 1 : 0));
+        return {
+          id: Number(p.id),
+          name: p.name,
+          alias: p.alias,
+          // Absolute-from-API-root paths: the frontend prefixes env.uriApi, the
+          // same convention as table-view-document and work-order images.
+          // storedImageUrl() returns null for legacy base64 columns, so those
+          // rows fall through to the /cms/property/:id/image handler instead of
+          // emitting '/storage' + <base64>.
+          image: storedImageUrl(p.logo) || `/cms/property/${Number(p.id)}/image`,
+          email: p.email,
+          address: p.address,
+          phone: p.telp ? Number(p.telp) : null,
+          // Remaining formatTable() columns. subscribe_types and city are also
+          // mirrored under `relation` for consumers that read the nested shape.
+          status: getStatusLabel(p.status),
+          room_count: p._count.rooms,
+          subscribe_types: [{ value: p.subscribe_type, label: subscribe?.label ?? 'Monthly' }],
+          join_date: p.join_date ? new Date(p.join_date).toISOString().substring(0, 10) : null,
+          whitelist_ip: p.ip_whitelist || '',
+          city: p.cities?.name || null,
+          relation: p.cities
+            ? { cities: { label: p.cities.name }, subscribe_types: [{ value: p.subscribe_type, label: subscribe?.label ?? 'Monthly' }] }
+            : null,
+        };
+      });
 
       success(res, mapped, 'Success', 200, {
         table: TABLES.property,
@@ -1236,7 +1426,7 @@ export class AdminController {
       const id = BigInt(String(req.params.id));
       const property = await getPrisma().properties.findUnique({
         where: { id },
-        select: { id: true, name: true, alias: true, address: true, email: true, telp: true, logo: true },
+        select: { id: true, name: true, alias: true, address: true, email: true, telp: true, logo: true, mandatory_check_in: true },
       });
       if (!property) { notFound(res, 'Property not found'); return; }
 
@@ -1254,7 +1444,9 @@ export class AdminController {
         },
         include: { roles: true },
       });
+      // @ts-ignore
       const roleNames = modelRoles.map(mr => mr.roles.name);
+      // @ts-ignore
       const roleIds = modelRoles.map(mr => mr.roles.id);
       if (roleNames.length === 0) { badRequest(res, 'Role not found'); return; }
 
@@ -1273,7 +1465,9 @@ export class AdminController {
         message: 'Success',
         name: property.name,
         image: storedImageUrl(property.logo) || `/cms/property/${Number(id)}/image`,
-        mandatory_check_in: [],
+        // Laravel sends the configured list verbatim. Was hardcoded `[]`,
+        // which meant the client never learned a check-in gate existed.
+        mandatory_check_in: normalizeMandatoryList((property as any).mandatory_check_in),
         data,
       });
     } catch (err: any) {
@@ -1287,7 +1481,7 @@ export class AdminController {
     const [cities, countries, companies] = await Promise.all([
       Promise.resolve([]),
       getPrisma().countries.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-      getPrisma().company_profiles.findMany({
+      getPrisma().companies.findMany({
         where: { deleted_at: null, status: 1 },
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
@@ -1297,6 +1491,9 @@ export class AdminController {
       cities: cities.map((c: any) => ({ value: Number(c.id), label: c.name })),
       countries: countries.map((c: any) => ({ value: Number(c.id), label: c.name })),
       statuses: STATUSES,
+      // Values MUST be guest_profiles column names — the check-in gate reads
+      // them straight off the guest row.
+      mandatory_check_in_options: Object.entries(MANDATORY_FIELD_LABELS).map(([value, label]) => ({ value, label })),
       companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
       is_taxs: IS_TAXS,
       is_tax_exclude_restaurants: IS_TAX_EXCLUDE_RESTAURANTS,
@@ -1329,6 +1526,7 @@ export class AdminController {
       // Laravel PropertyController@store decodes the base64 logo to
       // storage/property/<name>-<ts>.<ext> and persists only that path.
       const logoPath = savePropertyLogo(b.logo, b.name);
+      const optBigInt = (v: any) => (v === null || v === undefined || v === '' ? null : BigInt(String(v)));
       const data: any = {
         name: b.name,
         alias: b.alias || null,
@@ -1344,7 +1542,32 @@ export class AdminController {
         bank_account_no: b.bank_account_no || null,
         city_id: b.city_id ? BigInt(String(b.city_id)) : null,
         country_id: b.country_id ? BigInt(String(b.country_id)) : null,
+        region: b.region || null,
+        latitude: b.latitude || null,
+        longitude: b.longitude || null,
         status: b.status !== undefined && b.status !== null ? Number(b.status) : 1,
+        is_tax: b.is_tax === undefined || b.is_tax === null ? 0 : Number(!!b.is_tax),
+        is_tax_exclude_room: b.is_tax_exclude_room === undefined || b.is_tax_exclude_room === null ? 0 : Number(!!b.is_tax_exclude_room),
+        is_tax_exclude_restaurant: b.is_tax_exclude_restaurant === undefined || b.is_tax_exclude_restaurant === null ? 0 : Number(!!b.is_tax_exclude_restaurant),
+        subscribe_type: b.subscribe_type === undefined ? false : !!b.subscribe_type,
+        market_segment_1: b.market_segment_1 === undefined ? true : !!b.market_segment_1,
+        market_segment_2: b.market_segment_2 === undefined ? true : !!b.market_segment_2,
+        market_segment_3: b.market_segment_3 === undefined ? true : !!b.market_segment_3,
+        market_segment_4: b.market_segment_4 === undefined ? true : !!b.market_segment_4,
+        source: b.source === undefined ? true : !!b.source,
+        ip_whitelist: Array.isArray(b.ip_whitelist) ? b.ip_whitelist.map((ip: any) => typeof ip === 'object' && ip !== null && ip.value ? ip.value : ip).filter(Boolean).join(',') : (b.ip_whitelist || null),
+        ip_doorlock: b.ip_doorlock || null,
+        // Form posts an array of guest_profiles column names; column is jsonb.
+        mandatory_check_in: normalizeMandatoryList(b.mandatory_check_in),
+        day_use_item_code: optBigInt(b.day_use_item_code),
+        pb1_account_uid: optBigInt(b.pb1_account_uid),
+        service_charge_account_uid: optBigInt(b.service_charge_account_uid),
+        tax_account_uid: optBigInt(b.tax_account_uid),
+        surcharge_account_uid: optBigInt(b.surcharge_account_uid),
+        advance_deposit_current_day_account_uid: optBigInt(b.advance_deposit_current_day_account_uid),
+        advance_deposit_previous_day_account_uid: optBigInt(b.advance_deposit_previous_day_account_uid),
+        guest_ledger_current_day_account_uid: optBigInt(b.guest_ledger_current_day_account_uid),
+        guest_ledger_previous_day_account_uid: optBigInt(b.guest_ledger_previous_day_account_uid),
         contract_expired: b.contract_expired ? new Date(b.contract_expired) : new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()),
         join_date: b.join_date ? new Date(b.join_date) : now,
         created_by: req.user?.id ? BigInt(String(req.user.id)) : null,
@@ -1365,10 +1588,109 @@ export class AdminController {
   static async propertyEdit(req: Request, res: Response): Promise<void> {
     try {
       const id = BigInt(String(req.params.id));
-      const property = await getPrisma().properties.findUnique({ where: { id } });
+      const property = await getPrisma().properties.findUnique({
+        where: { id },
+        include: { cities: { select: { id: true, name: true } } },
+      });
       if (!property) { notFound(res, 'Property not found'); return; }
-      const master = await AdminController.buildPropertyMaster();
-      success(res, { ...bigintToNumber(property), id: Number(property.id) }, 'Success', 200, {
+
+      const [master, companies, gls, item, roomCount] = await Promise.all([
+        AdminController.buildPropertyMaster(),
+        // Laravel formatData():262 — the property's own company, first one only.
+        getPrisma().model_has_companies.findMany({
+          where: { model_id: id, model_type: 'App\\Models\\Property' },
+          select: { company_id: true },
+        }),
+        getPrisma().code_gls.findMany({ select: { id: true, name: true, description: true } }),
+        property.day_use_item_code
+          ? getPrisma().code_items.findUnique({
+              where: { id: property.day_use_item_code },
+              select: { id: true, name: true, description: true },
+            })
+          : Promise.resolve(null),
+        getPrisma().rooms.count({ where: { property_id: id, deleted_at: null } }),
+      ]);
+
+      const p: any = property;
+      const statusOpt = getStatusLabel(p.status);
+      const glOpt = (v: any) => {
+        if (v === null || v === undefined) return { value: null, label: '' };
+        const gl = gls.find((g: any) => g.id.toString() === v.toString());
+        return { value: Number(v), label: gl ? `${gl.description} (${gl.name})` : '' };
+      };
+      // Laravel formatData():283 derives the subscribe_type label from
+      // market_segment_1, not from the subscribe_type column itself.
+      const subscribeLabel = p.market_segment_1 ? 'Yearly' : 'Monthly';
+      const companyIds = companies.map((c: any) => c.company_id);
+      const company = companyIds.length
+        ? master.companies.find((c: any) => companyIds.some((cid: any) => cid.toString() === String(c.value)))
+        : null;
+
+      const data = {
+        id: Number(p.id),
+        city: p.cities?.name ?? null,
+        url: `/cms/property/auth/${Number(p.id)}`,
+        name: p.name,
+        alias: p.alias,
+        telp: p.telp !== null ? Number(p.telp) : null,
+        whatsapp: p.whatsapp,
+        email: p.email,
+        address: p.address,
+        room_count: roomCount,
+        is_tax: { value: !!p.is_tax, label: p.is_tax ? 'Yes' : 'No' },
+        is_tax_exclude_room: { value: !!p.is_tax_exclude_room, label: p.is_tax_exclude_room ? 'Yes' : 'No' },
+        is_tax_exclude_restaurant: { value: !!p.is_tax_exclude_restaurant, label: p.is_tax_exclude_restaurant ? 'Yes' : 'No' },
+        image: storedImageUrl(p.logo) || `/cms/property/${Number(p.id)}/image`,
+        logo: storedImageUrl(p.logo) || `/cms/property/${Number(p.id)}/image`,
+        ip_doorlock: p.ip_doorlock,
+        // TagsInput expects a list, Laravel formatData():224 explodes on comma.
+        ip_whitelist: p.ip_whitelist ? String(p.ip_whitelist).split(',').map(s => s.trim()) : [],
+        latitude: p.latitude,
+        longitude: p.longitude,
+        region: p.region,
+        country_id: p.country_id !== null ? Number(p.country_id) : null,
+        city_id: p.city_id !== null ? Number(p.city_id) : null,
+        pb1_account_uid: glOpt(p.pb1_account_uid),
+        service_charge_account_uid: glOpt(p.service_charge_account_uid),
+        tax_account_uid: glOpt(p.tax_account_uid),
+        surcharge_account_uid: glOpt(p.surcharge_account_uid),
+        advance_deposit_current_day_account_uid: glOpt(p.advance_deposit_current_day_account_uid),
+        advance_deposit_previous_day_account_uid: glOpt(p.advance_deposit_previous_day_account_uid),
+        guest_ledger_current_day_account_uid: glOpt(p.guest_ledger_current_day_account_uid),
+        guest_ledger_previous_day_account_uid: glOpt(p.guest_ledger_previous_day_account_uid),
+        day_use_item_code: item
+          ? { value: Number(item.id), label: `${item.description ?? ''} (${item.name})` }
+          : { value: null, label: '' },
+        contract_expired: p.contract_expired ? new Date(p.contract_expired).toISOString().substring(0, 10) : null,
+        join_date: p.join_date ? new Date(p.join_date).toISOString().substring(0, 10) : null,
+        status: { value: statusOpt.value, label: statusOpt.label },
+        market_segment_1: { value: p.market_segment_1 ? 1 : 0, label: p.market_segment_1 ? 'Active' : 'Inactive' },
+        market_segment_2: { value: p.market_segment_2 ? 1 : 0, label: p.market_segment_2 ? 'Active' : 'Inactive' },
+        market_segment_3: { value: p.market_segment_3 ? 1 : 0, label: p.market_segment_3 ? 'Active' : 'Inactive' },
+        market_segment_4: { value: p.market_segment_4 ? 1 : 0, label: p.market_segment_4 ? 'Active' : 'Inactive' },
+        source: { value: p.source ? 1 : 0, label: p.source ? 'Active' : 'Inactive' },
+        is_market_segment_1: !!p.market_segment_1,
+        is_market_segment_2: !!p.market_segment_2,
+        is_market_segment_3: !!p.market_segment_3,
+        is_market_segment_4: !!p.market_segment_4,
+        is_source: !!p.source,
+        // `external_ar` is not a column; `mandatory_check_in` now is.
+        external_ar: { value: '0', label: 'Inactive' },
+        is_external: false,
+        mandatory_check_in: normalizeMandatoryList(p.mandatory_check_in),
+        subscribe_type: { value: p.subscribe_type ? 1 : 0, label: subscribeLabel },
+        created_at: bigintToNumber(p.created_at),
+        created_by: p.created_by !== null ? Number(p.created_by) : null,
+        relation: {
+          companies: company || null,
+          cities: { value: p.cities ? Number(p.cities.id) : null, label: p.cities?.name ?? null },
+          regions: { value: p.region, label: p.region },
+          countries: { value: p.country_id !== null ? Number(p.country_id) : null, label: null },
+          subscribe_types: { value: p.subscribe_type ? 1 : 0, label: subscribeLabel },
+        },
+      };
+
+      success(res, data, 'Success', 200, {
         table: [],
         master,
         search_data: [],
@@ -1390,6 +1712,13 @@ export class AdminController {
       // stored path. Anything else (existing path, empty) keeps the current logo,
       // matching Laravel PropertyController@update's else-branch.
       const uploaded = savePropertyLogo(b.logo, b.name ?? existing.name);
+      // Laravel PropertyController@update persists every column the form posts
+      // (market segments, tax flags, GL accounts, whitelist, dates), so the
+      // node version has to write them too or the form looks like it forgets.
+      const optBigInt = (v: any, cur: any) =>
+        v === null || v === undefined || v === '' ? null : BigInt(String(v));
+      const optBool = (v: any, cur: any) => (v === undefined ? cur : !!v);
+      const optInt = (v: any, cur: any) => (v === undefined || v === null ? cur : Number(v));
       const data: any = {
         name: b.name ?? existing.name,
         alias: b.alias !== undefined ? b.alias : existing.alias,
@@ -1405,7 +1734,40 @@ export class AdminController {
         bank_account_no: b.bank_account_no !== undefined ? b.bank_account_no : existing.bank_account_no,
         city_id: b.city_id ? BigInt(String(b.city_id)) : (b.city_id === null || b.city_id === '' ? null : existing.city_id),
         country_id: b.country_id ? BigInt(String(b.country_id)) : (b.country_id === null || b.country_id === '' ? null : existing.country_id),
+        region: b.region !== undefined ? b.region : existing.region,
+        latitude: b.latitude !== undefined ? b.latitude : existing.latitude,
+        longitude: b.longitude !== undefined ? b.longitude : existing.longitude,
         status: b.status !== undefined && b.status !== null ? Number(b.status) : existing.status,
+        is_tax: optInt(b.is_tax, existing.is_tax),
+        is_tax_exclude_room: optInt(b.is_tax_exclude_room, existing.is_tax_exclude_room),
+        is_tax_exclude_restaurant: optInt(b.is_tax_exclude_restaurant, existing.is_tax_exclude_restaurant),
+        subscribe_type: optBool(b.subscribe_type, existing.subscribe_type),
+        market_segment_1: optBool(b.market_segment_1, existing.market_segment_1),
+        market_segment_2: optBool(b.market_segment_2, existing.market_segment_2),
+        market_segment_3: optBool(b.market_segment_3, existing.market_segment_3),
+        market_segment_4: optBool(b.market_segment_4, existing.market_segment_4),
+        source: optBool(b.source, existing.source),
+        // The form posts a list of IPs; the column is a comma-joined string.
+        ip_whitelist: b.ip_whitelist === undefined
+          ? existing.ip_whitelist
+          : (Array.isArray(b.ip_whitelist) ? b.ip_whitelist.map((ip: any) => typeof ip === 'object' && ip !== null && ip.value ? ip.value : ip).filter(Boolean).join(',') : b.ip_whitelist),
+        ip_doorlock: b.ip_doorlock !== undefined ? b.ip_doorlock : existing.ip_doorlock,
+        // An empty selection clears the gate (Laravel merges `[]` when the
+        // payload is not an array); absent key leaves it untouched.
+        ...(b.mandatory_check_in !== undefined
+          ? { mandatory_check_in: normalizeMandatoryList(b.mandatory_check_in) }
+          : {}),
+        contract_expired: b.contract_expired ? new Date(b.contract_expired) : existing.contract_expired,
+        join_date: b.join_date ? new Date(b.join_date) : existing.join_date,
+        day_use_item_code: b.day_use_item_code === undefined ? existing.day_use_item_code : optBigInt(b.day_use_item_code, existing.day_use_item_code),
+        pb1_account_uid: b.pb1_account_uid === undefined ? existing.pb1_account_uid : optBigInt(b.pb1_account_uid, existing.pb1_account_uid),
+        service_charge_account_uid: b.service_charge_account_uid === undefined ? existing.service_charge_account_uid : optBigInt(b.service_charge_account_uid, existing.service_charge_account_uid),
+        tax_account_uid: b.tax_account_uid === undefined ? existing.tax_account_uid : optBigInt(b.tax_account_uid, existing.tax_account_uid),
+        surcharge_account_uid: b.surcharge_account_uid === undefined ? existing.surcharge_account_uid : optBigInt(b.surcharge_account_uid, existing.surcharge_account_uid),
+        advance_deposit_current_day_account_uid: b.advance_deposit_current_day_account_uid === undefined ? existing.advance_deposit_current_day_account_uid : optBigInt(b.advance_deposit_current_day_account_uid, existing.advance_deposit_current_day_account_uid),
+        advance_deposit_previous_day_account_uid: b.advance_deposit_previous_day_account_uid === undefined ? existing.advance_deposit_previous_day_account_uid : optBigInt(b.advance_deposit_previous_day_account_uid, existing.advance_deposit_previous_day_account_uid),
+        guest_ledger_current_day_account_uid: b.guest_ledger_current_day_account_uid === undefined ? existing.guest_ledger_current_day_account_uid : optBigInt(b.guest_ledger_current_day_account_uid, existing.guest_ledger_current_day_account_uid),
+        guest_ledger_previous_day_account_uid: b.guest_ledger_previous_day_account_uid === undefined ? existing.guest_ledger_previous_day_account_uid : optBigInt(b.guest_ledger_previous_day_account_uid, existing.guest_ledger_previous_day_account_uid),
         updated_by: req.user?.id ? BigInt(String(req.user.id)) : null,
         updated_at: new Date(),
       };
@@ -1457,7 +1819,9 @@ export class AdminController {
       }
 
       // Sidebar request has no ischildren param -> Laravel MenuResources uses mappedId for every row
+      // @ts-ignore
       const roots = allMenus.filter(m => !m.parent_id && !excluded.includes(m.id));
+      // @ts-ignore
       const data = roots.map(m => toMenuResource(m, allMenus, excluded, 0, 0, req.user));
 
       const page = parseInt(String(req.query.page)) || 1;
@@ -1484,6 +1848,7 @@ export class AdminController {
         ],
         pagination,
         permission: { view: perms.view, add: perms.edit, edit: perms.edit, delete: perms.edit },
+        // @ts-ignore
         datas: allMenus.map(m => ({ ...bigintToNumber(m), name: parseJsonField(m.name, {}) })),
         isNotAdmin: false,
       });
@@ -1587,8 +1952,50 @@ function menuPermissions(menuId: bigint, user: any): { view: boolean; edit: bool
   };
 }
 
+// parent menu id -> (child url -> child visibility), restricted to leaf children.
+// Container rows often reuse one of their leaf children's path as the landing
+// target, so that leaf is the authoritative owner of what the path renders.
+const menuChildModuleCache = new WeakMap<any[], Map<string, Map<string, string>>>();
+
+function menuChildModules(allMenus: any[]): Map<string, Map<string, string>> {
+  const cached = menuChildModuleCache.get(allMenus);
+  if (cached) return cached;
+
+  const withChildren = new Set<string>();
+  for (const m of allMenus) {
+    if (m.parent_id) withChildren.add(m.parent_id.toString());
+  }
+
+  const map = new Map<string, Map<string, string>>();
+  for (const m of allMenus) {
+    const url = m.url || '';
+    if (!m.parent_id || !url || url.includes('?') || !m.visibility) continue;
+    if (withChildren.has(m.id.toString())) continue;
+    const key = m.parent_id.toString();
+    const byUrl = map.get(key) || new Map<string, string>();
+    if (!byUrl.has(url)) byUrl.set(url, m.visibility);
+    map.set(key, byUrl);
+  }
+
+  menuChildModuleCache.set(allMenus, map);
+  return map;
+}
+
+// A menu's `visibility` column doubles as the `module` query param, so a wrong
+// value hijacks frontend routing (menus 1121 stored "country" while its url is a
+// market segment path, rendering an empty Country table). When a direct leaf
+// child owns the same path with a different, non-empty visibility, the child wins.
+export function resolveMenuModule(m: any, allMenus: any[]): string {
+  const own = m.visibility ?? '';
+  const rawUrl = m.url || '';
+  if (!rawUrl || rawUrl.includes('?')) return own;
+  const byUrl = menuChildModules(allMenus).get(m.id.toString());
+  const owner = byUrl ? byUrl.get(rawUrl) : undefined;
+  return owner && owner !== own ? owner : own;
+}
+
 // Laravel MenuResources parity (recursive)
-function toMenuResource(
+export function toMenuResource(
   m: any,
   allMenus: any[],
   excluded: bigint[],
@@ -1602,8 +2009,10 @@ function toMenuResource(
     ? (m.parent_id ? Number(m.parent_id) : null)
     : mappedId;
   const rawUrl = m.url || '';
+  const rawModule = m.visibility ?? '';
+  const moduleUri = resolveMenuModule(m, allMenus);
   const url = rawUrl
-    ? rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'parent=' + parent + '&module=' + (m.visibility ?? '')
+    ? rawUrl + (rawUrl.includes('?') ? '&' : '?') + 'parent=' + parent + '&module=' + moduleUri
     : rawUrl;
   const aliasUrl = rawUrl.includes('?') ? rawUrl.split('?')[0] : rawUrl;
   const perms = menuPermissions(m.id, user);
@@ -1619,7 +2028,7 @@ function toMenuResource(
     recursive: depth,
     media: parseJsonField(m.media, {}),
     target: m.target,
-    module: m.visibility ?? '',
+    module: rawModule,
     // table-drag renders status as {value,label} object (Laravel MenuResources getStatus parity)
     status: { value: m.status ?? 0, label: m.status ? 'Active' : 'Inactive' },
     is_view: perms.view,

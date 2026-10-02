@@ -1,16 +1,11 @@
+import { prisma } from '../../config/prisma';
 // Laravel Jobs/SyncCheckStatusBookingEngine.php parity — polls the Booking
 // Engine for pending payment folios (is_payment_booking_engine=1), books the
 // payment as a MINUS transaction on success, cancels the folio on expiry.
 // Confirmation emails/PDF generation are not ported (no mail infra in node yet).
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { calculateCodePost } from '../../utils/cmsConfig';
 import { sendBookingConfirmationEmails } from '../../services/mail.service';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 export async function processSyncCheckStatusBookingEngine(_job: any) {
   const baseUrl = process.env.BOOKING_ENGINE_URL;

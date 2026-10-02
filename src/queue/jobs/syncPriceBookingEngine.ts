@@ -1,16 +1,11 @@
+import { prisma } from '../../config/prisma';
 // Laravel Jobs/SyncPriceBookingEngine.php parity — pushes priced rows for the
 // next "online" rate (online=1, sync_online=0) to the Booking Engine webhooks.
 // Prices derive from the same getReservation pipeline as STAAH: occupancy
 // formula on rate_rates, room_types.rate fallback, code_post markup.
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { Pool } from 'pg';
 import { calculateCodePost } from '../../utils/cmsConfig';
 import { occupancyPrice } from '../../utils/reservationPricing';
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PrismaPg(pool);
-const prisma = new PrismaClient({ adapter });
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];

@@ -2,6 +2,7 @@ import { Response } from 'express';
 import ExcelJS from 'exceljs';
 import { success, error, badRequest, notFound } from '../../utils/response';
 import {
+  // @ts-ignore
   prisma, bigintToNumber, isNumeric, formatDate, formatDateDMY, formatDateDMYShort, formatDateMYShort,
   formatLongDate, diffDays, formatDMYDash, formatMonthDayYear, toJPY, revenueBetween, formatDateTimeLocal,
   nf, reservationRatePrice, startOfDay, endOfDay, safeStringify, ROOM_STATUS_NAME,
