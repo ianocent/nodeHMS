@@ -2586,6 +2586,12 @@ success(res, formatted, 'Success', 200, {
       const normalFallback = statusGuestArr.find((i: any) => i.label.toLowerCase().includes('normal')) || { value: 1, label: 'Normal' };
 
       // ---- master ----
+      // `buildCardTypeOptions` is async (it reads the distinct card_type values
+      // actually in use for this property). It used to be assigned without
+      // `await`, so the promise went into the response body and serialised as
+      // `{}` -- the folio detail form's Card Type select therefore had no
+      // options and opened empty.
+      const cardtypes = await buildCardTypeOptions(req.user?.lastProperty);
       const master = {
         statuses: [
           { value: 1, label: 'Active' },
@@ -2609,7 +2615,7 @@ success(res, formatted, 'Success', 200, {
           { label: 'House Use', value: 'is_house_use' },
           { label: 'Complimentary', value: 'complimentary' },
         ],
-        cardtypes: buildCardTypeOptions(req.user?.lastProperty),
+        cardtypes,
         companies: companies.map((c: any) => ({ value: Number(c.id), label: c.name })),
         room_types: roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name })),
         legend: [

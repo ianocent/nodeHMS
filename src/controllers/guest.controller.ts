@@ -22,10 +22,17 @@ const STATUSES = [
   { id: 0, name: 'Inactive' }
 ];
 
+// Card types must match config('cms.nric') in the Laravel reference:
+// KTP / Paspor / SIM / KITAS. This list used to be NRIC / Passport / Other,
+// which is a Singapore ID vocabulary and does not exist in the reference config
+// -- it also meant a guest saved here stored a card_type that no dropdown
+// anywhere else (reservation folio detail, guest list filter) offers, so the
+// value read back as unmatched.
 const NRICS = [
-  { name: 'NRIC' },
-  { name: 'Passport' },
-  { name: 'Other' }
+  { name: 'KTP' },
+  { name: 'Paspor' },
+  { name: 'SIM' },
+  { name: 'KITAS' },
 ];
 
 const GENDERS = [
@@ -41,6 +48,27 @@ const REGIONS = [
   { name: 'Africa' },
   { name: 'Oceania' }
 ];
+
+/**
+ * Reduce a field that may arrive as `{ value, label }` down to its scalar.
+ *
+ * Selects in this app are held as `{ value, label }` on both sides -- the guest
+ * form's `transformData` unwraps them before POSTing, but not every caller does
+ * (the reservation screen posts its own guest object, merge-guest reuses the
+ * payload, and the edit endpoint hands `{ value, label }` back for a select that
+ * was never touched). Passing that object straight to a String or Int column is
+ * what turned an ordinary save into a 500, or wrote "[object Object]" into a
+ * text column.
+ */
+function scalarOf(v: any): any {
+  if (v === undefined) return undefined;
+  if (v === null || v === '') return null;
+  if (typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)) {
+    const raw = (v as any).value ?? (v as any).label;
+    return raw === undefined || raw === '' ? null : raw;
+  }
+  return v;
+}
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -652,9 +680,17 @@ export class GuestController {
         return;
       }
 
-      if (card_type && card_number) {
+      // Compare on the scalar values, not the raw payload. A caller that sends
+      // `card_type: { value: 'KTP', label: 'KTP' }` passed the checks above but
+      // then queried `card_type: {value:'KTP'}` -- Prisma serialises that object
+      // and finds nothing, so a real duplicate slipped through and, worse, the
+      // row itself got written as "[object Object]".
+      const cardTypeKey = scalarOf(card_type);
+      const cardNumberKey = scalarOf(card_number);
+
+      if (cardTypeKey && cardNumberKey) {
         const existingCard = await prisma.guest_profiles.findFirst({
-          where: { card_type, card_number, id: { not: id } }
+          where: { card_type: cardTypeKey, card_number: cardNumberKey, id: { not: id }, deleted_at: null },
         });
         if (existingCard) {
           badRequest(res, 'Card number already exists');
@@ -693,14 +729,19 @@ export class GuestController {
         image: imagePath
       };
 
-      // The card fields are written here rather than in a second update after the
+      // Write them as plain scalars here rather than in a second update after the
       // transaction. They used to be applied by a follow-up `guest_profiles.update`
       // outside the transaction, which meant the guest row could be committed with
       // the new name/address while the card columns still held the old values if
       // that second write failed -- and the folio mirror inside the transaction had
       // already copied the NEW card, so the three copies drifted apart.
-      if (card_type) data.card_type = card_type;
-      if (card_number) data.card_number = card_number;
+      //
+      // `{value, label}` is unwrapped here as well: these are String columns and an
+      // object would be written literally as "[object Object]".
+      const cardType = scalarOf(card_type);
+      const cardNumber = scalarOf(card_number);
+      if (cardType !== undefined) data.card_type = cardType;
+      if (cardNumber !== undefined) data.card_number = cardNumber;
       if (card_expiry !== undefined) data.card_expiry = card_expiry || null;
 
       // Same as store: `status_profile` is the guest-status column in the
@@ -727,6 +768,34 @@ export class GuestController {
         data.status = data.status?.value ? 1 : 0;
       }
 
+      // Normalise the Int columns. Every select in this app is stored as
+      // `{ value, label }`, and the guest form's `transformData` unwraps them
+      // client-side -- but any other caller (the reservation screen posts the
+      // same guest object, merge-guest, the old guest form) can still send the
+      // object or a numeric string. Prisma rejects both with an opaque
+      // "Failed to update guest" 500, because a String or a plain object is not
+      // assignable to an Int column. Coerce here so the failure mode is "field
+      // ignored" instead of a 500 that loses the whole save.
+      const intOrNull = (v: any): number | null | undefined => {
+        if (v === undefined) return undefined;
+        const raw = scalarOf(v);
+        if (raw === null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) ? Math.trunc(n) : null;
+      };
+      for (const key of ['nationality_id', 'city_id', 'country_id']) {
+        const coerced = intOrNull(data[key]);
+        if (coerced === undefined) delete data[key];
+        else data[key] = coerced;
+      }
+
+      // `gender` is a String column but the same `{ value, label }` object reaches
+      // it when a select was left untouched, which then writes "[object Object]".
+      for (const key of ['gender']) {
+        const v = scalarOf(data[key]);
+        if (v !== undefined && v !== null) data[key] = String(v);
+      }
+
       Object.keys(data).forEach(k => data[k] === undefined && delete data[k]);
 
       // Sync types.
@@ -740,17 +809,24 @@ export class GuestController {
       // replace the pivot inside a transaction with the row update.
       const guestTitleId = guest_title?.value ?? guest_title;
       const guestStatusId = guest_status?.value ?? guest_status;
-      const validTypeIds: bigint[] = [];
       for (const raw of [guestTitleId, guestStatusId]) {
         if (raw === undefined || raw === null || raw === '') continue;
-        const tid = BigInt(String(raw));
-        if (!/^\d+$/.test(String(raw))) throw new Error('Invalid type id: ' + raw);
+        // Validate the shape BEFORE BigInt(). The old order did
+        // `BigInt(String(raw))` on the first line and only then checked the regex,
+        // so a non-numeric value threw a SyntaxError out of the handler and came
+        // back as the same opaque 500 -- while the code two lines below was clearly
+        // written to answer with a 400.
+        const asText = String(raw).trim();
+        if (!/^\d+$/.test(asText)) {
+          badRequest(res, 'Invalid type id: ' + raw);
+          return;
+        }
+        const tid = BigInt(asText);
         const exists = await prisma.types.findUnique({ where: { id: tid }, select: { id: true } });
         if (!exists) {
           badRequest(res, 'Invalid type id: ' + raw);
           return;
         }
-        validTypeIds.push(tid);
       }
 
       await prisma.$transaction(async (tx) => {
@@ -786,8 +862,8 @@ export class GuestController {
         // master copy, so a change made here has to reach the folio too -- the
         // reservation detail form reads these off the folio and otherwise showed
         // a stale (or empty) card next to the profile's current one.
-        if (card_type !== undefined) folioPatch.card_type = card_type;
-        if (card_number !== undefined) folioPatch.card_number = card_number;
+        if (cardType !== undefined) folioPatch.card_type = cardType;
+        if (cardNumber !== undefined) folioPatch.card_number = cardNumber;
         if (card_expiry !== undefined) folioPatch.card_expiry = card_expiry || null;
 
         if (Object.keys(folioPatch).length > 0) {
@@ -807,22 +883,53 @@ export class GuestController {
         const statusId = guestStatusId !== undefined && guestStatusId !== null && guestStatusId !== ''
           ? BigInt(String(guestStatusId)) : null;
 
-        if (titleId) {
-          await tx.model_has_types.deleteMany({
-            where: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: { not: titleId } },
+        // `guest_title` and `guest_status` are two DIFFERENT groups that happen to
+        // share the one `model_has_types` table, so they cannot be written with a
+        // blanket "delete everything then insert" pass:
+        //
+        //   - the old code did `deleteMany({ type_id: { not: titleId } })` then
+        //     `create(titleId)`. `not titleId` spares titleId itself, so the
+        //     create collided with the row that was already there ->
+        //     P2002 primary-key violation -> "Failed to update guest" 500. It also
+        //     wiped the status row, so the second deleteMany then had to recreate
+        //     that one too.
+        //   - `deleteMany({ model_id, model_type })` (as the store path does) is
+        //     equally wrong here: it would drop BOTH groups whenever only one was
+        //     sent.
+        //
+        // So: drop only the rows in the SAME group, then upsert. `upsert` keeps
+        // the pair idempotent, which is what makes editing an unchanged guest
+        // (the normal case -- the form POSTs back what it was given) work.
+        const replaceGroupType = async (typeId: bigint) => {
+          const groupIds = await prisma.types.findMany({
+            where: { id: typeId },
+            select: { group: true },
           });
-          await tx.model_has_types.create({
-            data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: titleId },
+          const group = groupIds[0]?.group;
+          if (!group) return;
+          const sameGroup = await prisma.types.findMany({
+            where: { group, deleted_at: null },
+            select: { id: true },
           });
-        }
-        if (statusId) {
-          await tx.model_has_types.deleteMany({
-            where: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: { not: statusId } },
+          const groupTypeIds = sameGroup.map((t: any) => t.id);
+          if (groupTypeIds.length > 0) {
+            await tx.model_has_types.deleteMany({
+              where: {
+                model_id: id,
+                model_type: 'App\\Models\\GuestProfile',
+                type_id: { in: groupTypeIds, not: typeId },
+              },
+            });
+          }
+          await tx.model_has_types.upsert({
+            where: { type_id_model_id_model_type: { type_id: typeId, model_id: id, model_type: 'App\\Models\\GuestProfile' } },
+            create: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: typeId },
+            update: {},
           });
-          await tx.model_has_types.create({
-            data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: statusId },
-          });
-        }
+        };
+
+        if (titleId) await replaceGroupType(titleId);
+        if (statusId) await replaceGroupType(statusId);
       });
 
       const updated = await this.getGuestWithRelations(id);
