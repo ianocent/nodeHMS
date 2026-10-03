@@ -5,6 +5,12 @@ import { STATUSES } from '../utils/cmsConfig';
 import { TABLES } from '../utils/tableMeta';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { writeAudit, isUnchanged } from '../utils/audit';
+import {
+  resetOnlineRateSyncFlags,
+  syncRateConfigDelete,
+  syncRateConfigUpsert,
+  syncRoomTypeForContentRoom,
+} from '../services/bookingEngineContent.service';
 import { AuthController } from './auth.controller';
 import { coerceValue, fieldType, hasField, isIgnoredSearchToken, modelExists, safeOrderBy, searchPredicate } from '../utils/querySafety';
 import { uniqueExtendError } from '../utils/uniqueExtend';
@@ -305,6 +311,33 @@ function parsePagination(query: any) {
   const order = query.order === 'desc' ? 'desc' : 'asc';
   const trash = query.trash === '1' || query.trash === 'true';
   return { page, limit, search, sort, order, trash };
+}
+
+// Booking Engine Setup (menu parent 1091) fan-out for the generic CRUD routes.
+// App\Models\ContentRoom pushes its room type to /cms/room-type and flags every
+// online rate of the property as unsynced; App\Models\RateConfig pushes itself to
+// /cms/rate-config. Every other model served here is untouched.
+const BOOKING_ENGINE_SYNC_MODELS = new Set(['content_rooms', 'rate_configs']);
+
+async function syncBookingEngineForGenericModel(
+  model: string,
+  record: any,
+  action: 'created' | 'updated' | 'deleted'
+): Promise<void> {
+  const key = String(model || '').toLowerCase();
+  if (!BOOKING_ENGINE_SYNC_MODELS.has(key)) return;
+  try {
+    if (key === 'rate_configs') {
+      if (action === 'deleted') await syncRateConfigDelete(record);
+      else await syncRateConfigUpsert(record);
+      return;
+    }
+    // content_rooms
+    if (action !== 'deleted') await syncRoomTypeForContentRoom(record);
+    await resetOnlineRateSyncFlags(record?.property_id);
+  } catch (err: any) {
+    console.error(`[booking-engine-sync] ${key} ${action} sync failed:`, err?.message);
+  }
 }
 
 export class GenericController {
@@ -963,6 +996,7 @@ export class GenericController {
         }
       }
       const permission = this.getPermission(req, model);
+      await syncBookingEngineForGenericModel(model, record, 'created');
       await writeAudit(getPrisma(), req, {
         table: this.toPlural(model),
         event: 'created',
@@ -1002,6 +1036,7 @@ async update(req: Request, res: Response): Promise<void> {
       coerceToSchema(dmmfModel, data);
       if (hasField(dmmfModel, 'updated_at')) data.updated_at = new Date();
       const record = await modelDelegate.update({ where: { id: parsedId }, data });
+      await syncBookingEngineForGenericModel(model, record, 'updated');
       await writeAudit(getPrisma(), req, {
         table: this.toPlural(model),
         event: 'updated',
@@ -1033,6 +1068,7 @@ async update(req: Request, res: Response): Promise<void> {
       } else {
         await modelDelegate.delete({ where: { id: parsedId } });
       }
+      await syncBookingEngineForGenericModel(model, existing, 'deleted');
       await writeAudit(getPrisma(), req, {
         table: this.toPlural(model),
         event: 'deleted',

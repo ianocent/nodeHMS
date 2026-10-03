@@ -3,6 +3,17 @@ import { prisma } from '../config/prisma';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { activeWhere } from '../utils/querySafety';
+import { deleteStoredFile, saveUploadedImage } from '../utils/storage';
+import {
+  persistSyncColumn,
+  syncCancelationRuleDateDelete,
+  syncCancelationRuleDateUpsert,
+  syncCancelationRuleDelete,
+  syncCancelationRuleUpsert,
+  syncContentBannerCreate,
+  syncContentBannerDelete,
+  syncContentBannerUpdate,
+} from '../services/bookingEngineContent.service';
 
 
 const MENU_ID = 69;
@@ -176,12 +187,22 @@ export class ContentController {
   static async bannerStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { name, status, image, description, url } = req.body;
+      // Multipart: express.json() leaves req.body undefined when nothing parsed the
+      // body, which used to throw `Cannot destructure property 'name' of 'req.body'`.
+      const body = (req.body ?? {}) as Record<string, any>;
+      const { name, status, description, url } = body;
       if (!name) { badRequest(res, 'name is required'); return; }
+      // Laravel ContentBannerController@store: `->file('image')->store('content-banner/banner','public')`.
+      const image = saveUploadedImage(req.file as any, 'content-banner/banner') ?? body.image ?? null;
+      // The booking engine addresses banners by uuid, so it has to exist from the
+      // very first insert (Laravel ContentBannerController@store also sets it).
+      const uuid = body.uuid ? String(body.uuid) : crypto.randomUUID();
       const data = await prisma.content_banners.create({
-        data: { property_id: pid, name, status: status ?? 1, image, description, url, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, name, uuid, status: status ?? 1, image, description, url, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
-      success(res, bigintToNumber(data), 'Banner created', 200);
+      const outcome = await syncContentBannerCreate(data);
+      await persistSyncColumn('content_banners', data.id, outcome);
+      success(res, bigintToNumber({ ...data, sync: outcome.attempted ? JSON.stringify(outcome.body ?? null) : data.sync }), 'Banner created', 200);
     } catch (err: any) { console.error('Banner store error:', err); error(res, 'Failed to create banner', 500); }
   }
 
@@ -189,25 +210,44 @@ export class ContentController {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Not found'); return; }
-      const { name, status, image, description, url } = req.body;
+      const existing = await prisma.content_banners.findUnique({ where: { id: BigInt(idRaw) } });
+      if (!existing || existing.deleted_at) { notFound(res, 'Banner not found'); return; }
+      const body = (req.body ?? {}) as Record<string, any>;
+      const { name, status, description, url } = body;
       const data: any = { updated_at: new Date(), updated_by: req.user?.id };
       if (name !== undefined) data.name = name;
       if (status !== undefined) data.status = status;
-      if (image !== undefined) data.image = image;
       if (description !== undefined) data.description = description;
       if (url !== undefined) data.url = url;
-      await prisma.content_banners.update({ where: { id: BigInt(idRaw) }, data });
+      // Laravel ContentBannerController@update:163-171 drops the previous file
+      // before storing the replacement, then writes the new relative path.
+      const uploaded = saveUploadedImage(req.file as any, 'content-banner/banner');
+      if (uploaded) {
+        if (existing.image) deleteStoredFile(existing.image);
+        data.image = uploaded;
+      } else if (body.image !== undefined) {
+        data.image = body.image;
+      }
+      // Backfill banners created before uuid was persisted locally.
+      if (!existing.uuid) data.uuid = body.uuid ? String(body.uuid) : crypto.randomUUID();
+      const updated = await prisma.content_banners.update({ where: { id: BigInt(idRaw) }, data });
+      const outcome = await syncContentBannerUpdate(updated);
+      await persistSyncColumn('content_banners', updated.id, outcome);
       success(res, null, 'Banner updated');
-    } catch (err: any) { error(res, 'Failed to update banner', 500); }
+    } catch (err: any) { console.error('Banner update error:', err); error(res, 'Failed to update banner', 500); }
   }
 
   static async bannerDestroy(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Not found'); return; }
+      const existing = await prisma.content_banners.findUnique({ where: { id: BigInt(idRaw) } });
+      if (!existing) { notFound(res, 'Banner not found'); return; }
       await prisma.content_banners.update({ where: { id: BigInt(idRaw) }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+      const outcome = await syncContentBannerDelete(existing);
+      await persistSyncColumn('content_banners', existing.id, outcome);
       success(res, null, 'Banner deleted');
-    } catch (err: any) { error(res, 'Failed to delete banner', 500); }
+    } catch (err: any) { console.error('Banner destroy error:', err); error(res, 'Failed to delete banner', 500); }
   }
 
   // â•â•â•â•â•â•â•â•â•â•â• CANCELATION RULES â•â•â•â•â•â•â•â•â•â•â•
@@ -260,6 +300,7 @@ export class ContentController {
       const data = await prisma.cancelation_rules.create({
         data: { property_id: pid, uuid: crypto.randomUUID(), room_type_id: BigInt(room_type_id), code, description, type_date, type_refund, value: value ?? 0, value_days: value_days ?? 0, status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
+      await syncCancelationRuleUpsert(data);
       success(res, bigintToNumber(data), 'Cancelation rule created', 200);
     } catch (err: any) { console.error('Cancelation rule store error:', err); error(res, 'Failed to create cancelation rule', 500); }
   }
@@ -278,18 +319,22 @@ export class ContentController {
       if (value !== undefined) data.value = value;
       if (value_days !== undefined) data.value_days = value_days;
       if (status !== undefined) data.status = status;
-      await prisma.cancelation_rules.update({ where: { id: BigInt(idRaw) }, data });
+      const updated = await prisma.cancelation_rules.update({ where: { id: BigInt(idRaw) }, data });
+      await syncCancelationRuleUpsert(updated);
       success(res, null, 'Cancelation rule updated');
-    } catch (err: any) { error(res, 'Failed to update cancelation rule', 500); }
+    } catch (err: any) { console.error('Cancelation rule update error:', err); error(res, 'Failed to update cancelation rule', 500); }
   }
 
   static async cancelationRuleDestroy(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Not found'); return; }
+      const existing = await prisma.cancelation_rules.findUnique({ where: { id: BigInt(idRaw) } });
+      if (!existing) { notFound(res, 'Rule not found'); return; }
       await prisma.cancelation_rules.update({ where: { id: BigInt(idRaw) }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+      await syncCancelationRuleDelete(existing);
       success(res, null, 'Cancelation rule deleted');
-    } catch (err: any) { error(res, 'Failed to delete cancelation rule', 500); }
+    } catch (err: any) { console.error('Cancelation rule destroy error:', err); error(res, 'Failed to delete cancelation rule', 500); }
   }
 
   // â•â•â•â•â•â•â•â•â•â•â• CANCELATION RULE DATES â•â•â•â•â•â•â•â•â•â•â•
@@ -323,6 +368,7 @@ export class ContentController {
       const data = await prisma.cancelation_rule_dates.create({
         data: { property_id: pid, uuid: crypto.randomUUID(), cancelation_rule_id: BigInt(cancelation_rule_id), start_date: new Date(start_date), end_date: new Date(end_date), status: status ?? 1, created_at: new Date(), updated_at: new Date(), created_by: req.user?.id },
       });
+      await syncCancelationRuleDateUpsert(data);
       success(res, bigintToNumber(data), 'Cancelation rule date created', 200);
     } catch (err: any) { console.error('Cancelation rule date store error:', err); error(res, 'Failed to create cancelation rule date', 500); }
   }
@@ -337,18 +383,22 @@ export class ContentController {
       if (start_date !== undefined) data.start_date = new Date(start_date);
       if (end_date !== undefined) data.end_date = new Date(end_date);
       if (status !== undefined) data.status = status;
-      await prisma.cancelation_rule_dates.update({ where: { id: BigInt(idRaw) }, data });
+      const updated = await prisma.cancelation_rule_dates.update({ where: { id: BigInt(idRaw) }, data });
+      await syncCancelationRuleDateUpsert(updated);
       success(res, null, 'Cancelation rule date updated');
-    } catch (err: any) { error(res, 'Failed to update cancelation rule date', 500); }
+    } catch (err: any) { console.error('Cancelation rule date update error:', err); error(res, 'Failed to update cancelation rule date', 500); }
   }
 
   static async cancelationRuleDateDestroy(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Not found'); return; }
+      const existing = await prisma.cancelation_rule_dates.findUnique({ where: { id: BigInt(idRaw) } });
+      if (!existing) { notFound(res, 'Cancelation rule date not found'); return; }
       await prisma.cancelation_rule_dates.update({ where: { id: BigInt(idRaw) }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
+      await syncCancelationRuleDateDelete(existing);
       success(res, null, 'Cancelation rule date deleted');
-    } catch (err: any) { error(res, 'Failed to delete cancelation rule date', 500); }
+    } catch (err: any) { console.error('Cancelation rule date destroy error:', err); error(res, 'Failed to delete cancelation rule date', 500); }
   }
 
   // â•â•â•â•â•â•â•â•â•â•â• EMAIL BUILDER â•â•â•â•â•â•â•â•â•â•â•

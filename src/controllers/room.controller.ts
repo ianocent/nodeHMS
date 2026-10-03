@@ -20,6 +20,7 @@ import { uniqueExtendError } from '../utils/uniqueExtend';
 import { applySearchField, dataSearch } from '../utils/search';
 import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
 import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
+import { syncRoomType } from '../services/bookingEngineContent.service';
 import { AuthController } from './auth.controller';
 
 // Helper: coerce sort/status to number (matches Laravel int casting)
@@ -267,6 +268,10 @@ export class RoomController {
           });
         }
       }
+
+      // App\Models\RoomType::creating pushes the room type to the Booking Engine,
+      // which upserts it on (name, property_id) - so create and update share a POST.
+      await syncRoomType(roomType);
 
       success(res, bigintToNumber(roomType), 'Success', 200);
     } catch (err: any) {
@@ -635,6 +640,7 @@ export class RoomController {
       }
 
       const updated = await prisma.room_types.findUnique({ where: { id } });
+      await syncRoomType(updated);
       success(res, bigintToNumber(updated), 'Success');
     } catch (err: any) {
       console.error('Room type update error:', err);

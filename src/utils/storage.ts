@@ -108,6 +108,31 @@ export function storedImageUrl(relativePath: unknown): string | null {
   return resolveStoredPath(normalized) ? `/storage${normalized}` : null;
 }
 
+// Multipart upload parity with Laravel `$request->file('image')->store($folder, 'public')`.
+// The banner form posts the file as multipart/form-data (see components/pages/banner/form),
+// so this is the only path that ever persists a content_banners.image. Returns the
+// '/'-less relative path stored in the column, matching saveBase64Image().
+export function saveUploadedImage(
+  file: { originalname: string; mimetype: string; buffer: Buffer } | undefined | null,
+  folder: string,
+  maxSizeBytes = 2 * 1024 * 1024
+): string | null {
+  if (!file || !file.buffer || !file.buffer.length) return null;
+  const ext = String(file.originalname || '').split('.').pop()?.toLowerCase() ?? '';
+  if (!IMAGE_EXTS.includes(ext)) return null;
+  if (file.buffer.length > maxSizeBytes) return null;
+  try {
+    const dir = path.join(storageRoot(), folder);
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = Math.random().toString(36).slice(2, 10);
+    const fileName = `${Date.now()}-${stamp}.${ext}`;
+    fs.writeFileSync(path.join(dir, fileName), file.buffer);
+    return `${folder}/${fileName}`;
+  } catch {
+    return null;
+  }
+}
+
 // Guest documents accept a broader mime set (= mimes:jpeg,png,jpg,pdf,doc,docx,xls,xlsx,ppt,pptx,txt).
 // FE sends the file as a base64 data-URI in JSON; original name may ride along in `file_name`.
 export function saveDocumentFromDataUri(dataUri: string, folder = 'guest-documents'): SaveResult | null {

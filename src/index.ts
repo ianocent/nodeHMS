@@ -36,6 +36,7 @@ import contentRoutes from './routes/content.routes';
 import { firebaseRoutes } from './controllers/firebase.controller';
 import pgAdminRoutes from './routes/pg-admin.routes';
 import { bookingRoutes } from './routes/booking.routes';
+import { middlewareRoutes } from './routes/middleware.routes';
 import { posRoutes } from './routes/pos.routes';
 import { initQueue } from './config/queue';
 
@@ -61,6 +62,14 @@ app.use(express.text({ limit: '10mb', type: 'text/plain' }));
 // 2b. Static files — Laravel storage/app/public parity (/storage/{path}).
 // Must resolve to the SAME root the upload helpers write into, otherwise
 // STORAGE_PATH uploads 404 here.
+// The booking engine builds asset URLs by concatenating strings without caring
+// about slashes — `config('cms.apihms_storage') . $logo` where properties.logo is
+// stored as "/property/x.png" yields "/storage//property/x.png", which
+// express.static refuses to resolve. Collapse the duplicate separators first.
+app.use('/storage', (req: Request, _res: Response, next: () => void) => {
+  if (req.url.includes('//')) req.url = req.url.replace(/\/{2,}/g, '/');
+  next();
+});
 app.use('/storage', express.static(storageRoot()));
 
 // 2c. Theme static files — SVG icons, images (/theme/cms/images/...)
@@ -205,6 +214,19 @@ app.use('/pg-admin', pgAdminRoutes);
 
 // Mobile booking engine (Laravel web.php parity, public)
 app.use('/booking', bookingRoutes);
+
+// Laravel routes/web.php `Route::prefix('middleware')` (public).
+// hmsBookingEngine builds every HMS call as
+// config('cms.apihms_middleware_curl') = APP_HMS_URL . '/middleware', e.g.
+//   POST {APP_HMS_URL}/middleware/pre-registration/verify
+//   GET  {APP_HMS_URL}/middleware/booking/roomUnavailable
+// The reference nests the booking handlers one level deeper
+// (`Route::prefix('middleware')` + `Route::get('booking/roomUnavailable')`), so
+// bookingRoutes has to be mounted at /middleware/booking — mounting it at
+// /middleware produced /middleware/roomUnavailable and every booking-engine pull
+// still 404'd.
+app.use('/middleware', middlewareRoutes);
+app.use('/middleware/booking', bookingRoutes);
 
 // Mobile POS (Laravel web.php parity, public)
 app.use(posRoutes);

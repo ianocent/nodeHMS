@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { ContentController } from '../controllers/content.controller';
+import { LifestyleController } from '../controllers/lifestyle.controller';
+import { LoyaltyController } from '../controllers/loyalty.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
+import { makeUpload } from '../utils/upload';
 
 const router = Router();
 
@@ -45,14 +48,79 @@ router.put('/content/room/config-pax/:id', authMiddleware, requirePermission(69,
 router.delete('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
 
 // ── Banner (content_banners model) ──
+// The banner form posts multipart/form-data (name + image File + ...), so multer has
+// to run before the controller: express.json() leaves `req.body` undefined otherwise.
+// Validation mirrors Laravel `image|mimes:jpeg,png,jpg,gif|max:2048`.
+const bannerUpload = makeUpload(['jpeg', 'png', 'jpg', 'gif'], 2);
 router.get('/content/banner', authMiddleware, requirePermission(69, 'view'), ContentController.bannerList);
 router.get('/content/banner/create', authMiddleware, requirePermission(69, 'add'), ContentController.bannerForm);
-router.post('/content/banner', authMiddleware, requirePermission(69, 'add'), ContentController.bannerStore);
+router.post('/content/banner', authMiddleware, requirePermission(69, 'add'), bannerUpload.single('image'), ContentController.bannerStore);
 router.get('/content/banner/:id', authMiddleware, requirePermission(69, 'view'), ContentController.bannerForm);
 router.get('/content/banner/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.bannerForm);
 router.get('/content/banner/:id/edit', authMiddleware, requirePermission(69, 'edit'), ContentController.bannerForm);
 router.put('/content/banner/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.bannerUpdate);
+// Laravel routes/cms.php:1430 `Route::post('banner/{banner}', [ContentBannerController::class, 'update'])`
+// inside the content prefix - the banner form always POSTs to GLOBALURI + "/" + id.
+router.post('/content/banner/:id', authMiddleware, requirePermission(69, 'edit'), bannerUpload.single('image'), ContentController.bannerUpdate);
 router.delete('/content/banner/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.bannerDestroy);
+
+// ── Loyalty Reward (Booking Engine MySQL `loyalty_rewards`, cms.php:1434) ──
+// The guest portal reads this catalog through RewardController@rewards, so the CRUD
+// here writes straight into the booking engine database.
+router.get('/content/loyalty-reward', authMiddleware, requirePermission(1192, 'view'), LoyaltyController.rewardList);
+router.get('/content/loyalty-reward/create', authMiddleware, requirePermission(1192, 'add'), LoyaltyController.rewardForm);
+router.post('/content/loyalty-reward', authMiddleware, requirePermission(1192, 'add'), LoyaltyController.rewardStore);
+router.get('/content/loyalty-reward/:id', authMiddleware, requirePermission(1192, 'view'), LoyaltyController.rewardForm);
+router.get('/content/loyalty-reward/:id/update', authMiddleware, requirePermission(1192, 'edit'), LoyaltyController.rewardForm);
+router.get('/content/loyalty-reward/:id/edit', authMiddleware, requirePermission(1192, 'edit'), LoyaltyController.rewardForm);
+router.put('/content/loyalty-reward/:id', authMiddleware, requirePermission(1192, 'edit'), LoyaltyController.rewardUpdate);
+router.post('/content/loyalty-reward/:id', authMiddleware, requirePermission(1192, 'edit'), LoyaltyController.rewardUpdate);
+router.delete('/content/loyalty-reward/:id', authMiddleware, requirePermission(1192, 'delete'), LoyaltyController.rewardDestroy);
+
+// ── Reward Redemption (Booking Engine MySQL `reward_redemptions`, cms.php:1435) ──
+// Read + status only: rows are created by the guest portal, never from HMS.
+router.get('/content/reward-redemption', authMiddleware, requirePermission(1193, 'view'), LoyaltyController.redemptionList);
+router.post('/content/reward-redemption', authMiddleware, requirePermission(1193, 'add'), LoyaltyController.redemptionCreate);
+router.get('/content/reward-redemption/:id', authMiddleware, requirePermission(1193, 'view'), LoyaltyController.redemptionShow);
+router.get('/content/reward-redemption/:id/update', authMiddleware, requirePermission(1193, 'edit'), LoyaltyController.redemptionEdit);
+router.get('/content/reward-redemption/:id/edit', authMiddleware, requirePermission(1193, 'edit'), LoyaltyController.redemptionEdit);
+router.put('/content/reward-redemption/:id', authMiddleware, requirePermission(1193, 'edit'), LoyaltyController.redemptionUpdate);
+router.post('/content/reward-redemption/:id', authMiddleware, requirePermission(1193, 'edit'), LoyaltyController.redemptionUpdate);
+router.delete('/content/reward-redemption/:id', authMiddleware, requirePermission(1193, 'delete'), LoyaltyController.redemptionDestroy);
+
+// ── Guest Point Transaction (Booking Engine MySQL, cms.php:1436) ──
+// Fully read-only: the ledger is written by the booking engine on every stay.
+router.get('/content/guest-point-transaction', authMiddleware, requirePermission(1194, 'view'), LoyaltyController.pointList);
+router.post('/content/guest-point-transaction', authMiddleware, requirePermission(1194, 'add'), LoyaltyController.pointCreate);
+router.get('/content/guest-point-transaction/:id', authMiddleware, requirePermission(1194, 'view'), LoyaltyController.pointShow);
+router.get('/content/guest-point-transaction/:id/update', authMiddleware, requirePermission(1194, 'edit'), LoyaltyController.pointShow);
+router.get('/content/guest-point-transaction/:id/edit', authMiddleware, requirePermission(1194, 'edit'), LoyaltyController.pointShow);
+router.put('/content/guest-point-transaction/:id', authMiddleware, requirePermission(1194, 'edit'), LoyaltyController.pointUpdate);
+router.post('/content/guest-point-transaction/:id', authMiddleware, requirePermission(1194, 'edit'), LoyaltyController.pointUpdate);
+router.delete('/content/guest-point-transaction/:id', authMiddleware, requirePermission(1194, 'delete'), LoyaltyController.pointDestroy);
+
+// ── Lifestyle Facility / Terms (Booking Engine Setup, cms.php:1432-1433) ──
+// The booking engine pulls both through GET /middleware/lifestyle/properties.
+router.get('/content/lifestyle-facility', authMiddleware, requirePermission(1190, 'view'), LifestyleController.facilityList);
+router.get('/content/lifestyle-facility/create', authMiddleware, requirePermission(1190, 'add'), LifestyleController.facilityForm);
+router.post('/content/lifestyle-facility', authMiddleware, requirePermission(1190, 'add'), LifestyleController.facilityStore);
+router.get('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'view'), LifestyleController.facilityForm);
+router.get('/content/lifestyle-facility/:id/update', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityForm);
+router.get('/content/lifestyle-facility/:id/edit', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityForm);
+router.put('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityUpdate);
+// Table-edit posts the edited row to `uri + "/" + id`.
+router.post('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityUpdate);
+router.delete('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'delete'), LifestyleController.facilityDestroy);
+
+router.get('/content/lifestyle-terms', authMiddleware, requirePermission(1191, 'view'), LifestyleController.termList);
+router.get('/content/lifestyle-terms/create', authMiddleware, requirePermission(1191, 'add'), LifestyleController.termForm);
+router.post('/content/lifestyle-terms', authMiddleware, requirePermission(1191, 'add'), LifestyleController.termStore);
+router.get('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'view'), LifestyleController.termForm);
+router.get('/content/lifestyle-terms/:id/update', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termForm);
+router.get('/content/lifestyle-terms/:id/edit', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termForm);
+router.put('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termUpdate);
+router.post('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termUpdate);
+router.delete('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'delete'), LifestyleController.termDestroy);
 
 // ── Cancelation Rule (cancelation_rules model) ──
 router.get('/cancelation-rule', authMiddleware, requirePermission(69, 'view'), ContentController.cancelationRuleList);

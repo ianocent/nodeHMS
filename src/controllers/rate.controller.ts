@@ -2,6 +2,7 @@ import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
 import { enqueueJob } from '../config/queue';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { syncRateConfigDelete, syncRateConfigUpsert } from '../services/bookingEngineContent.service';
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
 import { applySearchField, dataSearch } from '../utils/search';
 import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
@@ -2528,6 +2529,8 @@ const { name, time, status } = req.body;
         data: {
           property_id: propertyId!,
           rate_id: rateId,
+          // Booking engine RateConfigController@store upserts on uuid.
+          uuid: crypto.randomUUID(),
           name,
           description: description || null,
           image: imagePath,
@@ -2535,6 +2538,9 @@ const { name, time, status } = req.body;
           created_by: userId,
         },
       });
+
+      // App\Models\RateConfig pushes itself to the Booking Engine on create/update.
+      await syncRateConfigUpsert(item);
 
       success(res, bigintToNumber(item), 'Success', 200);
     } catch (err: any) {
@@ -2571,10 +2577,13 @@ const { name, description, image, status } = req.body;
       if (description !== undefined) data.description = description;
       if (image !== undefined) data.image = imagePath;
       if (status !== undefined) data.status = status === true || status === 1 || status === '1' || status === 'true' || status?.value === true || status?.value === 1 ? 1 : (status === false || status === 0 || status === '0' || status === 'false' || status?.value === false || status?.value === 0 ? 0 : status);
+      // Backfill configs created before uuid was persisted locally.
+      if (!(existing as any).uuid) data.uuid = crypto.randomUUID();
 
       await prisma.rate_configs.update({ where: { id }, data });
 
       const updated = await prisma.rate_configs.findUnique({ where: { id } });
+      await syncRateConfigUpsert(updated);
       success(res, bigintToNumber(updated), 'Success');
     } catch (err: any) {
       console.error('Rate config update error:', err);
@@ -2601,6 +2610,8 @@ const { name, description, image, status } = req.body;
         where: { id },
         data: { deleted_at: new Date(), deleted_by: userId, status: 0 },
       });
+
+      await syncRateConfigDelete(existing);
 
       success(res, null, 'Success');
     } catch (err: any) {
