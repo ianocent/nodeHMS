@@ -11,6 +11,35 @@ export const STATUSES: OptionItem[] = [
 ];
 
 /**
+ * Coerces a request value into the 0/1 int a `status` column expects.
+ *
+ * The client sends `status` as a checkbox toggle, so it arrives as a real
+ * boolean (`table-edit` seeds `dataval.status = true` on every inline Add).
+ * Prisma rejects a boolean for an Int column outright — PrismaClientValidationError
+ * -> 500 — so this has to be normalised before it reaches the query.
+ *
+ * Returns `fallback` (default: Active, matching every base controller which pins
+ * `'status' => config('cms.status.active.id')`) when the value is absent.
+ */
+export function statusFlag(value: unknown, fallback: number = 1): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return statusFlag((value as any).value ?? (value as any).label, fallback);
+  }
+  if (Array.isArray(value)) {
+    const first = value[0];
+    return statusFlag(first && typeof first === 'object' ? (first as any).value : first, fallback);
+  }
+  if (value === true) return 1;
+  if (value === false) return 0;
+  const num = Number(value);
+  if (!Number.isNaN(num)) return num === 0 ? 0 : 1;
+  const str = String(value).trim().toLowerCase();
+  if (str === 'true' || str === 'active' || str === 'yes') return 1;
+  return 0;
+}
+
+/**
  * Laravel HasStatus::getStatus() parity — returns {value, label} for a status id.
  * Uses STATUSES config (active/inactive) as default.
  */

@@ -174,6 +174,65 @@ function sanitizeBody(body: any): any {
   return out;
 }
 
+/**
+ * Normalises a sanitised payload against the model's real scalar types.
+ *
+ * The client renders `status` and other 0/1 flags as checkboxes, so they arrive
+ * as real booleans, and numeric inputs arrive as strings. Prisma refuses both
+ * outright for an Int column ("Expected Int or Null, provided Boolean"), which
+ * turned every create on such a table into a 500. Coercing here - keyed off the
+ * generated DMMF rather than a hand-written per-model list - means a model is
+ * correct the moment it is added, not when someone remembers to patch it.
+ *
+ * Only fields that actually exist on the model are touched, so relations and
+ * unknown keys are left for Prisma to reject as before.
+ */
+function coerceToSchema(model: string, data: any): any {
+  for (const key of Object.keys(data)) {
+    const type = fieldType(model, key);
+    if (!type) continue;
+    const value = data[key];
+    if (value === null || value === undefined) continue;
+
+    switch (type) {
+      case 'Int':
+      case 'Float': {
+        if (typeof value === 'boolean') { data[key] = value ? 1 : 0; break; }
+        if (typeof value === 'string') {
+          const n = Number(value);
+          if (Number.isFinite(n)) data[key] = n;
+        }
+        break;
+      }
+      case 'BigInt': {
+        if (typeof value === 'boolean') { data[key] = value ? 1n : 0n; break; }
+        if (typeof value === 'string' && /^\d+$/.test(value.trim())) data[key] = BigInt(value.trim());
+        break;
+      }
+      case 'Boolean': {
+        if (typeof value === 'boolean') break;
+        if (typeof value === 'number') { data[key] = value !== 0; break; }
+        if (typeof value === 'string') {
+          const s = value.trim().toLowerCase();
+          if (['true', '1', 'yes', 'on'].includes(s)) data[key] = true;
+          else if (['false', '0', 'no', 'off'].includes(s)) data[key] = false;
+        }
+        break;
+      }
+      case 'String': {
+        // A {value,label} object is already unwrapped by sanitizeBody, but a
+        // numeric id still has to become text (rate_inclusives.stock, etc).
+        if (typeof value === 'number' || typeof value === 'bigint') data[key] = String(value);
+        else if (typeof value === 'boolean') data[key] = value ? '1' : '0';
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return data;
+}
+
 // Models whose rows must stay scoped to the authenticated user's property.
 // Models whose tables carry property_id and are auto-scoped in Laravel
 // (HasProperties global scope). Route params arrive in singular or plural
@@ -878,13 +937,25 @@ export class GenericController {
 
       const data = model === 'allotment' ? allotmentBody(sanitizeBody(req.body)) : sanitizeBody(req.body);
       if (!data.property_id && req.user?.lastProperty) data.property_id = BigInt(req.user.lastProperty);
-      data.created_at = new Date();
-      data.updated_at = new Date();
+      // The DMMF is keyed by the Prisma model name (`yields`), while routes set
+      // `req.params.model` to the singular route segment (`yield`), so the schema
+      // lookups have to go through toPlural() like the delegate lookup does.
+      const dmmfModel = this.toPlural(model);
+      coerceToSchema(dmmfModel, data);
+      // Not every table carries the audit stamps - `yields` has neither column, so
+      // stamping them unconditionally made Prisma reject the whole insert with
+      // "Unknown argument" and every Yield Management create 500'd.
+      if (hasField(dmmfModel, 'created_at')) data.created_at = new Date();
+      if (hasField(dmmfModel, 'updated_at')) data.updated_at = new Date();
       let record;
       try {
         record = await modelDelegate.create({ data });
       } catch (e: any) {
-        if (e?.message?.includes('property_id')) {
+        // `yields` (Yield Management) declares property_id as required, but the
+        // retry below used to strip it on any error mentioning the column, turning
+        // a type error into "Argument property_id is missing". Only models that
+        // genuinely have no property_id column may drop it.
+        if (e?.message?.includes('property_id') && !hasField(dmmfModel, 'property_id')) {
           delete data.property_id;
           record = await modelDelegate.create({ data });
         } else {
@@ -927,7 +998,9 @@ async update(req: Request, res: Response): Promise<void> {
       }
 
       const data = model === 'allotment' ? allotmentBody(sanitizeBody(req.body)) : sanitizeBody(req.body);
-      data.updated_at = new Date();
+      const dmmfModel = this.toPlural(model);
+      coerceToSchema(dmmfModel, data);
+      if (hasField(dmmfModel, 'updated_at')) data.updated_at = new Date();
       const record = await modelDelegate.update({ where: { id: parsedId }, data });
       await writeAudit(getPrisma(), req, {
         table: this.toPlural(model),

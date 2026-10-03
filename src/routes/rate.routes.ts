@@ -183,9 +183,11 @@ router.get('/bar/minimum-rate', authMiddleware, requirePermission(87, 'view'), B
 router.put('/bar/minimum-rate/:id', authMiddleware, requirePermission(87, 'edit'), BarController.updateRoomType);
 
 // Bar inclusives (frontend sends bar_id as query param)
-// These are their own table (bar_inclusives). They used to be routed to the rate
-// handlers, which wrote rows into rate_inclusives, so BAR Setup "Inclusive"
-// could not be stored. See RateAddonController.barInclusiveList.
+// These rows live in `rate_inclusives` keyed by rate_id = the bar's id, because
+// Laravel App\Models\Bar is a `rates` row (module='bar') and
+// BarInclusiveController@store creates a RateInclusive against it. They keep
+// their own handlers only for the menuId 87 permission scope and the
+// BarInclusive::formatTable() column shape.
 router.get('/bar/inclusives', authMiddleware, requirePermission(87, 'view'), RateAddonController.barInclusiveList);
 router.post('/bar/inclusives', authMiddleware, requirePermission(87, 'add'), RateAddonController.barInclusiveStore);
 router.put('/bar/inclusives/:id', authMiddleware, requirePermission(87, 'edit'), RateAddonController.barInclusiveUpdate);

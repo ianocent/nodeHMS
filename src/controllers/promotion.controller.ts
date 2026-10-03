@@ -105,18 +105,19 @@ export class PromotionController {
         where.property_id = propertyId;
       }
 
-      // If rate_id provided, filter onlyActive promotions linked to that rate
-      if (rateId) {
-        const linkedPromotionIds = await prisma.model_has_promotions.findMany({
-          where: {
-            model_id: BigInt(rateId),
-            model_type: 'App\\Models\\Rate'
-          },
-          select: { promotion_id: true }
-        });
-        const ids = linkedPromotionIds.map(lp => lp.promotion_id);
-        where.id = { in: ids };
-        where.status = 1; // onlyActive
+      // Laravel PromotionController@index: when `rate_id` is present it only adds
+      // `onlyActive()`. This endpoint is the *picker* behind "Add Promo" on the Rate
+      // Promotion Type tab, so it must offer every active promotion as a candidate.
+      // Restricting it to promotions already linked through model_has_promotions
+      // (which is what RateRelationController@promotion does) left the popup empty on
+      // a rate with no promotions yet, so there was nothing to pick.
+      if (rateId) where.status = 1;
+
+      // Set by ratePromotionList(): restrict to promotions linked to this rate.
+      // Empty string means "linked to nothing", which is a legitimate empty grid.
+      const onlyLinked = req.query.only_linked as string | undefined;
+      if (onlyLinked !== undefined) {
+        where.id = { in: onlyLinked === '' ? [] : onlyLinked.split(',').map((x) => BigInt(x)) };
       }
 
       // Laravel Promotion::formatTable() parity (10 kolom)
@@ -200,13 +201,24 @@ export class PromotionController {
     }
   }
 
-  //  RateRelationController::promotion parity (/rate/promotion) 
+  //  RateRelationController::promotion parity (/rate/promotion)
   static async ratePromotionList(req: Request, res: Response): Promise<void> {
     try {
       const rateId = String(req.query.rate_id ?? '');
       if (!/^\d+$/.test(rateId)) { notFound(res, 'Rate is not found'); return; }
       const rate = await prisma.rates.findUnique({ where: { id: BigInt(rateId) } });
       if (!rate) { notFound(res, 'Rate is not found'); return; }
+
+      // This is the grid *under* the picker: RateRelationController@promotion uses
+      // `whereHas('Rate', ... ->where('id', $rate->id))`, i.e. only the promotions
+      // actually linked to this rate. list() no longer applies that filter (it is
+      // the candidate picker), so it has to be applied here.
+      const linked = await prisma.model_has_promotions.findMany({
+        where: { model_id: BigInt(rateId), model_type: 'App\\Models\\Rate' },
+        select: { promotion_id: true },
+      });
+      const ids = linked.map((l: any) => l.promotion_id);
+      req.query.only_linked = ids.join(',');
       return PromotionController.list(req, res);
     } catch (err: any) {
       console.error('Rate promotion list error:', err);

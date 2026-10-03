@@ -388,7 +388,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { name, type_company, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
+      const { name, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (!name) { badRequest(res, 'name required'); return; }
@@ -403,13 +403,18 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       if (dupName) { badRequest(res, dupName); return; }
       const d = await prisma.company_profiles.create({
         data: {
-          property_id: pid, name, type_company: type_company || 'Corporate', email, telp, mobile_phone,
+          property_id: pid, name, type_company: v('type_company') || 'Corporate', email, telp, mobile_phone,
           billing_address, billing_city, billing_country,
           billing_region: v('billing_region'), billing_postal_code: v('billing_postal_code'),
           mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country'), mailing_city: v('mailing_city'), mailing_postal_code: v('mailing_postal_code'),
           term: v('term'), remarks: v('remarks'), short_code: v('short_code'), description: v('description'),
           business_regional: v('business_regional'), IATA: v('IATA'),
-          website: v('website'), fax: v('fax'), staff_in_charge: v('staff_in_charge'), billing: v('billing'),
+          website: v('website'), fax: v('fax'), staff_in_charge: v('staff_in_charge'),
+          // `billing` is a 0/1 flag (config cms.billing: By Company / By Department)
+          // in a *string* column, and the form returns it as {value,label}. Passing
+          // the raw number made Prisma reject it ("Expected String or Null,
+          // provided Int"), so a new company could never be saved.
+          billing: v('billing') === undefined || v('billing') === null ? v('billing') : String(v('billing')),
           gst: b('gst'), is_stop_credit: b('is_stop_credit'), is_pay_commission: b('is_pay_commission'), is_charge_back: b('is_charge_back'), is_surcharge_opt_out: b('is_surcharge_opt_out'), blacklist: b('blacklist'),
           commission_rate: v('commission_rate') ?? undefined, based_online_commission: v('based_online_commission') ?? undefined,
           // `status` is a toggle on the client, so it arrives as a boolean while
@@ -430,7 +435,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try {
       const id = idP(req.params.id); const existing = await prisma.company_profiles.findUnique({ where: { id } });
       if (!existing) { notFound(res); return; }
-      const { name, type_company, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
+      const { name, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       // Laravel CompanyProfileController@update:503 (own id excluded).
@@ -441,13 +446,20 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
         if (dupName) { badRequest(res, dupName); return; }
       }
       const data: any = { updated_at: new Date() };
-      if (name !== undefined) data.name = name; if (type_company !== undefined) data.type_company = type_company;
+      if (name !== undefined) data.name = name;
+      // `type_company` is a select, so the form posts {value,label}. Assigning the
+      // raw object made Prisma reject the whole update ("Unknown argument `value`"),
+      // which is why editing a company always failed. Unwrap it like every other
+      // shaped field.
+      if (v('type_company') !== undefined) data.type_company = v('type_company');
       if (email !== undefined) data.email = email; if (telp !== undefined) data.telp = telp;
       if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (billing_address !== undefined) data.billing_address = billing_address;
       if (billing_city !== undefined) data.billing_city = billing_city; if (billing_country !== undefined) data.billing_country = billing_country;
-      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'mailing_country', 'mailing_city', 'mailing_postal_code', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA', 'website', 'fax', 'staff_in_charge', 'billing']) {
+      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'mailing_country', 'mailing_city', 'mailing_postal_code', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA', 'website', 'fax', 'staff_in_charge']) {
         if (v(k) !== undefined) data[k] = v(k);
       }
+      // `billing` is a 0/1 flag in a string column - see store() above.
+      if (v('billing') !== undefined) data.billing = v('billing') === null ? null : String(v('billing'));
       for (const k of ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out', 'blacklist']) {
         if (b(k) !== undefined) data[k] = b(k);
       }

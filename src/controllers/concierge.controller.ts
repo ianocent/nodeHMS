@@ -5,7 +5,7 @@ import * as path from 'path';
 import { success, error, badRequest, notFound } from '../utils/response';
 import { TABLES } from '../utils/tableMeta';
 import { getPermissionFlags } from '../middleware/permission.middleware';
-import { STATUSES, ITEM_LOST_FOUND_STATUS, STATUS_LOST } from '../utils/cmsConfig';
+import { STATUSES, ITEM_LOST_FOUND_STATUS, STATUS_LOST, statusFlag } from '../utils/cmsConfig';
 import { storageRoot } from '../utils/storage';
 
 
@@ -108,7 +108,7 @@ export class ConciergeController {
       const level = [1, 2, 3].includes(Number(levelRaw)) ? Number(levelRaw) : 1;
 
       const data = await prisma.phone_book_groups.create({
-        data: { property_id: pid, group: level, parent_id: parent_id ? BigInt(parent_id) : null, name, sort: sort || 0, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, group: level, parent_id: parent_id ? BigInt(parent_id) : null, name, sort: sort || 0, status: statusFlag(status), created_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Group created', 200);
     } catch (err: any) { console.error('Phone book group store error:', err); error(res, 'Failed to create group', 500); }
@@ -121,7 +121,7 @@ export class ConciergeController {
       // Keep the level pinned so an edit can never demote a row out of its tab.
       const levelRaw = String((req.params as any).groupLevel ?? '1');
       const level = [1, 2, 3].includes(Number(levelRaw)) ? Number(levelRaw) : 1;
-      await prisma.phone_book_groups.update({ where: { id }, data: { group: level, parent_id: parent_id ? BigInt(parent_id) : null, name, sort, status, updated_at: new Date(), updated_by: req.user?.id } });
+      await prisma.phone_book_groups.update({ where: { id }, data: { group: level, parent_id: parent_id ? BigInt(parent_id) : null, name, sort, status: status === undefined ? undefined : statusFlag(status), updated_at: new Date(), updated_by: req.user?.id } });
       success(res, null, 'Group updated');
     } catch (err: any) { error(res, 'Failed to update group', 500); }
   }
@@ -167,7 +167,7 @@ export class ConciergeController {
       if (!name) { badRequest(res, 'name is required'); return; }
 
       const data = await prisma.phone_books.create({
-        data: { property_id: pid, phone_book_group_id: BigInt(phone_book_group_id), name, address, telp, fax, email, contact_name, remark, sort: sort || 0, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, phone_book_group_id: BigInt(phone_book_group_id), name, address, telp, fax, email, contact_name, remark, sort: sort || 0, status: statusFlag(status), created_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Phone book created', 200);
     } catch (err: any) { console.error('Phone book store error:', err); error(res, 'Failed to create phone book', 500); }
@@ -177,7 +177,7 @@ export class ConciergeController {
     try {
       const id = idParam(req.params.id);
       const { phone_book_group_id, name, address, telp, fax, email, contact_name, remark, sort, status } = req.body;
-      await prisma.phone_books.update({ where: { id }, data: { phone_book_group_id: phone_book_group_id ? BigInt(phone_book_group_id) : undefined, name, address, telp, fax, email, contact_name, remark, sort, status, updated_at: new Date(), updated_by: req.user?.id } });
+      await prisma.phone_books.update({ where: { id }, data: { phone_book_group_id: phone_book_group_id ? BigInt(phone_book_group_id) : undefined, name, address, telp, fax, email, contact_name, remark, sort, status: status === undefined ? undefined : statusFlag(status), updated_at: new Date(), updated_by: req.user?.id } });
       success(res, null, 'Phone book updated');
     } catch (err: any) { error(res, 'Failed to update phone book', 500); }
   }
@@ -310,7 +310,7 @@ export class ConciergeController {
       if (!vehicle_no) { badRequest(res, 'vehicle_no is required'); return; }
 
       const data = await prisma.car_parks.create({
-        data: { property_id: pid, room: room ? parseInt(room) : null, remark, car_park_lot, vehicle_no, folio, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, room: room ? parseInt(room) : null, remark, car_park_lot, vehicle_no, folio, status: statusFlag(status), created_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Car park created', 200);
     } catch (err: any) { console.error('Car park store error:', err); error(res, 'Failed to create car park', 500); }
@@ -320,7 +320,7 @@ export class ConciergeController {
     try {
       const id = idParam(req.params.id);
       const { room, remark, car_park_lot, vehicle_no, folio, status } = req.body;
-      await prisma.car_parks.update({ where: { id }, data: { room: room ? parseInt(room) : null, remark, car_park_lot, vehicle_no, folio, status, updated_at: new Date(), updated_by: req.user?.id } });
+      await prisma.car_parks.update({ where: { id }, data: { room: room ? parseInt(room) : null, remark, car_park_lot, vehicle_no, folio, status: status === undefined ? undefined : statusFlag(status), updated_at: new Date(), updated_by: req.user?.id } });
       success(res, null, 'Car park updated');
     } catch (err: any) { error(res, 'Failed to update car park', 500); }
   }
@@ -437,6 +437,19 @@ export class ConciergeController {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const master: any = { statuses: STATUSES };
+      const levelRaw = String((req.params as any).groupLevel ?? '1');
+      const level = [1, 2, 3].includes(Number(levelRaw)) ? Number(levelRaw) : 1;
+
+      // Level 2 and 3 rows hang off a level N-1 parent (PhoneBookGroup2/3
+      // validate `parent_id` as required on store), so the form needs that list.
+      if (level > 1) {
+        master.parent_groups = await prisma.phone_book_groups.findMany({
+          where: { property_id: pid, group: level - 1, deleted_at: null },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        });
+      }
+
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) {
         success(res, { status: 0 }, 'Success', 200, { master });
@@ -455,7 +468,7 @@ export class ConciergeController {
       if (!item) { badRequest(res, 'item is required'); return; }
 
       const data = await prisma.lost_and_founds.create({
-        data: { property_id: pid, ref_no, report_date: report_date ? new Date(report_date) : null, item, room: room ? parseInt(room) : null, room_founder: room_founder ? parseInt(room_founder) : null, owner_item, item_status, hotel_location, item_description: description, instruction, status: status ?? 0, created_at: new Date(), created_by: req.user?.id },
+        data: { property_id: pid, ref_no, report_date: report_date ? new Date(report_date) : null, item, room: room ? parseInt(room) : null, room_founder: room_founder ? parseInt(room_founder) : null, owner_item, item_status, hotel_location, item_description: description, instruction, status: statusFlag(status), created_at: new Date(), created_by: req.user?.id },
       });
       success(res, bigintToNumber(data), 'Lost & found created', 200);
     } catch (err: any) { console.error('Lost & found store error:', err); error(res, 'Failed to create lost & found', 500); }
@@ -465,7 +478,7 @@ export class ConciergeController {
     try {
       const id = idParam(req.params.id);
       const { ref_no, report_date, item, room, room_founder, owner_item, item_status, hotel_location, description, instruction, status } = req.body;
-      await prisma.lost_and_founds.update({ where: { id }, data: { report_date: report_date ? new Date(report_date) : undefined, item, room: room ? parseInt(room) : null, room_founder: room_founder ? parseInt(room_founder) : null, owner_item, item_status, hotel_location, item_description: description, instruction, status, updated_at: new Date(), updated_by: req.user?.id } });
+      await prisma.lost_and_founds.update({ where: { id }, data: { report_date: report_date ? new Date(report_date) : undefined, item, room: room ? parseInt(room) : null, room_founder: room_founder ? parseInt(room_founder) : null, owner_item, item_status, hotel_location, item_description: description, instruction, status: status === undefined ? undefined : statusFlag(status), updated_at: new Date(), updated_by: req.user?.id } });
       success(res, null, 'Lost & found updated');
     } catch (err: any) { error(res, 'Failed to update lost & found', 500); }
   }

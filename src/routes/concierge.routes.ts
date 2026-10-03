@@ -50,18 +50,24 @@ router.get('/concierge/phone-book-group-3', authMiddleware, phoneBookGroupList(3
 router.post('/concierge/phone-book-group-1', authMiddleware, phoneBookGroupStore(1));
 router.post('/concierge/phone-book-group-2', authMiddleware, phoneBookGroupStore(2));
 router.post('/concierge/phone-book-group-3', authMiddleware, phoneBookGroupStore(3));
-router.get('/concierge/phone-book-group-1/create', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-2/create', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-3/create', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-1/:id', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-2/:id', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-3/:id', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-1/:id/update', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-1/:id/edit', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-2/:id/update', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-2/:id/edit', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-3/:id/update', authMiddleware, ConciergeController.phoneBookGroupForm);
-router.get('/concierge/phone-book-group-3/:id/edit', authMiddleware, ConciergeController.phoneBookGroupForm);
+// The form endpoints need the level too: PhoneBookGroup2/3Controller validate
+// `parent_id` as required and expose a Parent Group select built from level N-1.
+const phoneBookGroupForm = (level: number) => (req: any, res: any) => {
+  req.params.groupLevel = String(level);
+  return ConciergeController.phoneBookGroupForm(req, res);
+};
+router.get('/concierge/phone-book-group-1/create', authMiddleware, phoneBookGroupForm(1));
+router.get('/concierge/phone-book-group-2/create', authMiddleware, phoneBookGroupForm(2));
+router.get('/concierge/phone-book-group-3/create', authMiddleware, phoneBookGroupForm(3));
+router.get('/concierge/phone-book-group-1/:id', authMiddleware, phoneBookGroupForm(1));
+router.get('/concierge/phone-book-group-2/:id', authMiddleware, phoneBookGroupForm(2));
+router.get('/concierge/phone-book-group-3/:id', authMiddleware, phoneBookGroupForm(3));
+router.get('/concierge/phone-book-group-1/:id/update', authMiddleware, phoneBookGroupForm(1));
+router.get('/concierge/phone-book-group-1/:id/edit', authMiddleware, phoneBookGroupForm(1));
+router.get('/concierge/phone-book-group-2/:id/update', authMiddleware, phoneBookGroupForm(2));
+router.get('/concierge/phone-book-group-2/:id/edit', authMiddleware, phoneBookGroupForm(2));
+router.get('/concierge/phone-book-group-3/:id/update', authMiddleware, phoneBookGroupForm(3));
+router.get('/concierge/phone-book-group-3/:id/edit', authMiddleware, phoneBookGroupForm(3));
 router.put('/concierge/phone-book-group-1/:id', authMiddleware, phoneBookGroupUpdate(1));
 router.put('/concierge/phone-book-group-2/:id', authMiddleware, phoneBookGroupUpdate(2));
 router.put('/concierge/phone-book-group-3/:id', authMiddleware, phoneBookGroupUpdate(3));
