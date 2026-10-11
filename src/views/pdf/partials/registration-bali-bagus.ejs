@@ -1,0 +1,96 @@
+<div class="header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+    <div class="logo-container" style="flex: 1;">
+        <img src="data:image/png;base64,<%= logoBase64 %>" 
+            alt="Logo Company" 
+            style="max-height: 80px; object-fit: contain;">
+    </div>
+    <div style="text-align: right;">
+        <div style="font-weight:bold;">REGISTRATION FORM</div>
+        <div style="font-size: 12px;">Prevailing 15% government taxes<br>10% service charge will be added to your bill</div>
+    </div>
+</div>
+
+<table border="1" cellspacing="0" cellpadding="4" width="100%">
+    <tr>
+        <td><strong>Confirmation No.</strong><br><%= folioNumber %></td>
+        <td><strong>Arrival Date</strong><br><%= checkInDate %></td>
+        <td><strong>Departure Date</strong><br><%= checkOutDate %></td>
+        <td><strong>Room No</strong><br><%= roomNumber %></td>
+    </tr>
+    <tr>
+        <td><strong>Daily Rate</strong><br><%= roomRate %></td>
+        <td><strong>No. of Guests</strong><br><%= adult %> / <%= child %></td>
+        <td><strong>Advanced Deposit</strong><br>0.00</td>
+        <td><strong>Room Type</strong><br><%= roomType %></td>
+    </tr>
+</table>
+
+<br>
+
+<table border="1" cellspacing="0" cellpadding="4" width="100%">
+    <tr>
+        <td><strong>Name</strong><br><%= surname %> <%= firstName %></td>
+        <td><strong>Company's Name</strong><br><%= company %></td>
+    </tr>
+    <tr>
+        <td><strong>HP/Phone</strong><br><%= telephone %></td>
+        <td><strong>Fax</strong><br>-</td>
+    </tr>
+    <tr>
+        <td><strong>Email</strong><br><%= email %></td>
+        <td><strong>Company’s Address</strong><br><%= $company ?? '-' %></td>
+    </tr>
+    <tr>
+        <td><strong>Address</strong><br><%= address %></td>
+        <td></td>
+    </tr>
+</table>
+
+<br>
+
+<table border="1" cellspacing="0" cellpadding="4" width="100%">
+    <tr>
+        <td><strong>Nationality</strong><br><%= nationality %></td>
+        <td><strong>Country</strong><br><%= country %></td>
+        <td><strong>Passport No.</strong><br><%= passportId %></td>
+        <td><strong>Date of Expiry</strong><br>-</td>
+    </tr>
+    <tr>
+        <td><strong>Place of Issue</strong><br>-</td>
+        <td><strong>Date of Birth</strong><br><%= dateOfBirth %></td>
+        <td colspan="2"></td>
+    </tr>
+</table>
+
+<br>
+
+<div>
+    <strong>My accounts will be settled by :</strong><br>
+    [ ] CASH &nbsp; [ ] Credit Card &nbsp; [ ] Company &nbsp; [ ] Voucher
+</div>
+
+<br>
+
+<div style="font-size: 12px;">
+    <ol>
+        <li>Hotel licensing regulations</li>
+        <li>Please produce your passport or ID for verification by the receptionist</li>
+        <li>The hotel will not hold responsible for loss of money/valuables left in the rooms</li>
+        <li>We acknowledge personal liability of all charges incurred during our stay...</li>
+    </ol>
+</div>
+
+<br><br>
+
+<table width="100%">
+    <tr>
+        <td><strong>Check-in by:</strong> HENNA</td>
+        <td><strong>Created by:</strong> RENDRA</td>
+        <td><strong>Guest Signature:</strong> ____________________</td>
+    </tr>
+</table>
+
+<br><br>
+<div style="text-align: center; font-size: 12px; color: gray;">
+    <%= hotelAddress %>
+</div>

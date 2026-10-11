@@ -1,11 +1,10 @@
 import { prisma } from '../../config/prisma';
 // Folio documents ×9 — port of Laravel Report/Batch/Folio/*Controller (SnappyPDF
-// + blade views) rendered via puppeteer renderPdf. Each builder mirrors the
-// standard blade layout sections; property 1002/1003 "-olive" variants share the
-// same data with minor label differences folded into the standard layout.
+// + blade views) rendered via puppeteer. Each builder mirrors the standard blade
+// layout sections.
 import { Request, Response } from 'express';
 import { success, error, notFound, badRequest } from '../../utils/response';
-import { renderPdf } from './excel';
+import { PdfService } from '../../services/pdf.service';
 import { AuthController } from '../auth.controller';
 
 
@@ -466,8 +465,28 @@ function buildOfficialReceipt(ctx: DocContext): string {
   return docShell('Official Receipt', body);
 }
 
+// The `src/views/pdf/*.ejs` set was never usable: the blade→EJS conversion left raw PHP
+// inside the tags (12 of 25 fail to compile — `@switch($hotel)`, `public_path()`,
+// `collect()`, `strtoupper()`) and the rest compile but throw at render because they read
+// variables the mapper never supplies (`companies`, `rooms`, `dailyRates`, `c.*`, `t.*`).
+// Every one of the 9 folio document types therefore answered 500 "Failed to generate PDF
+// document". The HTML builders below render from the same DocContext and are wired up
+// here instead; the EJS path stays out of the request flow until the templates are ported.
+const FOLIO_DOCUMENT_BUILDERS: Record<string, (ctx: DocContext) => string> = {
+  'pre-registration': (ctx) => buildPreRegistration(ctx, 'Pre Registration Form'),
+  'registration-form': buildRegistrationForm,
+  'guest-folio': buildGuestFolio,
+  'letter-of-agreement': buildLetterOfAggrement,
+  'confirmation': buildConfirmationFO,
+  'guest-invoice': (ctx) => buildInvoiceLike(ctx, 'Guest Invoice', false),
+  'proforma-invoice': (ctx) => buildInvoiceLike(ctx, 'Proforma Invoice', true),
+  'company-invoice': buildCompanyInvoice,
+  'official-receipt': buildOfficialReceipt,
+};
+
 export async function generateFolioDocumentPdf(req: Request, res: Response, folioId: string, documentType: string): Promise<void> {
-  if (!(FOLIO_DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
+  const build = FOLIO_DOCUMENT_BUILDERS[documentType];
+  if (!build) {
     badRequest(res, `Unknown folio document type: ${documentType}`);
     return;
   }
@@ -478,29 +497,18 @@ export async function generateFolioDocumentPdf(req: Request, res: Response, foli
     return;
   }
 
-  let html: string;
-  switch (documentType) {
-    case 'pre-registration': html = buildPreRegistration(ctx, 'Pre Registration'); break;
-    case 'registration-form': html = buildRegistrationForm(ctx); break;
-    case 'guest-folio': html = buildGuestFolio(ctx); break;
-    case 'letter-of-aggrement': html = buildLetterOfAggrement(ctx); break;
-    case 'confirmation': html = buildConfirmationFO(ctx); break;
-    case 'guest-invoice': html = buildInvoiceLike(ctx, 'Guest Invoice', false); break;
-    case 'proforma-invoice': html = buildInvoiceLike(ctx, 'Proforma Invoice', true); break;
-    case 'company-invoice': html = buildCompanyInvoice(ctx); break;
-    case 'official-receipt': html = buildOfficialReceipt(ctx); break;
-    default:
-      badRequest(res, `Unknown folio document type: ${documentType}`);
-      return;
+  try {
+    const pdf = await PdfService.generateHtmlPdf(build(ctx));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${documentType}-${ctx.folio.folio_number ?? folioId}.pdf"`
+    );
+    res.send(pdf);
+  } catch (err: any) {
+    console.error('generateFolioDocumentPdf rendering error:', err);
+    error(res, 'Failed to generate PDF document', 500);
   }
-
-  const pdf = await renderPdf(html, { landscape: false });
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader(
-    'Content-Disposition',
-    `attachment; filename="${documentType}-${ctx.folio.folio_number ?? folioId}.pdf"`
-  );
-  res.send(pdf);
 }
 
 // JSON preview of assembled context (kept for debugging parity checks)

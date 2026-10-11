@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guest Folio</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px 25px;
+            font-size: 16px;
+            line-height: 1.4;
+            color: #000;
+        }
+        .top { margin-bottom: 10px; }
+        .hotel-name { font-weight: bold; letter-spacing: 0.5px; }
+        .phone { margin-top: 2px; }
+        .title { text-align: center; margin: 8px 0 12px 0; font-size: 22px; font-weight: bold; }
+        .subtitle { text-align: center; margin: 0 0 12px 0; font-size: 12px; }
+        .info { margin-bottom: 10px; }
+        .info-row { margin: 2px 0; }
+        .info-label { display: inline-block; width: 150px; }
+        .table { width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 16px; }
+        .thead th { text-align: left; border-bottom: 1px solid #000; padding-bottom: 4px; }
+        .tbody td { padding-top: 8px; }
+        .col-date { width: 18%; }
+        .col-type { width: 20%; }
+        .col-desc { width: 25%; }
+        .col-amt { width: 15%; text-align: right; }
+        .col-bal { width: 15%; text-align: right; }
+        .footer-line { border-top: 1px solid #000; margin-top: 40px; padding-top: 6px; }
+        .footer-grid { width: 100%; }
+        .footer-grid td { vertical-align: top; }
+        .right { text-align: right; }
+    </style>
+</head>
+<body>
+    <div class="title">GUEST FOLIO</div>
+
+    <div class="info">
+        <!-- <div class="info-row"><span class="info-label">Company Name</span> : <span style="text-transform: uppercase;"> <%= company %> </span></div> -.
+        <div class="info-row"><span class="info-label">Name</span> : <span style="text-transform: uppercase;"> <%= guest %> </span></div>
+        <div class="info-row"><span class="info-label">Bill No</span> : <span><%= folioNo ?? '' %></span></div>
+        <div class="info-row"><span class="info-label">Room</span> : <span><%= roomNo %></span></div>
+        <div class="info-row"><span class="info-label">Arrival</span> : <span><%= arrival %></span></div>
+        <div class="info-row"><span class="info-label">Departure</span> : <span><%= departure %></span></div>
+    </div>
+
+    <%
+        $txs = collect($transactions ?? []);
+        $runningBalance = 0.0;
+        $rows = $txs.map(function ($t) use (&$runningBalance) {
+            // Normalize structure whether array or object
+            $date = is_array($t) ? (t.date ?? null) : ($t.date ?? null);
+            $type = is_array($t) ? strtoupper(t.type ?? '') : strtoupper($t.codePost.name ?? '');
+            $desc = is_array($t) ? strtoupper(t.description ?? '') : strtoupper($t.typePayment.name ?? '');
+            $remark = is_array($t)
+                ? strtoupper(t.remark ?? '')
+                : strtoupper($t.remark ?? '');
+            $rawAmount = is_array($t) ? (t.amount ?? 0) : ($t.type_amount === 'PLUS' ? $t.total : $t.total * -1);
+            $amount = is_numeric($rawAmount) ? $rawAmount : parseFloat(str_replace([','], '', $rawAmount);)
+            $runningBalance += $amount;
+            return [
+                'date' => $date,
+                'type' => $type,
+                'description' => $desc,
+                'remark' => $remark,
+                'amount' => $amount,
+                'balance' => $runningBalance,
+            ];
+        });
+
+        $formatMoney = function ($n) { return (n).toLocaleString('en-US', {minimumFractionDigits: 2}); };
+
+        // Determine "In word" amount: take max absolute amount in list or 0
+        $maxAbs = $rows.max(function ($r) { return abs(r.amount); }) ?? 0;
+
+        // Simple number to words (English) for integer part only
+        function numberToWords($number) {
+            $number = (int)round($number);
+
+            // Tambahkan dukungan angka negatif
+            if ($number < 0) {
+                return 'Minus ' . numberToWords(abs($number));
+            }
+
+            if ($number === 0) return 'Zero';
+
+            $units = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 
+                    'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 
+                    'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+            $tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+            $scales = ['', 'Thousand', 'Million', 'Billion'];
+
+            $words = [];
+            $scaleIndex = 0;
+
+            while ($number > 0) {
+                $chunk = $number % 1000;
+                if ($chunk) {
+                    $chunkWords = [];
+                    $hundreds = intdiv($chunk, 100);
+                    $remainder = $chunk % 100;
+
+                    if ($hundreds) {
+                        $chunkWords[] = $units[$hundreds] . ' Hundred';
+                    }
+
+                    if ($remainder) {
+                        if ($remainder < 20) {
+                            $chunkWords[] = $units[$remainder];
+                        } else {
+                            $chunkWords[] = $tens[intdiv($remainder, 10)] . 
+                                ($remainder % 10 ? ' ' . $units[$remainder % 10] : '');
+                        }
+                    }
+
+                    $chunkStr = trim(implode(' ', $chunkWords));
+                    if ($scales[$scaleIndex]) {
+                        $chunkStr .= ' ' . $scales[$scaleIndex];
+                    }
+
+                    array_unshift($words, $chunkStr);
+                }
+
+                $number = intdiv($number, 1000);
+                $scaleIndex++;
+            }
+
+            return trim(implode(' ', $words));
+        }
+        $finalBalance = $rows.last()['balance'] ?? 0;
+        $inWord = numberToWords($finalBalance) . ' Rupiah';
+    %>
+
+    <table class="table">
+        <thead class="thead">
+            <tr>
+                <th class="col-date">Date</th>
+                <th class="col-type">Type</th>
+                <th class="col-desc">Description</th>
+                <th class="col-amt">Amount</th>
+                <th class="col-bal">Balance</th>
+            </tr>
+        </thead>
+        <tbody class="tbody">
+            <% rows.forEach(function(transaction) { %>
+                <tr>
+                    <td class="col-date"><%= row.date %></td>
+                    <td class="col-type"><%= row.type %> </td>
+                    <td class="col-desc"><%= row.description %> <%= row.remark %> </td>
+                    <td class="col-amt"><%= formatMoney(row.amount) %></td>
+                    <td class="col-bal"><%= formatMoney(row.balance) %></td>
+                </tr>
+            <% }); %>
+        </tbody>
+    </table>
+
+    <div class="footer-line"></div>
+    <table class="footer-grid">
+        <tr>
+            <td>
+                <div>In word :</div>
+                <div>* <%= inWord %> *</div>
+            </td>
+            <td class="right">
+                <div>BALANCE</div>
+                <div><%= formatMoney(finalBalance) %></div>
+            </td>
+        </tr>
+    </table>
+
+    <div style="margin-top: 18px;">
+        Printed by :<br>
+        <%= (auth().id() ?? '') %> - <%= new Date().toLocaleString('en-GB') %>
+    </div>
+</body>
+</html>
+

@@ -3,8 +3,9 @@ import { Request, Response } from 'express';
 import { success, error, badRequest, notFound, validationError } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { getStatusLabel } from '../utils/cmsConfig';
+import { nextGuestAccount } from '../utils/guestAccount';
 import { dataSearch } from '../utils/search';
-import { activeWhere, applyStatusScope, pushCondition, safeOrderBy, searchPredicate } from '../utils/querySafety';
+import { activeWhere, applyStatusScope, buildSearchWhere, pushCondition, safeOrderBy, searchPredicate } from '../utils/querySafety';
 import {
   MANDATORY_FIELD_LABELS,
   mandatoryCheckInBlock,
@@ -154,8 +155,15 @@ export class GuestController {
         ];
       }
 
+      // Merge Guest sends `search_field=first_name;last_name` / `search_value=John;Doe;`
+      // (Laravel macro('search_field') pairs the two lists by index). Reading the whole
+      // string as ONE column name made fieldType() miss, so the predicate was dropped
+      // and the grid always came back unfiltered. buildSearchWhere parses the pairs,
+      // validates each column against the schema and coerces the value to its type.
       if (searchField && searchValue) {
-        pushCondition(where, searchPredicate('guest_profiles', searchField, searchValue));
+        for (const condition of buildSearchWhere(req, { model: 'guest_profiles' }).AND ?? []) {
+          pushCondition(where, condition);
+        }
       }
 
       if (status) {
@@ -406,15 +414,7 @@ export class GuestController {
 
       const propertyId = req.user?.lastProperty;
 
-      // Generate account number — active rows only (soft-deleted excluded so
-      // numbers can't collide with a restored profile)
-      const lastAccount = await prisma.guest_profiles.findFirst({
-        where: { deleted_at: null },
-        orderBy: { account: 'desc' },
-        select: { account: true }
-      });
-      const lastNum = lastAccount?.account ? parseInt(lastAccount.account.replace('GA', '')) : 0;
-      const newAccount = `GA${String(lastNum + 1).padStart(6, '0')}`;
+      const newAccount = await nextGuestAccount();
 
       let imagePath = null;
       if (image) {
@@ -1022,7 +1022,9 @@ export class GuestController {
         ];
       }
       if (searchField && searchValue) {
-        pushCondition(where, searchPredicate('guest_profiles', searchField, searchValue));
+        for (const condition of buildSearchWhere(req, { model: 'guest_profiles' }).AND ?? []) {
+          pushCondition(where, condition);
+        }
       }
 
       const guests = await prisma.guest_profiles.findMany({
@@ -1733,20 +1735,46 @@ export class GuestController {
       };
 
       const data: any = {};
-      for (const key of ['status_profile', 'nationality_id', 'city_id', 'country_id', 'blacklist', 'status']) {
-        if (has(key)) data[key] = Number(pick(key));
+      const isEmptyShaped = (v: any): boolean =>
+        v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0) ||
+        (typeof v === 'object' && !Array.isArray(v) && v.value === undefined && v.label === undefined);
+        
+      for (const key of ['status_profile', 'nationality_id', 'city_id', 'country_id', 'blacklist']) {
+        const v = pick(key);
+        if (has(key)) {
+          data[key] = isEmptyShaped(req.body[key]) ? null : Number(v);
+        }
       }
+
+      if (has('status') && !isEmptyShaped(req.body.status)) {
+        const rawStatus = pick('status');
+        const normalized = typeof rawStatus === 'boolean'
+          ? (rawStatus ? 1 : 0)
+          : (typeof rawStatus === 'string' && ['true', 'active', 'aktif'].includes(rawStatus.toLowerCase())
+              ? 1
+              : (typeof rawStatus === 'string' && ['false', 'inactive', 'tidak aktif'].includes(rawStatus.toLowerCase()) ? 0 : Number(rawStatus)));
+        if (!Number.isNaN(normalized)) data.status = normalized;
+      }
+
       if (has('is_subscribe')) data.is_subscribe = !!pick('is_subscribe');
       for (const key of [
         'short_code', 'first_name', 'last_name', 'region', 'telp', 'mobile_phone',
         'card_type', 'card_number', 'card_expiry', 'email', 'gender', 'fax',
         'address', 'postal_code', 'car_reg_number',
       ]) {
-        if (has(key)) data[key] = pick(key);
+        if (has(key)) {
+          const v = pick(key);
+          data[key] = (v === '' || v === null) ? null : v;
+        }
       }
       if (has('birth_of_date')) {
-        const b = new Date(pick('birth_of_date'));
-        if (!isNaN(b.getTime())) data.birth_of_date = b;
+        const v = pick('birth_of_date');
+        if (!v) {
+          data.birth_of_date = null;
+        } else {
+          const b = new Date(v);
+          if (!isNaN(b.getTime())) data.birth_of_date = b;
+        }
       }
 
       const existing = await prisma.guest_profiles.findUnique({ where: { id } });
@@ -1757,10 +1785,11 @@ export class GuestController {
         data: { ...data, updated_at: new Date(), updated_by: req.user?.id ?? null },
       });
 
-      // syncTypes parity — guest-title disimpan via model_has_types, bukan kolom guest_profiles.
       if (has('title')) {
         const titleId = pick('title');
-        if (titleId !== undefined && titleId !== null && titleId !== '') {
+        const titleNumeric =
+          titleId !== undefined && titleId !== null && titleId !== '' && !Array.isArray(titleId) && /^\d+$/.test(String(titleId));
+        if (titleNumeric) {
           await prisma.model_has_types.deleteMany({ where: { model_id: id, model_type: 'App\\Models\\GuestProfile' } });
           await prisma.model_has_types.create({
             data: { model_id: id, model_type: 'App\\Models\\GuestProfile', type_id: BigInt(String(titleId)) },

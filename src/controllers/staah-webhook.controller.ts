@@ -3,6 +3,7 @@ import { Request, Response } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { success, error, notFound } from '../utils/response';
 import { enqueueJob } from '../config/queue';
+import { nextGuestAccount } from '../utils/guestAccount';
 
 
 function bigintToNumber(val: any): any {
@@ -417,13 +418,7 @@ async function findOrCreateGuestProfile(propertyId: number, reservationData: any
 
   if (existing) return existing;
 
-  const lastAccount = await prisma.guest_profiles.findFirst({
-    where: { property_id: BigInt(propertyId) },
-    orderBy: { account: 'desc' },
-  });
-
-  const lastNum = lastAccount ? parseInt((lastAccount.account as string || 'GA000000').slice(2)) : 0;
-  const newAccount = 'GA' + String(lastNum + 1).padStart(6, '0');
+  const newAccount = await nextGuestAccount();
 
   return prisma.guest_profiles.create({
     data: {

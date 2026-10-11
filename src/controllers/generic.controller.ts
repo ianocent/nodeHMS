@@ -282,6 +282,10 @@ const MODEL_MENU: Record<string, number> = {
   holidays: 89,
   // Laravel MessageController@index -> hasCrudPermission(63, 'add'|'edit')
   messages: 63,
+  // Laravel OverbookingController@index -> hasCrudPermission(91, ...). Without the entry
+  // the grid reported add/edit = 1 unconditionally while the route guarded menu 80, so
+  // the inline Save button appeared and every save came back 403.
+  overbooking: 91,
 };
 
 const TIME_FIELDS = ['time_start', 'time_end', 'overtime_start', 'overtime_end'];
@@ -412,6 +416,118 @@ export class GenericController {
     }
     table.push({ label: 'Action', key: 'action', type: 'action', is_search: false });
     return table;
+  }
+
+  /**
+   * Synthesise the `form.list` shape that components/pages/module/form.tsx renders.
+   *
+   * ── Why this exists ──────────────────────────────────────────────────────────
+   * That component (ported from the Laravel reference) reads `data.form.list[] =
+   * { lang, step: [{ name, input: [...] }] }`. Until now the ONLY controller in this
+   * codebase answering with that envelope was StaahController::propertyForm, so every
+   * other generic module page rendered nothing at all on add/edit:
+   *
+   *   /cms/content-room/create  ->  GenericController::createForm
+   *     returned `data = { status: 1 }` and meta `{ table: [], master, … }` with NO
+   *     `form` key, and pages/module/index.tsx gates on `initCreateUpdate?.form`, so
+   *     ModuleAdd never mounted. Symptom: click Add or Edit on
+   *     /module/content-room?parent=1091 and the fields are simply absent.
+   *
+   * Rather than hand-write a definition per model (80+ of them), the form is derived
+   * from the same column metadata the list already uses, so the two can never drift.
+   */
+  private buildForm(
+    model: string,
+    action: string,
+    table: any[],
+    record: Record<string, any> | null,
+    master: Record<string, any>
+  ): any {
+    const SKIP_KEYS = new Set(['id', 'action', 'uuid']);
+    const STATUS_OPTIONS = master.statuses ?? [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }];
+
+    const input: any[] = [];
+    for (const col of table ?? []) {
+      const key = col?.key;
+      if (!key || SKIP_KEYS.has(key)) continue;
+      // `type: 'none'` is the list's marker for "not rendered as a column" (ids,
+      // foreign keys). Foreign keys still belong on the form, so they are handled
+      // separately below instead of being skipped wholesale.
+      const isForeign = key.endsWith('_id');
+
+      if (col?.type === 'none' && !isForeign) continue;
+
+      // `editForm` rewrites select/checkbox columns into {value,label} before
+      // answering, so unwrap it or the option lookup compares "[object Object]".
+      const rawCell = record ? record[key] : undefined;
+      const raw =
+        rawCell && typeof rawCell === 'object' && !Array.isArray(rawCell) && 'value' in rawCell
+          ? (rawCell as any).value
+          : rawCell;
+      const colLabel = col?.label ?? key.replace(/_/g, ' ');
+
+      // Resolve the option list: the column's own options first, then a master list
+      // named after the column, then the plural of the foreign table.
+      let options: any[] | null = null;
+      if (col?.options?.length) {
+        options = col.options;
+      } else if (master[key]?.length) {
+        options = master[key];
+      } else if (isForeign && master[`${key.replace(/_id$/, '')}s`]?.length) {
+        options = master[`${key.replace(/_id$/, '')}s`];
+      }
+
+      let type = 'text';
+      if (key === 'status') {
+        type = 'select';
+        options = STATUS_OPTIONS;
+      } else if (options?.length) {
+        type = 'select';
+      } else if (col?.type === 'number') {
+        type = 'number';
+      } else if (col?.type === 'date') {
+        type = 'date';
+      } else if (col?.type === 'textarea') {
+        type = 'textareaonly';
+      } else if (key === 'description' || col?.type === 'html') {
+        type = 'textareaonly';
+      } else if (col?.type === 'checkbox') {
+        type = 'select';
+        options = STATUS_OPTIONS;
+      }
+
+      input.push({
+        label: colLabel,
+        name: key,
+        uri: key,
+        type,
+        col: 'col-span-6',
+        mandatory: col?.mandatory ?? false,
+        placeholder: colLabel,
+        // `options` is consumed by MultiSelectBAse, which expects {value,label}.
+        options: options ?? undefined,
+        value:
+          type === 'select'
+            ? raw === null || raw === undefined || raw === ''
+              ? options?.[0] ?? { value: '', label: '' }
+              : options?.find((o: any) => String(o.value) === String(raw)) ?? { value: raw, label: String(raw) }
+            : raw === null || raw === undefined
+            ? ''
+            : raw,
+      });
+    }
+
+    return {
+      action,
+      isFormData: false,
+      label: record ? 'Edit' : 'Create',
+      list: [
+        {
+          lang: record ? 'Edit Data' : 'Create Data',
+          step: [{ name: 'Main', input }],
+        },
+      ],
+    };
   }
 
   /** Scalar field names for a Prisma model, read from the generated DMMF. */
@@ -570,6 +686,11 @@ export class GenericController {
       ) {
         where.property_id = BigInt(req.user.lastProperty);
       }
+      // Hotel Competitor page passes ?date=YYYY-MM-DD. Generic list forwards only *_id
+      // params, so without this it always listed the whole history and ignored the calendar.
+      if ((model === 'hotel_competitor' || model === 'hotel_competitors') && typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)) {
+        where.date = new Date(req.query.date + 'T00:00:00.000Z');
+      }
       if (req.query.group && String(req.query.group)) {
         try {
           await modelDelegate.findFirst({ where: { group: String(req.query.group) }, select: { id: true } });
@@ -705,13 +826,15 @@ export class GenericController {
     const prisma = getPrisma();
     const base: { [key: string]: any } = { statuses: STATUSES };
     try {
-      if (model === 'overbooking') {
+      if (model === 'overbooking' || model === 'content_rooms') {
+        // content_rooms needs the same room type list the form's Room Type select
+        // binds to; without it the field rendered as an empty dropdown.
         const roomTypes = await prisma.room_types.findMany({
           where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
-          select: { id: true, name: true },
+          select: { id: true, name: true, description: true },
           orderBy: { name: 'asc' },
         });
-        base.room_types = roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.name }));
+        base.room_types = roomTypes.map((rt: any) => ({ value: Number(rt.id), label: rt.description || rt.name }));
       } else if (model === 'allotment') {
         const companies = await prisma.company_profiles.findMany({
           where: { deleted_at: null, status: 1, ...(propertyId ? { property_id: propertyId } : {}) },
@@ -866,7 +989,8 @@ export class GenericController {
     try {
       const model = String(req.params.model);
       const permission = this.getPermission(req, model);
-      const master = await this.buildMaster(model, req.user?.lastProperty ?? null);
+      const propertyId = req.user?.lastProperty ?? null;
+      const master = await this.buildMaster(model, propertyId);
       const extra: any = { table: [], master, search_data: [], permission };
       const data: any = { status: 1 };
       if (model === 'overbooking') {
@@ -875,10 +999,32 @@ export class GenericController {
         // search form ended up with no start/end date.
         data.business_date = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
       }
+      // Columns drive the form (see buildForm), so the list metadata is resolved
+      // here too rather than duplicating a hand-written field list per model.
+      let table = await this.listTable(model, propertyId);
+      if (!table || table.length === 0) table = this.modelShapeTable(model);
+      const action = this.formAction(req);
+      extra.form = this.buildForm(model, action, table, null, master);
       success(res, data, 'Success', 200, extra);
     } catch (err: any) {
       error(res, 'Failed to load form data', 500);
     }
+  }
+
+  /**
+   * POST/PUT uri the module form should submit to.
+   *
+   * Derived from the request path so it works for every generic alias
+   * (`/cms/content-room/create` -> `/cms/content-room`,
+   *  `/cms/content-room/12/update` -> `/cms/content-room/12`) without a per-model
+   * table. The trailing segment is dropped when it is a create/edit verb.
+   */
+  private formAction(req: Request): string {
+    const path = (req.originalUrl || req.url || '').split('?')[0];
+    const parts = path.split('/').filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last && ['create', 'edit', 'update'].includes(last)) parts.pop();
+    return '/' + parts.join('/');
   }
 
   async editForm(req: Request, res: Response): Promise<void> {
@@ -935,7 +1081,21 @@ export class GenericController {
         }
       }
       
-      success(res, formatTimeRows(out), 'Success', 200, { table: [], master, search_data: [], permission });
+      success(res, formatTimeRows(out), 'Success', 200, {
+        table: [],
+        master,
+        search_data: [],
+        permission,
+        // Same `form.list` envelope createForm emits — see buildForm. Without it
+        // pages/module/index.tsx never mounts ModuleAdd on edit either.
+        form: this.buildForm(
+          model,
+          this.formAction(req),
+          (await this.listTable(model, req.user?.lastProperty ?? null)) ?? this.modelShapeTable(model),
+          out as Record<string, any>,
+          master
+        ),
+      });
     } catch (err: any) {
       if (err.message.includes('not found')) notFound(res, err.message);
       else { console.error('Generic edit form error:', err); error(res, 'Failed to load', 500); }
@@ -1014,6 +1174,10 @@ export class GenericController {
 async update(req: Request, res: Response): Promise<void> {
     try {
       const model = String(req.params.model);
+      if (model === 'overbooking') {
+        await this.overbookingUpdate(req, res);
+        return;
+      }
       const id = String(req.params.id);
       const modelDelegate = this.getPrismaModel(model);
       const parsedId = idParam(String(id));
@@ -1052,6 +1216,74 @@ async update(req: Request, res: Response): Promise<void> {
       if (err.code === 'P2025') notFound(res, 'Record not found');
       else error(res, 'Failed to update', 500);
     }
+  }
+
+  /**
+   * OverbookingController@update parity (cms/Hotel/OverbookingController.php:243).
+   *
+   * The grid row is `{date, "<room_type_id>": n, ...}` and carries NO `id`, so the
+   * generic `update({where:{id}})` path could never work — the frontend PUTs
+   * `/cms/overbooking/undefined` and got a 404, i.e. "Overbooking tidak bisa disimpan".
+   * Laravel ignores the route id entirely and updateOrCreate()s one row per
+   * (date, room_type_id, property_id) pair with the submitted value.
+   */
+  private async overbookingUpdate(req: Request, res: Response): Promise<void> {
+    const prisma = getPrisma();
+    const propertyId = req.user?.lastProperty ? BigInt(req.user.lastProperty) : null;
+    const dateRaw = String(req.body?.date ?? '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}/.test(dateRaw)) {
+      badRequest(res, 'The date field is required.');
+      return;
+    }
+    const date = new Date(dateRaw.slice(0, 10) + 'T00:00:00.000Z');
+
+    // Every key except `date` is a room type id; unknown ids are skipped like Laravel's
+    // `RoomType::where('id', $key)->first()` guard.
+    const entries = Object.entries(req.body ?? {}).filter(([key]) => key !== 'date');
+    if (entries.length === 0) {
+      badRequest(res, 'No room type value submitted.');
+      return;
+    }
+    const roomTypeIds = entries
+      .filter(([key]) => /^\d+$/.test(key))
+      .map(([key]) => BigInt(key));
+    const known = roomTypeIds.length
+      ? await prisma.room_types.findMany({ where: { id: { in: roomTypeIds } }, select: { id: true } })
+      : [];
+    const knownIds = new Set(known.map((rt: any) => rt.id.toString()));
+
+    const log: any[] = [];
+    for (const [key, value] of entries) {
+      if (!knownIds.has(key)) continue;
+      const amount = value === null || value === '' ? 0 : Number(value);
+      // `overbookings` has no unique index on (date, room_type_id, property_id) — only
+      // plain btree indexes — so upsert() is unavailable. find-then-write mirrors
+      // Eloquent's updateOrCreate() without asking for a schema migration.
+      const existing = await prisma.overbookings.findFirst({
+        where: { date, room_type_id: BigInt(key), property_id: propertyId ?? 0n },
+        select: { id: true },
+      });
+      const record = existing
+        ? await prisma.overbookings.update({
+            where: { id: existing.id },
+            data: { overbooking: amount, status: 1, updated_at: new Date(), updated_by: req.user?.id ?? null },
+          })
+        : await prisma.overbookings.create({
+            data: {
+              date,
+              room_type_id: BigInt(key),
+              property_id: propertyId ?? 0n,
+              overbooking: amount,
+              status: 1,
+              created_at: new Date(),
+              updated_at: new Date(),
+              created_by: req.user?.id ?? null,
+            },
+          });
+      log.push(record);
+    }
+
+    success(res, log, 'Success');
   }
 
   async destroy(req: Request, res: Response): Promise<void> {

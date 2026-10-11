@@ -2494,6 +2494,10 @@ model promotions {
 
 model properties {
   id                                       BigInt                             @id @default(autoincrement()) 
+  /// Published to the guest portal (booking engine). 1 = appears in /loyalty and gets
+  /// the Booking Engine launcher in the HMS dashboard. Set from the property form.
+  /// Not the same as `status`: that is HMS-wide, this is per-property publication.
+  is_booking_engine                        Int                                @default(0)
   client_uid                               String?                            
   auth_token                               String?                            
   url_chart_of_account                     String?

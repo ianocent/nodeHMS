@@ -28,6 +28,12 @@ function bn(v: any): any {
 function moneyN(x: any): number { const n = Number(typeof x === 'object' && x && 'value' in x ? x.value : x); return Number.isFinite(n) ? n : 0; }
 function idP(v: any): bigint { return BigInt(Array.isArray(v) ? v[0] : v); }
 function idParamBig(v: any): bigint { return BigInt(Array.isArray(v) ? v[0] : v); }
+function statusToFlag(v: any): number {
+  if (v && typeof v === 'object') v = 'value' in v ? v.value : ('label' in v ? v.label : v);
+  if (v === true || v === 1 || v === '1' || v === 'true' || v === 'Active' || v === 'active') return 1;
+  if (v === false || v === 0 || v === '0' || v === 'false' || v === 'Inactive' || v === 'inactive') return 0;
+  return Number(v) === 1 ? 1 : 0;
+}
 
 export class CompanyController {
 
@@ -388,7 +394,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async store(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { name, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
+      const { name, email, telp, mobile_phone, credit_limit, status } = req.body;
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (!name) { badRequest(res, 'name required'); return; }
@@ -404,18 +410,19 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const d = await prisma.company_profiles.create({
         data: {
           property_id: pid, name, type_company: v('type_company') || 'Corporate', email, telp, mobile_phone,
-          billing_address, billing_city, billing_country,
+          billing_address: v('billing_address'), billing_city: v('billing_city') == null ? v('billing_city') : String(v('billing_city')), billing_country: v('billing_country') == null ? v('billing_country') : String(v('billing_country')),
           billing_region: v('billing_region'), billing_postal_code: v('billing_postal_code'),
-          mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country'), mailing_city: v('mailing_city'), mailing_postal_code: v('mailing_postal_code'),
+          mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country') == null ? v('mailing_country') : String(v('mailing_country')), mailing_city: v('mailing_city') == null ? v('mailing_city') : String(v('mailing_city')), mailing_postal_code: v('mailing_postal_code'),
           term: v('term'), remarks: v('remarks'), short_code: v('short_code'), description: v('description'),
           business_regional: v('business_regional'), IATA: v('IATA'),
-          website: v('website'), fax: v('fax'), staff_in_charge: v('staff_in_charge'),
+          website: v('website'), fax: v('fax'), staff_in_charge: v('staff_in_charge') === undefined || v('staff_in_charge') === null ? v('staff_in_charge') : String(v('staff_in_charge')),
+          source: v('source') === undefined || v('source') === null || Array.isArray(v('source')) ? undefined : String(v('source')),
           // `billing` is a 0/1 flag (config cms.billing: By Company / By Department)
           // in a *string* column, and the form returns it as {value,label}. Passing
           // the raw number made Prisma reject it ("Expected String or Null,
           // provided Int"), so a new company could never be saved.
           billing: v('billing') === undefined || v('billing') === null ? v('billing') : String(v('billing')),
-          gst: b('gst'), is_stop_credit: b('is_stop_credit'), is_pay_commission: b('is_pay_commission'), is_charge_back: b('is_charge_back'), is_surcharge_opt_out: b('is_surcharge_opt_out'), blacklist: b('blacklist'),
+          gst: b('gst'), is_stop_credit: b('is_stop_credit'), is_pay_commission: b('is_pay_commission'), is_charge_back: b('is_charge_back'), is_surcharge_opt_out: b('is_surcharge_opt_out'), blacklist: b('blacklist') === undefined ? undefined : (b('blacklist') ? 1 : 0),
           commission_rate: v('commission_rate') ?? undefined, based_online_commission: v('based_online_commission') ?? undefined,
           // `status` is a toggle on the client, so it arrives as a boolean while
           // the column is a 0/1 int — Prisma rejected the boolean outright.
@@ -453,15 +460,35 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       // shaped field.
       if (v('type_company') !== undefined) data.type_company = v('type_company');
       if (email !== undefined) data.email = email; if (telp !== undefined) data.telp = telp;
-      if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (billing_address !== undefined) data.billing_address = billing_address;
-      if (billing_city !== undefined) data.billing_city = billing_city; if (billing_country !== undefined) data.billing_country = billing_country;
-      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'mailing_country', 'mailing_city', 'mailing_postal_code', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA', 'website', 'fax', 'staff_in_charge']) {
+      if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (v('billing_address') !== undefined) data.billing_address = v('billing_address');
+      if (v('billing_city') !== undefined) data.billing_city = v('billing_city') == null ? v('billing_city') : String(v('billing_city')); if (v('billing_country') !== undefined) data.billing_country = v('billing_country') == null ? v('billing_country') : String(v('billing_country'));
+      for (const k of ['billing_region', 'billing_postal_code', 'mailing_address', 'mailing_region', 'term', 'remarks', 'short_code', 'description', 'business_regional', 'IATA', 'website', 'fax', 'staff_in_charge']) {
         if (v(k) !== undefined) data[k] = v(k);
+      }
+      if (v('mailing_country') !== undefined) data.mailing_country = v('mailing_country') == null ? v('mailing_country') : String(v('mailing_country'));
+      if (v('mailing_city') !== undefined) data.mailing_city = v('mailing_city') == null ? v('mailing_city') : String(v('mailing_city'));
+      if (v('mailing_postal_code') !== undefined) data.mailing_postal_code = v('mailing_postal_code');
+      // `staff_in_charge` is a select of user ids, so the browser posts a Number while
+      // MySQL/Postgres both store the column as TEXT (`belongsTo(User::class, 'staff_in_charge')`).
+      // Prisma refuses Int for a String field ("Expected String, provided Int"), which
+      // aborted the entire update — QA's "Edit Company tidak bisa di Save".
+      if (data.staff_in_charge !== undefined && data.staff_in_charge !== null) {
+        data.staff_in_charge = String(data.staff_in_charge);
+      }
+      // `source` mirrors the same shape in Laravel's formatData (`source => {value:691}`),
+      // also stored as TEXT, and node was not persisting it at all.
+      if (v('source') !== undefined && v('source') !== null && !Array.isArray(v('source'))) {
+        data.source = String(v('source'));
       }
       // `billing` is a 0/1 flag in a string column - see store() above.
       if (v('billing') !== undefined) data.billing = v('billing') === null ? null : String(v('billing'));
-      for (const k of ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out', 'blacklist']) {
+      for (const k of ['gst', 'is_stop_credit', 'is_pay_commission', 'is_charge_back', 'is_surcharge_opt_out']) {
         if (b(k) !== undefined) data[k] = b(k);
+      }
+      // `blacklist` is a TINYINT/INTEGER column, but the grid renders it through
+      // `!!blacklist` so the form posts a boolean. Prisma rejects Boolean for Int.
+      if (v('blacklist') !== undefined && v('blacklist') !== null && !Array.isArray(v('blacklist'))) {
+        data.blacklist = Number(v('blacklist')) ? 1 : 0;
       }
       if (v('commission_rate') !== undefined) data.commission_rate = Number(v('commission_rate'));
       if (v('based_online_commission') !== undefined) data.based_online_commission = Number(v('based_online_commission'));
@@ -627,7 +654,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async contactList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
       const where: any = { deleted_at: null }; if (pid) where.property_id = pid;
@@ -637,20 +664,28 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       let table = TABLES.companyContact;
       if (companyId) {
         const depts = await prisma.company_profile_departments.findMany({ where: { company_profile_id: BigInt(companyId) }, select: { id: true, department: true } });
-        if (depts.length) table = table.map((c: any) => c.key === 'department' ? { ...c, options: depts.map((d: any) => ({ value: Number(d.id), label: d.department })) } : c);
+        table = table.map((c: any) => c.key === 'department' ? { ...c, options: depts.map((d: any) => ({ value: Number(d.id), label: d.department })) } : c);
+        if (depts.length) {
+          const deptById = new Map(depts.map((d: any) => [String(d.id), d.department]));
+          for (const row of data as any[]) {
+            if (row.department != null) row.department = { value: Number(row.department), label: deptById.get(String(row.department)) ?? '' };
+          }
+        }
       }
       success(res, bn(data), 'Success', 200, { table, permission: listPermission(req, { add: true, edit: true, delete: true }), search_data: s ? [{ field: s, value: s }] : [], pagination: laravelPaging(total, lim, page) });
     } catch (err: any) { console.error('Company contact list error:', err); error(res, 'Failed', 500); }
   }
   static async contactStore(req: Request, res: Response): Promise<void> {
-    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, name, position, email, tel, mobile_phone, is_default } = req.body;
-      const d = await prisma.company_profile_contact_persons.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), name, position, email, tel, mobile_phone, is_default: is_default ?? false, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
+    try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, name, position, email, tel, mobile_phone, department, fax, dob, notes, is_default, status } = req.body; const st = status === undefined ? 1 : statusToFlag(status);
+      const d = await prisma.company_profile_contact_persons.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), name, position, email, tel, mobile_phone, department: department !== undefined && department !== null && department !== '' ? BigInt(department?.value ?? department) : null, fax, dob: dob ? new Date(dob) : null, notes, is_default: is_default ?? false, status: st, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async contactUpdate(req: Request, res: Response): Promise<void> {
-    try { const id = idP(req.params.id); const { name, position, email, tel, mobile_phone, is_default } = req.body; const data: any = { updated_at: new Date() };
+    try { const id = idP(req.params.id); const { name, position, email, tel, mobile_phone, department, fax, dob, notes, is_default, status } = req.body; const data: any = { updated_at: new Date() }; if (status !== undefined) data.status = statusToFlag(status);
       if (name !== undefined) data.name = name; if (position !== undefined) data.position = position; if (email !== undefined) data.email = email;
       if (tel !== undefined) data.tel = tel; if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (is_default !== undefined) data.is_default = is_default;
+      if (department !== undefined) data.department = department !== null && department !== '' ? BigInt(department?.value ?? department) : null;
+      if (fax !== undefined) data.fax = fax; if (dob !== undefined) data.dob = dob ? new Date(dob) : null; if (notes !== undefined) data.notes = notes;
       await prisma.company_profile_contact_persons.update({ where: { id }, data }); success(res, null, 'Updated');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
@@ -675,7 +710,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async deptList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
       const where: any = { deleted_at: null }; if (pid) where.property_id = pid;
@@ -687,12 +722,14 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   }
   static async deptStore(req: Request, res: Response): Promise<void> {
     try { const pid = BigInt(req.user?.lastProperty ?? 0); const { company_profile_id = req.query.company_id as string, department, country_id, city_id, address, postal_code } = req.body;
-      const d = await prisma.company_profile_departments.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), department, country_id: country_id ? BigInt(country_id) : null, city_id: city_id ? BigInt(city_id) : null, address, postal_code, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
+      const unwrap = (x: any) => x && typeof x === 'object' && 'value' in x ? x.value : x;
+      const d = await prisma.company_profile_departments.create({ data: { property_id: pid, company_profile_id: BigInt(company_profile_id), department, country_id: unwrap(country_id) ? BigInt(unwrap(country_id)) : null, city_id: unwrap(city_id) ? BigInt(unwrap(city_id)) : null, address, postal_code, created_at: new Date(), updated_at: new Date() } }); success(res, bn(d), 'Created');
     } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async deptUpdate(req: Request, res: Response): Promise<void> {
     try { const id = idP(req.params.id); const { department, country_id, city_id, address, postal_code } = req.body; const data: any = { updated_at: new Date() };
-      if (department !== undefined) data.department = department; if (country_id !== undefined) data.country_id = BigInt(country_id); if (city_id !== undefined) data.city_id = BigInt(city_id);
+      const uw = (x: any) => x && typeof x === 'object' && 'value' in x ? x.value : x;
+      if (department !== undefined) data.department = department; if (country_id !== undefined) data.country_id = uw(country_id) ? BigInt(uw(country_id)) : null; if (city_id !== undefined) data.city_id = uw(city_id) ? BigInt(uw(city_id)) : null;
       if (address !== undefined) data.address = address; if (postal_code !== undefined) data.postal_code = postal_code;
       await prisma.company_profile_departments.update({ where: { id }, data }); success(res, null, 'Updated');
     } catch (err: any) { error(res, 'Failed', 500); }
@@ -705,7 +742,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async activityList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
       const where: any = { deleted_at: null }; if (pid) where.property_id = pid;
@@ -734,7 +771,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async documentList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
       const where: any = { deleted_at: null }; if (pid) where.property_id = pid;
@@ -778,7 +815,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async guestList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
       const where: any = { deleted_at: null }; if (pid) where.property_id = pid;
@@ -804,7 +841,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   static async folioList(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
       const where: any = { property_id: pid, deleted_at: null };
@@ -831,7 +868,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
   // (F Y) for the company's folios — ARR = room_revenue / room_night.
   static async statisticIndex(req: Request, res: Response): Promise<void> {
     try {
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 99999;
       // Aggregate in SQL instead of loading every reservation row: the folio list
       // here is ~41k ids, and sending them as an `IN (...)` list made this the
@@ -938,7 +975,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
 // — AR Transaction (Laravel parity: query `transactions` by model_type/model_id, folio not cancelled)
   static async arTransactionList(req: Request, res: Response): Promise<void> {
     try {
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const page = parseInt(req.query.page as string) || 1;
       const lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
@@ -990,7 +1027,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     try {
       const page = parseInt(req.query.page as string) || 1, lim = parseInt(req.query.limit as string) || 10;
       const s = req.query.search as string;
-      const companyId = req.query.company_id as string;
+      const companyId = (req.query.company_profile_id || req.query.company_id) as string;
       const [companyBilling, codeBillings] = await Promise.all([
         prisma.company_profile_billing_setups.findMany({ where: activeWhere('company_profile_billing_setups', { ...(companyId ? { company_profile_id: BigInt(companyId) } : {}), ...(req.user?.lastProperty ? { property_id: req.user.lastProperty } : {}) }, req.user?.lastProperty) }),
         prisma.code_billings.findMany({ where: activeWhere('code_billings', req.user?.lastProperty ? { property_id: req.user.lastProperty } : {}, req.user?.lastProperty), orderBy: { sort: 'asc' } }),

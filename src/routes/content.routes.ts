@@ -1,12 +1,20 @@
 import { Router } from 'express';
 import { ContentController } from '../controllers/content.controller';
-import { LifestyleController } from '../controllers/lifestyle.controller';
+import { ContentRoomController } from '../controllers/content-room.controller';
+import { LoyaltyFacilityController } from '../controllers/loyalty-facility.controller';
 import { LoyaltyController } from '../controllers/loyalty.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 import { makeUpload } from '../utils/upload';
 
 const router = Router();
+
+// Room image / facility forms post the picture as multipart/form-data, so multer has
+// to run before the controller: express.json() leaves `req.body` undefined otherwise.
+// 2 MB for photos, 1 MB for facility glyphs — both mirror Laravel's `max:2048` on the
+// equivalent reference routes, and the facility file is a small icon by nature.
+const roomImageUpload = makeUpload(['jpeg', 'png', 'jpg', 'gif', 'webp'], 2);
+const roomFacilityUpload = makeUpload(['jpeg', 'png', 'jpg', 'gif', 'webp'], 1);
 
 // ── Content / SEO / Room / Config-Pax (contents model) ──
 router.get('/content/content-list', authMiddleware, requirePermission(69, 'view'), ContentController.contentList);
@@ -31,6 +39,41 @@ router.post('/content/seo-home', authMiddleware, requirePermission(69, 'add'), C
 router.put('/content/seo-home/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
 router.delete('/content/seo-home/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
 
+// ── Room Config Facility (content_room_facilities) ──
+// Scoped to a room TYPE, not a physical room: the booking engine reads these per
+// room_type_id (RoomType::getFacilitiesAttribute), so `?room_type_id=N` is required on
+// the list. Menu 1120 (Master Setup > Room Type) gates them, matching room.routes.ts.
+//
+// REGISTERED BEFORE `/content/room/:id` on purpose. Express matches in registration
+// order, so `GET /content/room/config-facility` used to fall into the `:id` route with
+// id="config-facility", ContentController.contentForm answered `data: {status: 1}` (its
+// no-id branch) instead of the row list, and the frontend crashed on `.map` of a
+// non-array. Same trap as `/content/room/config-pax`, which is why that one already
+// sits above its `:id` sibling. Any literal segment added under `/content/room/` has to
+// go above this block.
+router.get('/content/room/config-facility', authMiddleware, requirePermission(1120, 'view'), ContentRoomController.facilityList);
+router.get('/content/room/config-facility/create', authMiddleware, requirePermission(1120, 'add'), ContentRoomController.facilityForm);
+router.post('/content/room/config-facility', authMiddleware, requirePermission(1120, 'add'), roomFacilityUpload.single('image'), ContentRoomController.facilityStore);
+router.get('/content/room/config-facility/:id', authMiddleware, requirePermission(1120, 'view'), ContentRoomController.facilityForm);
+router.get('/content/room/config-facility/:id/update', authMiddleware, requirePermission(1120, 'edit'), ContentRoomController.facilityForm);
+router.get('/content/room/config-facility/:id/edit', authMiddleware, requirePermission(1120, 'edit'), ContentRoomController.facilityForm);
+router.put('/content/room/config-facility/:id', authMiddleware, requirePermission(1120, 'edit'), roomFacilityUpload.single('image'), ContentRoomController.facilityUpdate);
+// Table edit posts the edited row to `uri + "/" + id`, so POST must behave like PUT.
+router.post('/content/room/config-facility/:id', authMiddleware, requirePermission(1120, 'edit'), roomFacilityUpload.single('image'), ContentRoomController.facilityUpdate);
+router.delete('/content/room/config-facility/:id', authMiddleware, requirePermission(1120, 'delete'), ContentRoomController.facilityDestroy);
+
+// ── Room Config Image (content_room_images) ──
+// Same ordering rule as config-facility above: must precede `/content/room/:id`.
+router.get('/content/room/config-image', authMiddleware, requirePermission(1120, 'view'), ContentRoomController.imageList);
+router.get('/content/room/config-image/create', authMiddleware, requirePermission(1120, 'add'), ContentRoomController.imageForm);
+router.post('/content/room/config-image', authMiddleware, requirePermission(1120, 'add'), roomImageUpload.single('image'), ContentRoomController.imageStore);
+router.get('/content/room/config-image/:id', authMiddleware, requirePermission(1120, 'view'), ContentRoomController.imageForm);
+router.get('/content/room/config-image/:id/update', authMiddleware, requirePermission(1120, 'edit'), ContentRoomController.imageForm);
+router.get('/content/room/config-image/:id/edit', authMiddleware, requirePermission(1120, 'edit'), ContentRoomController.imageForm);
+router.put('/content/room/config-image/:id', authMiddleware, requirePermission(1120, 'edit'), roomImageUpload.single('image'), ContentRoomController.imageUpdate);
+router.post('/content/room/config-image/:id', authMiddleware, requirePermission(1120, 'edit'), roomImageUpload.single('image'), ContentRoomController.imageUpdate);
+router.delete('/content/room/config-image/:id', authMiddleware, requirePermission(1120, 'delete'), ContentRoomController.imageDestroy);
+
 router.get('/content/room/create', authMiddleware, requirePermission(69, 'add'), ContentController.contentForm);
 router.get('/content/room/:id', authMiddleware, requirePermission(69, 'view'), ContentController.contentForm);
 router.get('/content/room/:id/update', authMiddleware, requirePermission(69, 'edit'), ContentController.contentForm);
@@ -46,6 +89,7 @@ router.get('/content/room/config-pax/:id/edit', authMiddleware, requirePermissio
 router.post('/content/room/config-pax', authMiddleware, requirePermission(69, 'add'), ContentController.contentStore);
 router.put('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'edit'), ContentController.contentUpdate);
 router.delete('/content/room/config-pax/:id', authMiddleware, requirePermission(69, 'delete'), ContentController.contentDestroy);
+
 
 // ── Banner (content_banners model) ──
 // The banner form posts multipart/form-data (name + image File + ...), so multer has
@@ -99,28 +143,53 @@ router.put('/content/guest-point-transaction/:id', authMiddleware, requirePermis
 router.post('/content/guest-point-transaction/:id', authMiddleware, requirePermission(1194, 'edit'), LoyaltyController.pointUpdate);
 router.delete('/content/guest-point-transaction/:id', authMiddleware, requirePermission(1194, 'delete'), LoyaltyController.pointDestroy);
 
-// ── Lifestyle Facility / Terms (Booking Engine Setup, cms.php:1432-1433) ──
-// The booking engine pulls both through GET /middleware/lifestyle/properties.
-router.get('/content/lifestyle-facility', authMiddleware, requirePermission(1190, 'view'), LifestyleController.facilityList);
-router.get('/content/lifestyle-facility/create', authMiddleware, requirePermission(1190, 'add'), LifestyleController.facilityForm);
-router.post('/content/lifestyle-facility', authMiddleware, requirePermission(1190, 'add'), LifestyleController.facilityStore);
-router.get('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'view'), LifestyleController.facilityForm);
-router.get('/content/lifestyle-facility/:id/update', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityForm);
-router.get('/content/lifestyle-facility/:id/edit', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityForm);
-router.put('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityUpdate);
+// ── Loyalty Facility / Terms (Booking Engine Setup, cms.php:1432-1433) ──
+// The booking engine pulls both through GET /middleware/loyalty/properties.
+//
+// The `lifestyle-*` paths stay registered as aliases. A menu row, a bookmark or a
+// saved `menus.url` can still carry the old slug, and a rename that 404s those is worse
+// than one that answers. Delete them once no database row points at the old path.
+router.get('/content/loyalty-facility', authMiddleware, requirePermission(1190, 'view'), LoyaltyFacilityController.facilityList);
+router.get('/content/loyalty-facility/create', authMiddleware, requirePermission(1190, 'add'), LoyaltyFacilityController.facilityForm);
+router.post('/content/loyalty-facility', authMiddleware, requirePermission(1190, 'add'), LoyaltyFacilityController.facilityStore);
+router.get('/content/loyalty-facility/:id', authMiddleware, requirePermission(1190, 'view'), LoyaltyFacilityController.facilityForm);
+router.get('/content/loyalty-facility/:id/update', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityForm);
+router.get('/content/loyalty-facility/:id/edit', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityForm);
+router.put('/content/loyalty-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityUpdate);
 // Table-edit posts the edited row to `uri + "/" + id`.
-router.post('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LifestyleController.facilityUpdate);
-router.delete('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'delete'), LifestyleController.facilityDestroy);
+router.post('/content/loyalty-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityUpdate);
+router.delete('/content/loyalty-facility/:id', authMiddleware, requirePermission(1190, 'delete'), LoyaltyFacilityController.facilityDestroy);
 
-router.get('/content/lifestyle-terms', authMiddleware, requirePermission(1191, 'view'), LifestyleController.termList);
-router.get('/content/lifestyle-terms/create', authMiddleware, requirePermission(1191, 'add'), LifestyleController.termForm);
-router.post('/content/lifestyle-terms', authMiddleware, requirePermission(1191, 'add'), LifestyleController.termStore);
-router.get('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'view'), LifestyleController.termForm);
-router.get('/content/lifestyle-terms/:id/update', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termForm);
-router.get('/content/lifestyle-terms/:id/edit', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termForm);
-router.put('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termUpdate);
-router.post('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LifestyleController.termUpdate);
-router.delete('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'delete'), LifestyleController.termDestroy);
+router.get('/content/loyalty-terms', authMiddleware, requirePermission(1191, 'view'), LoyaltyFacilityController.termList);
+router.get('/content/loyalty-terms/create', authMiddleware, requirePermission(1191, 'add'), LoyaltyFacilityController.termForm);
+router.post('/content/loyalty-terms', authMiddleware, requirePermission(1191, 'add'), LoyaltyFacilityController.termStore);
+router.get('/content/loyalty-terms/:id', authMiddleware, requirePermission(1191, 'view'), LoyaltyFacilityController.termForm);
+router.get('/content/loyalty-terms/:id/update', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termForm);
+router.get('/content/loyalty-terms/:id/edit', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termForm);
+router.put('/content/loyalty-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termUpdate);
+router.post('/content/loyalty-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termUpdate);
+router.delete('/content/loyalty-terms/:id', authMiddleware, requirePermission(1191, 'delete'), LoyaltyFacilityController.termDestroy);
+
+// Deprecated aliases -> the handlers above. Same middleware, same permission id.
+router.get('/content/lifestyle-facility', authMiddleware, requirePermission(1190, 'view'), LoyaltyFacilityController.facilityList);
+router.get('/content/lifestyle-facility/create', authMiddleware, requirePermission(1190, 'add'), LoyaltyFacilityController.facilityForm);
+router.post('/content/lifestyle-facility', authMiddleware, requirePermission(1190, 'add'), LoyaltyFacilityController.facilityStore);
+router.get('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'view'), LoyaltyFacilityController.facilityForm);
+router.get('/content/lifestyle-facility/:id/update', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityForm);
+router.get('/content/lifestyle-facility/:id/edit', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityForm);
+router.put('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityUpdate);
+router.post('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'edit'), LoyaltyFacilityController.facilityUpdate);
+router.delete('/content/lifestyle-facility/:id', authMiddleware, requirePermission(1190, 'delete'), LoyaltyFacilityController.facilityDestroy);
+
+router.get('/content/lifestyle-terms', authMiddleware, requirePermission(1191, 'view'), LoyaltyFacilityController.termList);
+router.get('/content/lifestyle-terms/create', authMiddleware, requirePermission(1191, 'add'), LoyaltyFacilityController.termForm);
+router.post('/content/lifestyle-terms', authMiddleware, requirePermission(1191, 'add'), LoyaltyFacilityController.termStore);
+router.get('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'view'), LoyaltyFacilityController.termForm);
+router.get('/content/lifestyle-terms/:id/update', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termForm);
+router.get('/content/lifestyle-terms/:id/edit', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termForm);
+router.put('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termUpdate);
+router.post('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'edit'), LoyaltyFacilityController.termUpdate);
+router.delete('/content/lifestyle-terms/:id', authMiddleware, requirePermission(1191, 'delete'), LoyaltyFacilityController.termDestroy);
 
 // ── Cancelation Rule (cancelation_rules model) ──
 router.get('/cancelation-rule', authMiddleware, requirePermission(69, 'view'), ContentController.cancelationRuleList);

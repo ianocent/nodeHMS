@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hotel Accommodation Confirmation Letter</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        thead { display: table-header-group; }
+        tfoot { display: table-footer-group; }
+        tr { page-break-inside: avoid; }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .logo {
+            width: 315px;
+            height: auto;
+        }
+        .title {
+            font-size: 18px;
+            font-weight: bold;
+            text-align: right;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        table, th, td {
+            border: none;
+        }
+        th, td {
+            padding: 5px;
+            text-align: left;
+        }
+        .subject {
+            font-weight: bold;
+            margin: 20px 0;
+        }
+        .footer {
+            margin-top: 20px;
+        }
+
+        main { text-transform: uppercase; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo Company" class="logo">
+        <!-- <img src="<%= logoBase64 %>" alt="Hotels Logo" class="logo "> -.
+        <div class="title">Hotel Accommodation Confirmation Letter</div>
+    </div>
+
+    <table>
+        <tr>
+            <td>Date</td>
+            <td>: <%= date %></td>
+        </tr>
+        <tr>
+            <td>To</td>
+            <td>: <%= to %></td>
+        </tr>
+        <tr>
+            <td>Company</td>
+            <td>: <%= company %></td>
+        </tr>
+        <tr>
+            <td>Telephone</td>
+            <td>: <%= telephone %></td>
+        </tr>
+        <tr>
+            <td>Email</td>
+            <td>: <%= email %></td>
+        </tr>
+    </table>
+
+    <div class="subject">Subject: Hotel Accommodation Confirmation Letter</div>
+
+    <p>Dear <%= to %>,</p>
+
+    <p>Greetings from <%= hotelName %>...</p>
+
+    <p>We are pleased to confirm the following room reservation as follows:</p>
+
+    <table>
+        <tr>
+            <td>Reservation Number:</td>
+            <td>: <%= reservationNumber %></td>
+        </tr>
+        <tr>
+            <td>Arrival Date:</td>
+            <td>: <%= arrivalDate %></td>
+        </tr>
+        <tr>
+            <td>Departure Date:</td>
+            <td>: <%= departureDate %></td>
+        </tr>
+        <tr>
+            <td>Total Nights:</td>
+            <td>: <%= totalNights %></td>
+        </tr>
+        <tr>
+            <td>Room Type:</td>
+            <td>: <%= roomType %></td>
+        </tr>
+        <tr>
+            <td>Daily Rate:</td>
+            <td>: Rp. <%= dailyRate %></td>
+        </tr>
+        <tr>
+            <td>Room rate Notes:</td>
+            <td>: <%= roomRateNotes %></td>
+        </tr>
+        <tr>
+            <td>Method of Payment :</td>
+            <td>: <%= methodOfPayment %></td>
+        </tr>
+        <tr>
+            <td>Total Charge:</td>
+            <td>: <%= totalCharge %></td>
+        </tr>
+    </table>
+
+    <p>We will hold your reservation until 18:00hrs on the date of the arrival and will be automatically released without prior notice, unless guaranteed by cash, credit card, letter of guarantee or bank transfer to:</p>
+
+    <p>
+        PT FANTASTIK ASIA INTERNASIONAL<br>
+        Bank Mandiri Cabang Grand Niaga Mas<br>
+        Acct No. 109-00-2909788-8
+    </p>
+
+    <p>If your reservation guaranteed and the guest does not show up, we have the rights to charge 1 night for the no show fee. As your reservation confirmed, kindly signed this letter and returned to us by email: reservation@asialinkhotel.com</p>
+
+    <p>Please be informed our standard check-in time is 14:00hrs and check-out time is 12:00hrs Our staff will be at your service and we look forward to welcoming you or your guest soon.</p>
+
+    <div class="footer">
+        <table>
+            <tr>
+                <td>
+                    Best Regards,<br><br><br>
+                    RAFIKA<br>
+                    FRONT OFFICE
+                </td>
+                <td>
+                    Acknowledged & Accepted by:<br><br><br>
+                    ________________________<br>
+                    (Company Stamp & Sign)
+                </td>
+            </tr>
+        </table>
+    </div>
+
+    <div style="text-align: center; margin-top: 20px;">
+        <%= hotelName %><br>
+        <%= hotelContact %>
+    </div>
+</body>
+</html>

@@ -11,6 +11,7 @@ import { prisma } from '../config/prisma';
 // EncryptResponseMiddleware), but the decrypt fallback keeps parity with
 // syncCheckStatusBookingEngine, which does the same for /webhook/*.
 import { decrypt } from '../utils/encryption';
+import { bookingQuery } from './booking-db.service';
 
 export type BookingEngineSyncResult = {
   attempted: boolean;
@@ -186,6 +187,170 @@ export async function resetOnlineRateSyncFlags(propertyId: any): Promise<void> {
   } catch (err: any) {
     console.error('[booking-engine-sync] failed to reset rate sync flags:', err?.message);
   }
+}
+
+// ── content_room_images / content_room_facilities ──────────────────────────────
+// The booking engine keeps its OWN MySQL copies of these two tables, keyed by
+// room_type_id (see RoomType::getRoomTypeImageAttribute / getFacilitiesAttribute,
+// and SearchController::buildRoomData which feeds the guest-facing room card).
+//
+// Both Laravel endpoints are addressed BY UUID, not by id:
+//   ContentRoomImageController::store/destroy    -> ContentRoomImage::where('uuid', …)
+//   ContentRoomFacilityController::store/destroy -> ContentRoomFacility::where('uuid', …)
+// and store() filters the payload through Schema::hasColumn, so the node columns are
+// pushed verbatim as long as the name matches (`icon` is a real column on both sides
+// after sql/2026-10-04_room_type_images_facilities.sql).
+//
+// `image` is pushed as the '/'-prefixed relative path the HMS column holds, NOT as an
+// absolute URL: RoomType::hmsStorageUrl() builds the guest-facing URL by
+// concatenating config('cms.apihms_storage') with the stored value, and it already
+// does `rtrim(…,'/') . '/' . ltrim($path,'/')`. An absolute URL stored there would be
+// concatenated into "http://localhost:3001/storage/http://localhost:3001/…" and 404.
+// So the relative path is the correct wire format, and this is why the BE was reading
+// broken images in the first place.
+
+// ── room_type_id translation ───────────────────────────────────────────────────
+//
+// `room_types.id` is NOT shared between the two databases. Each side has its own
+// autoincrement sequence and the booking engine's `room_types` table is populated by
+// RoomTypeController::sync, which upserts on (name, property_id) and lets MySQL assign
+// whatever id is next on ITS sequence. Verified on this database:
+//
+//   room type                HMS Postgres id   BE MySQL id
+//   MJS            (prop 999)              1              1   (coincidence)
+//   standart king bed (prop 1002)         21             21   (coincidence)
+//   SUPERIOR DOUBLE (prop 1000)           11             47   (BE sequence burned 10-46)
+//
+// Pushing the HMS id verbatim therefore either lands on a DIFFERENT room type (silent
+// corruption) or violates the `content_room_facilities_ibfk_2` FK (HTTP 500). Both were
+// observed: 229 rows "succeeded" only because they were uuid updates that never
+// touched the FK, and 3 genuine inserts failed on it.
+//
+// (name, property_id) is the identity the booking engine itself uses — RoomTypeController
+// @sync matches on exactly that pair — so it is the correct key to translate through.
+// The lookup goes straight at the BE MySQL (booking-db.service already holds a pool for
+// the loyalty tables), which avoids adding another Laravel endpoint for one join.
+type RoomTypeKey = `${number}:${string}`;
+const beRoomTypeCache = new Map<RoomTypeKey, number | null>();
+
+async function resolveBeRoomTypeId(propertyId: number, name: string): Promise<number | null> {
+  const key: RoomTypeKey = `${propertyId}:${name}`;
+  if (beRoomTypeCache.has(key)) return beRoomTypeCache.get(key) ?? null;
+  let resolved: number | null = null;
+  try {
+    const rows = await bookingQuery<{ id: number }>(
+      'select id from room_types where property_id = ? and name = ? and deleted_at is null limit 1',
+      [propertyId, name]
+    );
+    resolved = rows.length ? Number(rows[0].id) : null;
+  } catch (err: any) {
+    console.error('[booking-engine-sync] room type lookup failed:', err?.message);
+    resolved = null;
+  }
+  beRoomTypeCache.set(key, resolved);
+  return resolved;
+}
+
+/** Test/reset seam — the cache must not leak a stale id into a later sync run. */
+export function clearBeRoomTypeCache(): void {
+  beRoomTypeCache.clear();
+}
+
+// The row handed in carries the HMS room_type_id but not the room type NAME, and the
+// name is what identifies the room type on the booking engine side.
+async function roomTypeNameOf(roomTypeId: number): Promise<string | null> {
+  const rows: any[] = await prisma.$queryRawUnsafe(
+    'select name from room_types where id = $1',
+    String(roomTypeId)
+  );
+  return rows.length ? String(rows[0].name) : null;
+}
+
+/**
+ * Build the wire payload for /cms/config-image and /cms/config-facility, translating
+ * room_type_id into the booking engine's own id space. Returns null when the room type
+ * does not exist there at all, which the callers surface as a skipped sync rather than
+ * a 500.
+ */
+export async function roomConfigPayload(row: any): Promise<any | null> {
+  const out: any = { ...row };
+  // The BE table is keyed by room_type_id only; content_room_id has no column there
+  // and the Schema::hasColumn filter would drop it anyway.
+  delete out.content_room_id;
+  delete out.sync;
+
+  if (out.property_id !== undefined && out.property_id !== null) {
+    out.property_id = Number(out.property_id);
+  }
+
+  if (out.room_type_id !== undefined && out.room_type_id !== null) {
+    const hmsRoomTypeId = Number(out.room_type_id);
+    const propertyId = Number(out.property_id);
+    const name = await roomTypeNameOf(hmsRoomTypeId);
+    if (!name) {
+      console.warn(`[booking-engine-sync] HMS room_types.id ${hmsRoomTypeId} does not exist - sync skipped`);
+      return null;
+    }
+    const beId = await resolveBeRoomTypeId(propertyId, name);
+    if (beId === null) {
+      // Creating the room type on the booking engine is a separate flow
+      // (`POST /cms/room-type`, i.e. syncRoomType). Guessing an id here would either
+      // violate the FK or, worse, attach the media to an unrelated room type.
+      console.warn(
+        `[booking-engine-sync] no booking-engine room_types row for (property ${propertyId}, name "${name}") - sync skipped. ` +
+        'Push the room type first.'
+      );
+      return null;
+    }
+    if (beId !== hmsRoomTypeId) {
+      console.log(
+        `[booking-engine-sync] room_type_id ${hmsRoomTypeId} -> ${beId} (property ${propertyId}, "${name}")`
+      );
+    }
+    out.room_type_id = beId;
+  }
+
+  return out;
+}
+
+export async function syncRoomConfigImage(
+  row: any,
+  isDelete = false
+): Promise<BookingEngineSyncResult> {
+  if (!row) {
+    return { attempted: false, method: 'POST', path: '/cms/config-image', status: 0, body: { error: 'row not found' } };
+  }
+  const uuid = uuidOf(row);
+  if (!uuid) {
+    console.warn('[booking-engine-sync] content_room_images row has no uuid - sync skipped');
+    return { attempted: false, method: 'POST', path: '/cms/config-image', status: 0, body: { error: 'missing uuid' } };
+  }
+  if (isDelete) return beRequest('DELETE', '/cms/config-image', { uuid });
+  const payload = await roomConfigPayload(row);
+  if (payload === null) {
+    return { attempted: false, method: 'POST', path: '/cms/config-image', status: 0, body: { error: 'room type not resolvable on booking engine' } };
+  }
+  return beRequest('POST', '/cms/config-image', payload);
+}
+
+export async function syncRoomConfigFacility(
+  row: any,
+  isDelete = false
+): Promise<BookingEngineSyncResult> {
+  if (!row) {
+    return { attempted: false, method: 'POST', path: '/cms/config-facility', status: 0, body: { error: 'row not found' } };
+  }
+  const uuid = uuidOf(row);
+  if (!uuid) {
+    console.warn('[booking-engine-sync] content_room_facilities row has no uuid - sync skipped');
+    return { attempted: false, method: 'POST', path: '/cms/config-facility', status: 0, body: { error: 'missing uuid' } };
+  }
+  if (isDelete) return beRequest('DELETE', '/cms/config-facility', { uuid });
+  const payload = await roomConfigPayload(row);
+  if (payload === null) {
+    return { attempted: false, method: 'POST', path: '/cms/config-facility', status: 0, body: { error: 'room type not resolvable on booking engine' } };
+  }
+  return beRequest('POST', '/cms/config-facility', payload);
 }
 
 // ── rate_configs ──────────────────────────────────────────────────────────────

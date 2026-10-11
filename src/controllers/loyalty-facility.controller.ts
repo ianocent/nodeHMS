@@ -4,24 +4,122 @@ import { badRequest, error, notFound, success } from '../utils/response';
 import { STATUS_OPTIONS, crudPermission, laravelPaging, listPermission } from '../utils/tableMeta';
 import { storedImageUrl } from '../utils/storage';
 
-// Laravel parity: App\Http\Controllers\Cms\Hotel\LifestyleFacilityController +
-// LifestyleTermController (routes/cms.php:1432-1433, inside the `content` prefix).
-// The booking engine reads both through GET /middleware/lifestyle/properties
-// (MiddlewareBookingEngineController::lifestyleProperties, web.php:139), so both
+// Laravel parity: App\Http\Controllers\Cms\Hotel\LoyaltyFacilityController +
+// LoyaltyTermController (routes/cms.php:1432-1433, inside the `content` prefix).
+// The booking engine reads both through GET /middleware/loyalty/properties
+// (MiddlewareBookingEngineController::loyaltyProperties, web.php:139), so both
 // tables are read-only from the outside and written only from the HMS UI.
 //
-// config('cms.lifestyle_facilities') / config('cms.lifestyle_terms')
-export const LIFESTYLE_FACILITY_KEYS = [
-  { value: 'pool', label: 'Pool', icon: 'SwimmingPool' },
+// config('cms.loyalty_facilities') / config('cms.loyalty_terms')
+//
+// The reference ships 7 keys (pool, restaurant, wifi, parking, gym, spa,
+// concierge) which is far too few to describe a real hotel, so anything the
+// operator wanted to add had nowhere to go. The list below covers the amenity
+// set a hotel actually advertises. `icon` is the react-icons name the booking
+// engine renders (hmsBookingEngine/frontend/components/template/loyalty.tsx
+// FACILITY_CONFIG), so adding a key here means adding it there too.
+export const LOYALTY_FACILITY_KEYS = [
+  // ── Food & drink ────────────────────────────────────────────────────────────
   { value: 'restaurant', label: 'Restaurant', icon: 'Utensils' },
-  { value: 'wifi', label: 'Wifi', icon: 'Wifi' },
-  { value: 'parking', label: 'Parking', icon: 'Parking' },
-  { value: 'gym', label: 'Gym', icon: 'Dumbbell' },
+  { value: 'restaurant_indo', label: 'Indonesian Restaurant', icon: 'Utensils' },
+  { value: 'restaurant_japanese', label: 'Japanese Restaurant', icon: 'Utensils' },
+  { value: 'restaurant_chinese', label: 'Chinese Restaurant', icon: 'Utensils' },
+  { value: 'restaurant_western', label: 'Western Restaurant', icon: 'Utensils' },
+  { value: 'cafe', label: 'Cafe', icon: 'Coffee' },
+  { value: 'bar', label: 'Bar', icon: 'Cocktail' },
+  { value: 'lounge', label: 'Lounge', icon: 'Couch' },
+  { value: 'room_service', label: 'Room Service', icon: 'ConciergeBell' },
+  { value: 'breakfast', label: 'Breakfast', icon: 'Coffee' },
+  { value: 'buffet', label: 'Buffet', icon: 'Utensils' },
+  { value: 'pool_bar', label: 'Pool Bar', icon: 'Cocktail' },
+
+  // ── Wellness ───────────────────────────────────────────────────────────────
+  { value: 'pool', label: 'Swimming Pool', icon: 'SwimmingPool' },
+  { value: 'pool_indoor', label: 'Indoor Pool', icon: 'SwimmingPool' },
+  { value: 'pool_outdoor', label: 'Outdoor Pool', icon: 'SwimmingPool' },
+  { value: 'kids_pool', label: 'Kids Pool', icon: 'SwimmingPool' },
   { value: 'spa', label: 'Spa', icon: 'Spa' },
+  { value: 'massage', label: 'Massage', icon: 'HandPaper' },
+  { value: 'sauna', label: 'Sauna', icon: 'HotTub' },
+  { value: 'steam_room', label: 'Steam Room', icon: 'HotTub' },
+  { value: 'jacuzzi', label: 'Jacuzzi', icon: 'HotTub' },
+  { value: 'hot_spring', label: 'Hot Spring', icon: 'HotTub' },
+  { value: 'onsen', label: 'Onsen', icon: 'HotTub' },
+  { value: 'gym', label: 'Fitness Centre', icon: 'Dumbbell' },
+  { value: 'yoga', label: 'Yoga', icon: 'Fire' },
+
+  // ── Connectivity & business ─────────────────────────────────────────────────
+  { value: 'wifi', label: 'Free WiFi', icon: 'Wifi' },
+  { value: 'internet', label: 'High-Speed Internet', icon: 'Globe' },
+  { value: 'business_center', label: 'Business Centre', icon: 'Briefcase' },
+  { value: 'meeting_room', label: 'Meeting Room', icon: 'Users' },
+  { value: 'conference_room', label: 'Conference Room', icon: 'Users' },
+
+  // ── Transport & parking ─────────────────────────────────────────────────────
+  { value: 'parking', label: 'Free Parking', icon: 'Parking' },
+  { value: 'valet_parking', label: 'Valet Parking', icon: 'Parking' },
+  { value: 'ev_charging', label: 'EV Charging', icon: 'Car' },
+  { value: 'airport_shuttle', label: 'Airport Shuttle', icon: 'ShuttleVan' },
+  { value: 'airport_transfer', label: 'Airport Transfer', icon: 'ShuttleVan' },
+  { value: 'taxi', label: 'Taxi Service', icon: 'Taxi' },
+  { value: 'bike_rental', label: 'Bicycle Rental', icon: 'Bicycle' },
+
+  // ── Services ────────────────────────────────────────────────────────────────
   { value: 'concierge', label: 'Concierge', icon: 'ConciergeBell' },
+  { value: 'room_service_24h', label: '24-Hour Reception', icon: 'ConciergeBell' },
+  { value: 'laundry', label: 'Laundry Service', icon: 'Tshirt' },
+  { value: 'dry_cleaning', label: 'Dry Cleaning', icon: 'Tshirt' },
+  { value: 'ironing', label: 'Ironing Service', icon: 'Tshirt' },
+  { value: 'luggage_storage', label: 'Luggage Storage', icon: 'Suitcase' },
+  { value: 'currency_exchange', label: 'Currency Exchange', icon: 'MoneyBillWave' },
+  { value: 'atm', label: 'ATM', icon: 'MoneyBillWave' },
+  { value: 'tour_desk', label: 'Tour Desk', icon: 'MapMarkedAlt' },
+  { value: 'ticketing', label: 'Ticket Service', icon: 'TicketAlt' },
+  { value: 'shuttle', label: 'Shuttle Service', icon: 'ShuttleVan' },
+
+  // ── Family & kids ───────────────────────────────────────────────────────────
+  { value: 'kids_club', label: "Kids' Club", icon: 'Child' },
+  { value: 'baby_crib', label: 'Baby Crib', icon: 'Baby' },
+  { value: 'stroller', label: 'Stroller', icon: 'Child' },
+  { value: 'family_room', label: 'Family Room', icon: 'Users' },
+
+  // ── In-room ─────────────────────────────────────────────────────────────────
+  { value: 'air_conditioning', label: 'Air Conditioning', icon: 'Snowflake' },
+  { value: 'non_smoking_room', label: 'Non-Smoking Room', icon: 'Ban' },
+  { value: 'smoking_room', label: 'Smoking Room', icon: 'Smoking' },
+  { value: 'mini_bar', label: 'Mini Bar', icon: 'GlassCheers' },
+  { value: 'coffee_maker', label: 'Coffee Maker', icon: 'Coffee' },
+  { value: 'tea_maker', label: 'Tea Maker', icon: 'MugHot' },
+  { value: 'flat_tv', label: 'Flat-Screen TV', icon: 'Tv' },
+  { value: 'cable_tv', label: 'Cable TV', icon: 'Tv' },
+  { value: 'safe', label: 'In-Room Safe', icon: 'Lock' },
+  { value: 'hairdryer', label: 'Hairdryer', icon: 'Wind' },
+  { value: 'minibar', label: 'Minibar', icon: 'GlassCheers' },
+  { value: 'kettle', label: 'Electric Kettle', icon: 'MugHot' },
+  { value: 'bathtub', label: 'Bathtub', icon: 'Bath' },
+  { value: 'shower', label: 'Shower', icon: 'Shower' },
+
+  // ── Outdoors & scenery ─────────────────────────────────────────────────────
+  { value: 'garden', label: 'Garden', icon: 'Tree' },
+  { value: 'beach_access', label: 'Private Beach', icon: 'UmbrellaBeach' },
+  { value: 'beachfront', label: 'Beachfront', icon: 'UmbrellaBeach' },
+  { value: 'pool_view', label: 'Pool View', icon: 'SwimmingPool' },
+  { value: 'mountain_view', label: 'Mountain View', icon: 'Mountain' },
+  { value: 'sea_view', label: 'Sea View', icon: 'Water' },
+  { value: 'sun_terrace', label: 'Sun Terrace', icon: 'Sun' },
+  { value: 'bbq', label: 'BBQ Facility', icon: 'Fire' },
+  { value: 'picnic_area', label: 'Picnic Area', icon: 'Tree' },
+
+  // ── Security & accessibility ────────────────────────────────────────────────
+  { value: 'security', label: '24-Hour Security', icon: 'ShieldAlt' },
+  { value: 'cctv', label: 'CCTV', icon: 'Video' },
+  { value: 'fire_safety', label: 'Fire Safety', icon: 'Fire' },
+  { value: 'wheelchair_accessible', label: 'Wheelchair Accessible', icon: 'AccessibleIcon' },
+  { value: 'wheelchair_accessible_lift', label: 'Wheelchair Lift', icon: 'AccessibleIcon' },
+  { value: 'smoking_area', label: 'Designated Smoking Area', icon: 'Smoking' },
 ];
 
-export const LIFESTYLE_TERM_TYPES = [
+export const LOYALTY_TERM_TYPES = [
   { value: 'terms_condition', label: 'Terms & Condition' },
   { value: 'privacy_policy', label: 'Privacy Policy' },
   { value: 'register_agreement', label: 'Register Agreement' },
@@ -31,6 +129,12 @@ export const LIFESTYLE_TERM_TYPES = [
 // The reference reaches these tables through the default `mysql` connection; in node
 // they are plain Postgres tables (see sql/2026-10-03_lifestyle_tables.sql), so raw
 // SQL keeps the controller working without a `prisma generate` round-trip.
+//
+// Table names deliberately keep `lifestyle`. Everything the operator sees — menu labels,
+// routes, controller, error messages — is `loyalty` now, but the tables were renamed in
+// a migration-shaped change that buys nothing: they hold no user-facing string, and
+// `sql/2026-10-03_lifestyle_tables.sql` plus the Laravel reference still name them.
+// Renaming them would mean a table migration on top of a pure rename task.
 const FACILITY_TABLE = 'property_lifestyle_facilities';
 const TERM_TABLE = 'property_lifestyle_terms';
 
@@ -82,7 +186,7 @@ function jsonSafe(value: any): any {
   return value;
 }
 
-export class LifestyleController {
+export class LoyaltyFacilityController {
   // ── Facility ────────────────────────────────────────────────────────────────
   static async facilityList(req: Request, res: Response): Promise<void> {
     try {
@@ -113,14 +217,14 @@ export class LifestyleController {
       success(res, rows, 'Success', 200, {
         table: [
           { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
-          { label: 'Facility Key', key: 'facility_key', type: 'select', options: LIFESTYLE_FACILITY_KEYS, is_search: true },
+          { label: 'Facility Key', key: 'facility_key', type: 'select', options: LOYALTY_FACILITY_KEYS, is_search: true },
           { label: 'Label', key: 'label', type: 'text', is_search: false },
           { label: 'Icon', key: 'icon', type: 'text', is_search: false },
           { label: 'Sort', key: 'sort', type: 'number', is_search: false },
         ],
         permission: listPermission(req, crud),
         pagging: laravelPaging(total, limit, page),
-        master: { facility_keys: LIFESTYLE_FACILITY_KEYS },
+        master: { facility_keys: LOYALTY_FACILITY_KEYS },
         pagination: {
           current_page: page,
           last_page: Math.max(1, Math.ceil(total / limit)),
@@ -131,8 +235,8 @@ export class LifestyleController {
         },
       });
     } catch (err: any) {
-      console.error('Lifestyle facility list error:', err);
-      error(res, 'Failed to list lifestyle facilities', 500);
+      console.error('Loyalty facility list error:', err);
+      error(res, 'Failed to list loyalty facilities', 500);
     }
   }
 
@@ -140,7 +244,7 @@ export class LifestyleController {
     try {
       const id = idParam(req.params.id);
       if (!id) {
-        success(res, { status: 1 }, 'Success', 200, { master: { facility_keys: LIFESTYLE_FACILITY_KEYS } });
+        success(res, { status: 1 }, 'Success', 200, { master: { facility_keys: LOYALTY_FACILITY_KEYS } });
         return;
       }
       const rows: any[] = await prisma.$queryRawUnsafe(
@@ -148,11 +252,11 @@ export class LifestyleController {
            from ${FACILITY_TABLE} where id = $1 and deleted_at is null`,
         id.toString()
       );
-      if (!rows.length) { notFound(res, 'Lifestyle facility not found'); return; }
-      success(res, rows[0], 'Success', 200, { master: { facility_keys: LIFESTYLE_FACILITY_KEYS } });
+      if (!rows.length) { notFound(res, 'Loyalty facility not found'); return; }
+      success(res, rows[0], 'Success', 200, { master: { facility_keys: LOYALTY_FACILITY_KEYS } });
     } catch (err: any) {
-      console.error('Lifestyle facility form error:', err);
-      error(res, 'Failed to load lifestyle facility', 500);
+      console.error('Loyalty facility form error:', err);
+      error(res, 'Failed to load Loyalty facility', 500);
     }
   }
 
@@ -175,10 +279,10 @@ export class LifestyleController {
         now,
         req.user?.id ? String(req.user.id) : null
       );
-      success(res, rows[0], 'Lifestyle facility created successfully.', 200);
+      success(res, rows[0], 'Loyalty facility created successfully.', 200);
     } catch (err: any) {
-      console.error('Lifestyle facility store error:', err);
-      error(res, 'Failed to create lifestyle facility', 500);
+      console.error('Loyalty facility store error:', err);
+      error(res, 'Failed to create Loyalty facility', 500);
     }
   }
 
@@ -191,7 +295,7 @@ export class LifestyleController {
         `select id from ${FACILITY_TABLE} where id = $1 and deleted_at is null`,
         id.toString()
       );
-      if (!existing.length) { notFound(res, 'Lifestyle facility not found'); return; }
+      if (!existing.length) { notFound(res, 'Loyalty facility not found'); return; }
 
       const sets: string[] = [];
       const params: (string | null)[] = [id.toString()];
@@ -206,17 +310,17 @@ export class LifestyleController {
       if (status !== undefined) push('status', coerceStatus(status));
       push('updated_at', new Date());
       if (req.user?.id) push('updated_by', String(req.user.id));
-      if (!sets.length) { success(res, existing[0], 'Lifestyle facility updated successfully.'); return; }
+      if (!sets.length) { success(res, existing[0], 'Loyalty facility updated successfully.'); return; }
 
       const rows: any[] = await prisma.$queryRawUnsafe(
         `update ${FACILITY_TABLE} set ${sets.join(', ')} where id = $1
          returning id, property_id, facility_key, label, icon, sort, status, created_at, updated_at`,
         ...params
       );
-      success(res, rows[0], 'Lifestyle facility updated successfully.');
+      success(res, rows[0], 'Loyalty facility updated successfully.');
     } catch (err: any) {
-      console.error('Lifestyle facility update error:', err);
-      error(res, 'Failed to update lifestyle facility', 500);
+      console.error('Loyalty facility update error:', err);
+      error(res, 'Failed to update Loyalty facility', 500);
     }
   }
 
@@ -230,11 +334,11 @@ export class LifestyleController {
         id.toString(),
         req.user?.id ? String(req.user.id) : null
       );
-      if (!rows.length) { notFound(res, 'Lifestyle facility not found'); return; }
-      success(res, [], 'Lifestyle facility deleted successfully.');
+      if (!rows.length) { notFound(res, 'Loyalty facility not found'); return; }
+      success(res, [], 'Loyalty facility deleted successfully.');
     } catch (err: any) {
-      console.error('Lifestyle facility destroy error:', err);
-      error(res, 'Failed to delete lifestyle facility', 500);
+      console.error('Loyalty facility destroy error:', err);
+      error(res, 'Failed to delete Loyalty facility', 500);
     }
   }
 
@@ -268,7 +372,7 @@ export class LifestyleController {
       success(res, rows, 'Success', 200, {
         table: [
           { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
-          { label: 'Type', key: 'type', type: 'select', options: LIFESTYLE_TERM_TYPES, is_search: true },
+          { label: 'Type', key: 'type', type: 'select', options: LOYALTY_TERM_TYPES, is_search: true },
           { label: 'Title', key: 'title', type: 'text', is_search: true },
           { label: 'Content', key: 'content', type: 'textarea', is_html: true, is_search: false },
           { label: 'Language', key: 'language', type: 'text', is_search: false },
@@ -276,7 +380,7 @@ export class LifestyleController {
         ],
         permission: listPermission(req, crud),
         pagging: laravelPaging(total, limit, page),
-        master: { term_types: LIFESTYLE_TERM_TYPES },
+        master: { term_types: LOYALTY_TERM_TYPES },
         pagination: {
           current_page: page,
           last_page: Math.max(1, Math.ceil(total / limit)),
@@ -287,8 +391,8 @@ export class LifestyleController {
         },
       });
     } catch (err: any) {
-      console.error('Lifestyle term list error:', err);
-      error(res, 'Failed to list lifestyle terms', 500);
+      console.error('Loyalty term list error:', err);
+      error(res, 'Failed to list Loyalty terms', 500);
     }
   }
 
@@ -296,7 +400,7 @@ export class LifestyleController {
     try {
       const id = idParam(req.params.id);
       if (!id) {
-        success(res, { status: 1 }, 'Success', 200, { master: { term_types: LIFESTYLE_TERM_TYPES } });
+        success(res, { status: 1 }, 'Success', 200, { master: { term_types: LOYALTY_TERM_TYPES } });
         return;
       }
       const rows: any[] = await prisma.$queryRawUnsafe(
@@ -304,11 +408,11 @@ export class LifestyleController {
            from ${TERM_TABLE} where id = $1 and deleted_at is null`,
         id.toString()
       );
-      if (!rows.length) { notFound(res, 'Lifestyle term not found'); return; }
-      success(res, rows[0], 'Success', 200, { master: { term_types: LIFESTYLE_TERM_TYPES } });
+      if (!rows.length) { notFound(res, 'Loyalty term not found'); return; }
+      success(res, rows[0], 'Success', 200, { master: { term_types: LOYALTY_TERM_TYPES } });
     } catch (err: any) {
-      console.error('Lifestyle term form error:', err);
-      error(res, 'Failed to load lifestyle term', 500);
+      console.error('Loyalty term form error:', err);
+      error(res, 'Failed to load Loyalty term', 500);
     }
   }
 
@@ -332,10 +436,10 @@ export class LifestyleController {
         now,
         req.user?.id ? String(req.user.id) : null
       );
-      success(res, rows[0], 'Lifestyle term created successfully.', 200);
+      success(res, rows[0], 'Loyalty term created successfully.', 200);
     } catch (err: any) {
-      console.error('Lifestyle term store error:', err);
-      error(res, 'Failed to create lifestyle term', 500);
+      console.error('Loyalty term store error:', err);
+      error(res, 'Failed to create Loyalty term', 500);
     }
   }
 
@@ -348,7 +452,7 @@ export class LifestyleController {
         `select id from ${TERM_TABLE} where id = $1 and deleted_at is null`,
         id.toString()
       );
-      if (!existing.length) { notFound(res, 'Lifestyle term not found'); return; }
+      if (!existing.length) { notFound(res, 'Loyalty term not found'); return; }
 
       const sets: string[] = [];
       const params: (string | null)[] = [id.toString()];
@@ -364,17 +468,17 @@ export class LifestyleController {
       if (status !== undefined) push('status', coerceStatus(status));
       push('updated_at', new Date());
       if (req.user?.id) push('updated_by', String(req.user.id));
-      if (!sets.length) { success(res, existing[0], 'Lifestyle term updated successfully.'); return; }
+      if (!sets.length) { success(res, existing[0], 'Loyalty term updated successfully.'); return; }
 
       const rows: any[] = await prisma.$queryRawUnsafe(
         `update ${TERM_TABLE} set ${sets.join(', ')} where id = $1
          returning id, property_id, type, title, content, language, sort, status, created_at, updated_at`,
         ...params
       );
-      success(res, rows[0], 'Lifestyle term updated successfully.');
+      success(res, rows[0], 'Loyalty term updated successfully.');
     } catch (err: any) {
-      console.error('Lifestyle term update error:', err);
-      error(res, 'Failed to update lifestyle term', 500);
+      console.error('Loyalty term update error:', err);
+      error(res, 'Failed to update Loyalty term', 500);
     }
   }
 
@@ -388,23 +492,27 @@ export class LifestyleController {
         id.toString(),
         req.user?.id ? String(req.user.id) : null
       );
-      if (!rows.length) { notFound(res, 'Lifestyle term not found'); return; }
-      success(res, [], 'Lifestyle term deleted successfully.');
+      if (!rows.length) { notFound(res, 'Loyalty term not found'); return; }
+      success(res, [], 'Loyalty term deleted successfully.');
     } catch (err: any) {
-      console.error('Lifestyle term destroy error:', err);
-      error(res, 'Failed to delete lifestyle term', 500);
+      console.error('Loyalty term destroy error:', err);
+      error(res, 'Failed to delete Loyalty term', 500);
     }
   }
 
   /**
-   * GET /middleware/lifestyle/properties — public.
-   * MiddlewareBookingEngineController::lifestyleProperties (web.php:139): every active
+   * GET /middleware/loyalty/properties — public.
+   * MiddlewareBookingEngineController::loyaltyProperties (web.php:139): every active
    * property with its active facilities + terms, consumed by the booking engine.
    */
   static async propertiesForBookingEngine(_req: Request, res: Response): Promise<void> {
     try {
       const properties: any[] = await prisma.properties.findMany({
-        where: { status: 1, deleted_at: null },
+        // `is_booking_engine` is the per-property publication switch the property form
+        // writes. `status` alone is HMS-wide, so every active property used to appear in
+        // the guest portal whether or not its content was ready — an operator could not
+        // take one hotel off the portal without taking it off HMS entirely.
+        where: { status: 1, is_booking_engine: 1, deleted_at: null },
         include: { cities: { select: { name: true } } },
         orderBy: { id: 'asc' },
       });
@@ -412,7 +520,7 @@ export class LifestyleController {
       const out: any[] = [];
       for (const p of properties) {
         const pidValue = String(p.id);
-        const [facilities, terms, country] = await Promise.all([
+        const [facilities, terms, country, banners] = await Promise.all([
           prisma.$queryRawUnsafe(
             `select facility_key, label, icon from ${FACILITY_TABLE}
               where property_id = $1 and deleted_at is null and status = 1
@@ -430,7 +538,18 @@ export class LifestyleController {
           p.country_id
             ? prisma.countries.findUnique({ where: { id: BigInt(p.country_id) }, select: { name: true } })
             : null,
+          // The first active banner of the Booking Engine Setup > Banner tab becomes the
+          // guest-portal hero, so editing a banner in the HMS immediately changes
+          // http://localhost:3002/loyalty. properties.image is NULL on every row, so
+          // without this the portal has no CMS-controlled visual at all.
+          prisma.content_banners.findFirst({
+            where: { property_id: p.id, status: 1, deleted_at: null, image: { not: null } },
+            orderBy: { id: 'asc' },
+            select: { image: true },
+          }),
         ]);
+
+        const heroImage = banners?.image ? storedImageUrl(banners.image) : storedImageUrl(p.image);
 
         out.push({
           id: String(p.id),
@@ -442,6 +561,7 @@ export class LifestyleController {
           // '/'-prefixed path rows, which is what the booking engine expects.
           logo: storedImageUrl(p.logo),
           image: storedImageUrl(p.image),
+          hero_image: heroImage,
           address: p.address,
           city: (p as any).cities?.name ?? null,
           country: country?.name ?? null,
@@ -458,8 +578,8 @@ export class LifestyleController {
       // The reference answers with `code` as the STRING '200' here.
       res.json(jsonSafe({ code: '200', message: 'Success', data: out }));
     } catch (err: any) {
-      console.error('Lifestyle properties error:', err);
-      error(res, 'Failed to load lifestyle properties', 500);
+      console.error('Loyalty properties error:', err);
+      error(res, 'Failed to load loyalty properties', 500);
     }
   }
 }

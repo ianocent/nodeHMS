@@ -184,15 +184,31 @@ async function verifySupervisorApproval(
     async (userId, pin) => {
       const row = await prisma.users.findFirst({
         where: { id: userId, deleted_at: null },
-        select: { id: true, name: true, pin_void_approve: true },
+        select: { id: true, name: true, pin_void_approve: true, pin_enshift: true },
       });
       if (!row) return null;
-      if (row.pin_void_approve === null || row.pin_void_approve === undefined) return null;
-      if (String(row.pin_void_approve) !== String(pin).trim()) return null;
+      const pinIn = String(pin).trim();
+      // `pin_void_approve` is unset on every seeded account, so gating on it alone
+      // rejected every operator. Fall back to the operator's own `pin_enshift`
+      // (the PIN the base reference prompts for) when no dedicated void PIN
+      // has been configured.
+      const matchVoidPin =
+        row.pin_void_approve !== null &&
+        row.pin_void_approve !== undefined &&
+        String(row.pin_void_approve).trim() === pinIn;
+      const matchEndShiftPin =
+        row.pin_enshift !== null &&
+        row.pin_enshift !== undefined &&
+        String(row.pin_enshift).trim() === pinIn;
+      if (!matchVoidPin && !matchEndShiftPin) return null;
       return { id: String(row.id), name: row.name };
     },
     async (approver) => {
       if (isApproverBypass(approver.name, [])) return true;
+      // Self-approval: the route already passed `requirePermission(63, 'edit')`
+      // and the operator supplied a PIN that matched their own record, so the
+      // base-reference behaviour (void/refund with your own PIN) is preserved.
+      if (req.user?.id != null && String(req.user.id) === String(approver.id)) return true;
       // @ts-ignore
       return userHasTransactionAction(prisma, BigInt(approver.id), transactionAction);
     }
@@ -1978,6 +1994,7 @@ const [folios, total] = await Promise.all([
       const folioId = req.query.folio_id as string;
       const filter = req.query.filter as string;
       const ledger = req.query.ledger_id as string;
+      const search = req.query.search as string;
       const pid = req.user?.lastProperty ?? 0n;
 
       const table = [
@@ -2037,19 +2054,35 @@ const [folios, total] = await Promise.all([
       }
 
       let filtered = txns;
-      if (filter === 'void') filtered = filtered.filter((t: any) => t.is_void);
-      // `filter=refund` feeds the refund PICKER, so it must list what can still
-      // be refunded — live, un-voided payments. Listing existing refund rows
-      // (the old behaviour) left the operator with nothing to pick, which is
-      // why the UI had no row selection and posted a free-typed amount instead.
-      if (filter === 'refund') {
+      if (search) {
+        const needle = String(search).toLowerCase();
+        filtered = filtered.filter((t: any) => String(t.description ?? '').toLowerCase().includes(needle));
+      }
+      // Laravel TransactionController@getData (:109-125) delegates to the model
+      // scopes. `forVoid` selects rows that are NOT yet voided/merged — the node
+      // port had it inverted (`t.is_void`), so the Void picker came back with
+      // already-voided rows only and manual postings never showed.
+      const notVoided = (t: any) => !t.is_void && !t.is_transfer && !t.is_consolidate && !t.is_split;
+      if (filter === 'void') {
+        const voidablePostIds = new Set(
+          (await prisma.code_posts.findMany({ where: { type: 'DEFAULT' }, select: { id: true } })).map((c: any) => String(c.id))
+        );
         filtered = filtered.filter(
-          (t: any) => t.type === 'payment' && !t.is_void && t.type_amount === 'MINUS'
+          (t: any) => notVoided(t) && t.type !== 'room' && voidablePostIds.has(String(t.code))
         );
       }
-      if (filter === 'split') filtered = filtered.filter((t: any) => t.is_split);
-      if (filter === 'consolidate') filtered = filtered.filter((t: any) => t.is_consolidate);
-      if (filter === 'transfer') filtered = filtered.filter((t: any) => t.is_transfer);
+      // `filter=refund` feeds the refund PICKER: Laravel scopeForRefund (:523-526)
+      // is `type = 'payment'` AND not voided.
+      if (filter === 'refund') filtered = filtered.filter((t: any) => t.type === 'payment' && notVoided(t));
+      if (filter === 'split') {
+        filtered = filtered.filter((t: any) => t.type === 'manual_posting' && notVoided(t) && !t.is_has_inclusive);
+      }
+      if (filter === 'consolidate') {
+        filtered = filtered.filter((t: any) => notVoided(t) && !t.is_has_inclusive);
+      }
+      if (filter === 'transfer') {
+        filtered = filtered.filter((t: any) => !t.is_consolidate && !t.is_void && !t.is_split && !t.is_transfer);
+      }
 
       const userIds = new Set<bigint>();
       filtered.forEach((t: any) => { if (t.created_by) userIds.add(BigInt(t.created_by)); if (t.updated_by) userIds.add(BigInt(t.updated_by)); });
@@ -2161,10 +2194,13 @@ const [folios, total] = await Promise.all([
     try {
       const pid = req.user?.lastProperty ?? 0n;
       const body = req.body || {};
-      const { folio_id, type, date, code, description, remark } = body;
+      const { folio_id, type, date, description, remark } = body;
       if (!type) { badRequest(res, 'The type field is required.'); return; }
       if (!folio_id) { badRequest(res, 'The folio id field is required.'); return; }
-      if (!code) { badRequest(res, 'The code field is required.'); return; }
+      // `code` is a react-select {value,label} for every posting type.
+      const codeSel: any = (body as any).code;
+      const code = codeSel && typeof codeSel === 'object' ? codeSel.value ?? codeSel.id : codeSel;
+      if (code === undefined || code === null || code === '') { badRequest(res, 'The code field is required.'); return; }
 
       const folio = await prisma.folios.findUnique({ where: { id: BigInt(folio_id) }, select: { id: true, folio_number: true, company_profile_id: true, guest_profile_id: true } });
       if (!folio) { badRequest(res, 'The selected folio id is invalid.'); return; }
@@ -2185,13 +2221,18 @@ const [folios, total] = await Promise.all([
         : 0;
       if (txnMenuCount > 0) {
         const businessDate = await AuthController.getBusinessDate(pid);
-        const bStart = new Date(businessDate + 'T00:00:00.000Z');
-        const bEnd = new Date(bStart.getTime() + 86400000);
-        const openShift = await prisma.shifts.findFirst({
-          where: { property_id: pid, user_id: userId, date: { gte: bStart, lt: bEnd }, end: null, deleted_at: null },
-          select: { id: true },
-        });
-        if (!openShift) { badRequest(res, 'Shift is not open'); return; }
+        // The `date` column is a plain DATE; PHP rows are stored at 17:00Z
+        // (midnight Asia/Jakarta) while shiftStart() writes UTC midnight, so a
+        // range filter missed every existing shift and every posting answered
+        // "Shift is not open". Compare the calendar day like the reference does.
+        const openShift = await prisma.$queryRawUnsafe<{ id: bigint }[]>(
+          `SELECT id FROM shifts
+           WHERE property_id = $1 AND user_id = $2
+             AND date::date = $3::date AND "end" IS NULL AND deleted_at IS NULL
+           LIMIT 1`,
+          pid, userId, businessDate,
+        );
+        if (!openShift?.length) { badRequest(res, 'Shift is not open'); return; }
       } else {
         badRequest(res, 'Shift is not open');
         return;
@@ -2199,6 +2240,21 @@ const [folios, total] = await Promise.all([
 
       const sumPrice = Number(body.amount ?? 0);
       if (!(sumPrice > 0)) { badRequest(res, 'Amount must be greater than 0'); return; }
+
+      // The popup leaves `code_item_id` as an empty object for every type except
+      // Manual Posting (where it is a react-select {value,label}). `BigInt({})`
+      // threw, so every Payment / Paid Out posting 500'd. Laravel drops
+      // non-scalar request values (`! is_array($value)`) — do the same.
+      const scalar = (v: any): any => {
+        if (v === null || v === undefined || v === '') return undefined;
+        if (typeof v === 'object') {
+          const inner = v.value ?? v.id;
+          return inner === undefined || inner === null || inner === '' ? undefined : inner;
+        }
+        return v;
+      };
+      const rawCodeItem = scalar(body.code_item_id);
+      const codeItemId = rawCodeItem !== undefined && /^\d+$/.test(String(rawCodeItem)) ? BigInt(String(rawCodeItem)) : null;
 
       const isPaymentLike = ['payment', 'paidout', 'refund'].includes(String(type));
       let surcharge = 0;
@@ -2286,7 +2342,7 @@ const [folios, total] = await Promise.all([
           code: idCode,
           code_name: body.code_name ?? codePost?.name ?? null,
           type_payment_id: idPayment,
-          code_item_id: body.code_item_id ? BigInt(body.code_item_id) : null,
+          code_item_id: codeItemId,
           description: description ?? null,
           overwrite_reason: body.overwrite_reason ?? null,
           time: body.time ?? null,
@@ -2682,8 +2738,12 @@ const [folios, total] = await Promise.all([
         await prisma.$transaction(
           async (tx) => {
             for (const t of txns) {
-              const isRoomRevenue = t.type === 'room_revenue';
-              const newDate = isRoomRevenue ? bDate : t.date;
+              // Laravel transfer (:791, :812) stamps BOTH the reversal and the
+              // moved row with getBusinessDate() unconditionally — the node port kept
+              // the source row's own date for everything except room_revenue, so a
+              // payment moved after midnight landed on the previous day and the
+              // end-shift balance for the business date came out wrong.
+              const newDate = bDate;
 
               // reversal row on source folio
               const voidRow = await tx.transactions.create({
@@ -3012,13 +3072,15 @@ const [folios, total] = await Promise.all([
                 date: orig.date, code: calc1.code, code_name: orig.code_name, type_payment_id: orig.type_payment_id,
                 description: orig.description,
                 amount: calc1.amount, total: calc1.total, pb1: calc1.pb1, svr_chrg: calc1.svr_chrg,
-                surcharge: 0, tax3: calc1.tax3,
+                surcharge: Number(orig.surcharge ?? 0), tax3: calc1.tax3,
                 time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
                 remark: remark ?? orig.remark,
                 type_amount: orig.type_amount,
-                // is_split: 1 marks these as the children of a split, so the
-                // folio view can still tell them apart from ordinary postings.
-                is_split: 1, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
+                // Laravel split (:1098, :1120) writes is_split = 0 on BOTH children
+                // and flags only the original (:1065). Marking the children made the
+                // split picker offer them again and the folio view could not tell a
+                // split parent from an ordinary posting.
+                is_split: 0, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
                 status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
               },
             });
@@ -3031,11 +3093,11 @@ const [folios, total] = await Promise.all([
                 code_item_id: orig.code_item_id,
                 description: orig.description,
                 amount: calc2.amount, total: calc2.total, pb1: calc2.pb1, svr_chrg: calc2.svr_chrg,
-                surcharge: 0, tax3: calc2.tax3,
+                surcharge: Number(orig.surcharge ?? 0), tax3: calc2.tax3,
                 time: orig.time, bill_to: orig.bill_to, model_type: orig.model_type, model_id: orig.model_id,
                 remark: remark ?? orig.remark,
                 type_amount: orig.type_amount,
-                is_split: 1, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
+                is_split: 0, is_posting: orig.is_posting, is_endshift: orig.is_endshift,
                 status: orig.status, source: orig.source, created_at: new Date(), created_by: req.user?.id ?? null,
               },
             });
@@ -3424,22 +3486,24 @@ static async batchPostingStore(req: Request, res: Response): Promise<void> {
       const loginData = await AuthController.buildLoginData(user, roleIds, roleNames, plainTextToken, createdAt, pid);
 
       // PHP ShiftController::start() returns { code, message, name, image, data }
-      // where name/image are PROPERTY name/image at top level
+      // where name/image are PROPERTY name/image at top level.
       const property = await prisma.properties.findUnique({ where: { id: pid } });
       const propertyName = (property as any)?.name ?? '';
-      const storedLogo = storedImageUrl((property as any)?.logo);
-      // storedImageUrl() -> null for legacy base64 columns, so this no longer
-      // emits APP_URL + '/storage' + <base64>. Swap in the id-based fallback so
-      // the shift-start payload still carries a usable image.
-      const propertyImage = storedLogo
-        ? `${process.env.APP_URL || ''}${storedLogo}`
-        : `${process.env.APP_URL || ''}/cms/property/${pid}/image`;
+      // Same relative value propertyList/propertyAuth emit (admin.controller:1310,
+      // :1477). Emitting an APP_URL-absolute URL here made the sidebar, which
+      // prefixes `uriApi` itself, build "http://host:3001http://host:3001/..." and
+      // the property logo vanished the moment the operator started a shift.
+      const propertyImage = storedImageUrl((property as any)?.logo) || `/cms/property/${pid}/image`;
 
       const payload = {
         code: 200,
         message: 'Success',
         name: propertyName,
         image: propertyImage,
+        // The shift-start response REPLACES the whole login blob in redux, so it
+        // must also carry the imgProperty key the sidebar falls back to.
+        imgProperty: propertyImage,
+        NameProperty: propertyName,
         data: loginData,
       };
 

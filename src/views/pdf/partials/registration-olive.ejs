@@ -1,0 +1,135 @@
+<%= -- Header -- %>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+    <div style="flex: 1;">
+        <img src="data:image/png;base64,<%= logoBase64 %>" alt="Hotel Logo" style="max-height: 80px;">
+    </div>
+    <div style="text-align: right;">
+        <div style="font-size: 14px; font-weight: bold;">No. <%= folioNumber %></div>
+        <div style="font-size: 18px; font-weight: bold; color: #8B0000;">Registration Form</div>
+    </div>
+</div>
+
+<%= -- Main Table -- %>
+<table border="1" cellspacing="0" cellpadding="5" width="100%" style="font-size: 12px; border-collapse: collapse;">
+    <tr>
+        <td width="20%">
+            <strong>SURNAME</strong><br>
+            Nama Keluarga<br>
+            <%= surname %>
+        </td>
+        <td width="20%">
+            <strong>FIRST NAME</strong><br>
+            Nama Depan / Inisial<br>
+            <%= firstName %>
+        </td>
+        <td width="15%">
+            <strong>ROOM RATE</strong><br>
+            <%= $print_status == 1 ? $roomRate : '' %>
+        </td>
+        <td width="15%">
+            <strong>ROOM TYPE</strong><br>
+            <%= roomType %>
+        </td>
+        <td width="15%">
+            <strong>ROOM NUMBER</strong><br>
+            <%= roomNumber %>
+        </td>
+    </tr>
+
+    <tr>
+        <td rowspan="3">
+            <strong>ADDRESS</strong><br>
+            <%= address %>
+        </td>
+        <td colspan="2">
+            <strong>NO OF PERSON</strong><br>
+            Adult: <%= adult %> | Child: <%= child %> | Extra Bed: <%= additionalBed %>
+        </td>
+        <td colspan="2">
+            <strong>CHECK IN</strong><br>
+            Date: <%= checkInDate %> <br>
+            Time: <%= checkInTime %>
+        </td>
+    </tr>
+
+    <tr>
+        <td colspan="2">
+            <strong>COMPANY</strong><br>
+            <%= company %>
+        </td>
+        <td colspan="2">
+            <strong>CHECK OUT</strong><br>
+            Date: <%= checkOutDate %> <br>
+            Time: <%= checkOutTime %>
+        </td>
+    </tr>
+
+    <tr>
+        <td>
+            <strong>TELP / HP</strong><br>
+            <%= telephone %>
+        </td>
+        <td>
+            <strong>EMAIL</strong><br>
+            <%= email %>
+        </td>
+        <td colspan="2" style="text-align:center; font-weight:bold; background:#f0f0f0;">
+            CHECK IN TIME 14:00 HOURS <br>
+            CHECK OUT TIME 12:00 HOURS
+        </td>
+    </tr>
+
+    <tr>
+        <td>
+            <strong>CITY</strong><br>
+            <%= city %>
+        </td>
+        <td>
+            <strong>COUNTRY</strong><br>
+            <%= country %>
+        </td>
+        <td>
+            <strong>PASSPORT/ID</strong><br>
+            <%= passportId %>
+        </td>
+        <td>
+            <strong>NATIONALITY</strong><br>
+            <%= nationality %>
+        </td>
+        <td>
+            <strong>DATE OF BIRTH</strong><br>
+            <%= dateOfBirth %>
+        </td>
+    </tr>
+
+    <tr>
+        <td colspan="5">
+            <strong>HOTEL RULES</strong>
+            <ul style="margin:0; padding-left:15px; font-size: 11px;">
+                <% rules.forEach(function($2) { %>
+                    <li>
+                        <%= rule['indo'] %><br>
+                        <em><%= rule['en'] %></em>
+                    </li>
+                <% }); %>
+            </ul>
+        </td>
+    </tr>
+
+    <tr>
+        <td colspan="2" style="height: 60px; vertical-align: bottom;">
+            <strong>FO CLERK</strong><br>
+            (Signature)
+        </td>
+        <td colspan="3" style="height: 60px; vertical-align: bottom;">
+            <strong>GUEST SIGNATURE</strong><br>
+            (Signature)
+        </td>
+    </tr>
+</table>
+
+<%= -- Footer -- %>
+<div style="margin-top: 10px; text-align: center; font-size: 11px; color: #444;">
+    <%= hotelAddress %> <br>
+    Telp: <%= phone %>
+</div>

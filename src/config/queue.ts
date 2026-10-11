@@ -73,10 +73,12 @@ export async function initQueue() {
       'night-audit-post',
       'sync-price-booking-engine',
       'sync-check-status-booking-engine',
+      'reconcile-booking-engine-payments',
       'sync-staah-availability',
       'sync-staah-room-type',
       'create-staah-booking',
-      'check-request-status'
+      'check-request-status',
+      'sync-dynamic-rates'
     ];
     for (const q of queues) {
       try { await bossInstance.createQueue(q); } catch {}
@@ -119,6 +121,15 @@ export async function initQueue() {
       await processSyncCheckStatusBookingEngine(job);
     });
 
+    // Safety net for money that arrived without a charge. The status job above only sees
+    // folios whose pending flag is still set; this one sweeps every booking-engine folio
+    // with no transaction on it, whatever the flag says. Hourly because it only has work
+    // to do when something already went wrong — see the job file for the failure it covers.
+    await bossInstance.work('reconcile-booking-engine-payments', async (job: any) => {
+      const { processReconcileBookingEnginePayments } = await import('../queue/jobs/reconcileBookingEnginePayments');
+      await processReconcileBookingEnginePayments(job);
+    });
+
     await bossInstance.work('sync-staah-availability', async (job: any) => {
       const { processSyncStaahAvailability } = await import('../queue/jobs/syncStaahAvailability');
       await processSyncStaahAvailability(job);
@@ -135,6 +146,11 @@ export async function initQueue() {
     });
 
     // Batch report queue consumer (Laravel Kernel :44-59 'check.request.status')
+    await bossInstance.work('sync-dynamic-rates', async (job: any) => {
+      const { processSyncDynamicRates } = await import('../queue/jobs/syncDynamicRates');
+      await processSyncDynamicRates(job);
+    });
+
     await bossInstance.work('check-request-status', async (job: any) => {
       const { processBatchReportRequest } = await import('../queue/jobs/batchReportRequest');
       await processBatchReportRequest(job);
@@ -164,10 +180,15 @@ export async function initQueue() {
   }
   await bossInstance.schedule('check-expired-request-bookings', '0 * * * *'); // hourly
   await bossInstance.schedule('night-audit-post', '0 2 * * *'); // daily at 2 AM - night audit
+  await bossInstance.schedule('sync-dynamic-rates', '0 3 * * *'); // daily at 3 AM - dynamic rates
   await bossInstance.schedule('check-request-status', '*/30 * * * * *'); // Laravel :58 everyThirtySeconds — queued batch reports
     // Laravel Kernel :30/:40 — booking engine price + payment status checks, every minute.
     await bossInstance.schedule('sync-price-booking-engine', '* * * * *');
     await bossInstance.schedule('sync-check-status-booking-engine', '* * * * *');
+    // Hourly, offset from the top of the hour so it does not queue up behind
+    // sync-price-booking-engine / sync-check-status-booking-engine, which both fire on
+    // '*' and share the pool.
+    await bossInstance.schedule('reconcile-booking-engine-payments', '17 * * * *');
     // sync-staah-availability / sync-staah-room-type / create-staah-booking are
     // event-driven only (no cron) — same as Laravel dispatch sites.
 

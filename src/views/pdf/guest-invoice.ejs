@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guest Invoice</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            line-height: 1.3;
+            text-transform: uppercase; 
+        }
+
+        thead { display: table-header-group; }
+        tfoot { display: table-footer-group; }
+        tr { page-break-inside: avoid; }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .header-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+        }
+        .manager-info {
+            flex: 1;
+        }
+        .logo-container {
+            height: 80px;
+            width: auto;
+            display: flex;
+            align-items: center;
+        }
+        .header-left {
+            text-align: left;
+        }
+        .header-right img {
+            max-width: 200px;
+        }
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            text-align: right;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        table, th, td {
+            border: 1px solid black;
+        }
+        th, td {
+            padding: 5px;
+            text-align: left;
+        }
+        .no-border {
+            border: none;
+        }
+        .text-right {
+            text-align: right;
+        }
+        .footer {
+            margin-top: 20px;
+        }
+        .logo {
+            width: 315px;
+            height: auto;
+        }
+
+        
+        main { text-transform: uppercase; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="header-container">
+            <div class="logo-container">
+                <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo Company" class="logo">
+            <!-- <img src="<%= logoBase64 %>" alt="Hotels Logo" class="logo "> -.
+            </div>
+            <div class="title">GUEST INVOICE</div>
+        </div>
+    </div>
+    <div class="hotel-info" style="margin-bottom: 20px;">
+        <strong><%= hotelName %></strong><br>
+        <%= hotelAddress %><br>
+        Tel: <%= hotelTel %><br>
+        Email: <%= hotelEmail %>
+    </div>
+
+    <table class="no-border">
+        <tr>
+            <td><strong>Please Make payable to</strong></td>
+            <td></td>
+            <td></td>
+            <td class="text-right">Page 1 of 1</td>
+        </tr>
+        <tr>
+            <td>Company</td>
+            <td>: <%= billTo %></td>
+            <td>Guest</td>
+            <td>: <%= guest %></td>
+        </tr>
+        <tr>
+            <td>Tel</td>
+            <td>: <%= tel %></td>
+            <td>Folio No.</td>
+            <td>: <%= folioNo %></td>
+        </tr>
+        <tr>
+            <td>Fax</td>
+            <td>: <%= fax %></td>
+            <td>Arrival</td>
+            <td>: <%= arrival %></td>
+        </tr>
+        <tr>
+            <td>Voucher No</td>
+            <td>: <%= voucherNo %></td>
+            <td>Departure</td>
+            <td>: <%= departure %></td>
+        </tr>
+        <tr>
+            <td>Email</td>
+            <td>: <%= email %></td>
+            <td>Room</td>
+            <td>: <%= room %></td>
+        </tr>
+    </table>
+
+    <table style="margin-top: 20px;">
+        <thead>
+            <tr>
+                <th>Date</th>
+                <th>Description</th>
+                <th>Debet</th>
+                <th>Credit</th>
+            </tr>
+        </thead>
+        <tbody>
+            <% transactions.forEach(function(transaction) { %>
+            <tr>
+                <td><%= new Date(transaction.date).toLocaleDateString('en-GB') %></td>
+                <td><%= transaction?.codePost?.name, %></td>
+                <td class="text-right"><%= transaction.type_amount == 'PLUS' ? (parseFloat(transaction.total) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) : '' %></td>
+                <td class="text-right"><%= transaction.type_amount == 'MINUS' ? (parseFloat(transaction.total) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) : '' %></td>
+            </tr>
+            <% }); %>
+        </tbody>
+    </table>
+
+    <table class="no-border" style="margin-top: 20px;">
+        <tr>
+            <td colspan="2"></td>
+            <td>TOTAL AMOUNT include 21% Service Charge & GST:</td>
+            <td class="text-right"><%= (totalAmount).toLocaleString('en-US', {minimumFractionDigits: 2}) %></td>
+        </tr>
+        <tr>
+            <td colspan="2"></td>
+            <td><strong>BALANCE</strong></td>
+            <td class="text-right"><strong><%= (balance).toLocaleString('en-US', {minimumFractionDigits: 2}) %></strong></td>
+        </tr>
+    </table>
+
+    <div class="footer">
+        <p>Regardless of change instructions, I acknowledge that I am<br>
+        personally liable for the payment of the above statement.</p>
+
+        <div style="border-top: 1px solid black; width: 200px; margin-top: 50px;">
+            Signature
+        </div>
+    </div>
+
+    <div style="position: absolute; bottom: 0; right: 0; font-size: 10px;">
+        Printed on: <%= new Date().toLocaleString('en-GB') %>
+    </div>
+</body>
+</html>

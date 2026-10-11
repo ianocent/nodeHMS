@@ -209,7 +209,12 @@ export class UserController {
           where: { model_id: pid, model_type: 'App\\Models\\Property' },
           select: { company_id: true }
         }),
-        prisma.roles.findMany({ where: { status: 1, deleted_at: null }, select: { id: true, name: true } })
+        // Laravel applies `HasProperties`' global scope to Role (`property_id =
+        // request()->user()->last_property`), so the create form only ever listed the
+        // current property's roles. This query dropped the filter and returned every
+        // property's roles, which is what QA reported as "roles from other properties
+        // appear when picking a user role". edit() already filtered by property_id.
+        prisma.roles.findMany({ where: { status: 1, deleted_at: null, property_id: pid }, select: { id: true, name: true } })
       ]);
       const companyIds = propLinks.map((l: any) => l.company_id);
       const propCompanies = await prisma.companies.findMany({

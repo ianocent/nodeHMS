@@ -6635,15 +6635,6 @@ export async function getAllCompaniesRoomRevenueBreakdown(params: any): Promise<
   return [{ startDate, endDate, companies, grandTotal, voidSummary, transferSummary }];
 }
 
-export function getGenericReport(name: string, params: any): any[] {
-  return [{
-    report: name,
-    message: 'Report data not yet implemented',
-    params: safeStringify(params),
-  }];
-}
-
-
 export const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/after-night-audit/daily-statistic': getDailyStatistic,
   'batch/after-night-audit/in-house-folio-balance': getInHouseFolioBalance,
@@ -6774,14 +6765,27 @@ export const reportHandlers: Record<string, (params: any) => Promise<any[]>> = {
   'batch/housekeeping/room-utilization-report/view': getRoomUtilizationReport,
   'account/tax-breakdown-detail-report/view': getTaxBreakdownDetail,
   'account/transaction-report-detail/view': getAccountTransactionReportDetail,
+  'batch/frontoffice/guest-listing-report': getGuestListingReport,
+  'batch/frontoffice/guest-listing-report/view': getGuestListingReport,
+  // Registered WITHOUT the `report/` prefix. The catch-all route
+  // (`report.routes.ts` → `/cms/report/{*path}`) yields a `path` that has already had
+  // `report/` stripped, so the old `report/weekly-booking` keys could never match and
+  // every one of these reports answered 404 "Report not implemented". The prefixed
+  // spellings are kept for callers that build the key by hand.
+  'weekly-booking': getWeeklyBooking,
+  'calendar-operation': getCalendarOperation,
+  'daily-checkin': getDailyCheckin,
+  'company-profile': getCompanyProfile,
+  'weekly-booking/view': getWeeklyBooking,
+  'calendar-operation/view': getCalendarOperation,
+  'daily-checkin/view': getDailyCheckin,
+  'company-profile/view': getCompanyProfile,
   'report/weekly-booking': getWeeklyBooking,
   'report/calendar-operation': getCalendarOperation,
   'report/daily-checkin': getDailyCheckin,
   'report/company-profile': getCompanyProfile,
-  'batch/frontoffice/guest-listing-report': getGuestListingReport,
   'report/weekly-booking/view': getWeeklyBooking,
   'report/calendar-operation/view': getCalendarOperation,
   'report/daily-checkin/view': getDailyCheckin,
   'report/company-profile/view': getCompanyProfile,
-  'batch/frontoffice/guest-listing-report/view': getGuestListingReport,
 };

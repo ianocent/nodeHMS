@@ -12,6 +12,7 @@ import { priceNight } from '../utils/reservationPricing';
 import { availableRoom } from '../utils/roomAvailability';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { writeAudit } from '../utils/audit';
+import { generateFolioNumber } from '../utils/folioNumber';
 
 // Wrapper for drag/copy rebuild — priced per-night row creation against an arbitrary tx client.
 function priceNightPublic(tx: any, opts: {
@@ -612,23 +613,10 @@ export class FolioController {
         const newCheckOutDate: Date = new Date(new Date(newCheckIn).getTime() + getNight * 86400000);
 
         // Generate new folio number (Laravel generateCodeReservation)
-        const lastFolio = await prisma.folios.findFirst({
-          where: { property_id: folio.property_id, type_reservation: folio.type_reservation },
-          orderBy: { id: 'desc' },
-          select: { folio_number: true },
+        const newFolioNumber = await generateFolioNumber(prisma, {
+          propertyId: folio.property_id,
+          typeReservation: String(folio.type_reservation ?? 'fit'),
         });
-        let seq = 1;
-        if (lastFolio?.folio_number) {
-          const parts = String(lastFolio.folio_number).split('/');
-          const lastSeg = parseInt(parts[parts.length - 1], 10);
-          if (!isNaN(lastSeq(lastFolio.folio_number))) seq = lastSeq(lastFolio.folio_number) + 1;
-        }
-        function lastSeq(fn: string): number {
-          const p = fn.split('/');
-          return parseInt(p[p.length - 1], 10) || 0;
-        }
-        const prefix = String(folio.folio_number ?? '').split('/')[0] || 'RES';
-        const newFolioNumber = `${prefix}/${String(seq).padStart(3, '0')}`;
 
         const newCheckInDate = new Date(newCheckIn);
         const folioReplicate = await prisma.folios.create({

@@ -1,0 +1,178 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reservation Confirmation Letter</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: white;
+            color: black;
+            margin: 0;
+            padding: 0;
+            line-height: 1;
+            font-size: 12px;
+        }
+
+        thead { display: table-header-group; }
+        tfoot { display: table-footer-group; }
+        tr { page-break-inside: avoid; }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 10px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .logo {
+            width: 315px;
+            height: auto;
+        }
+        .title {
+            font-size: 18px;
+            font-weight: bold;
+            text-align: right;
+        }
+        .header-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .header-table td {
+            vertical-align: top;
+        }
+        .property {
+            width: 50%;
+        }
+        .logo {
+            width: 50%;
+            text-align: right;
+        }
+        .logo img {
+            width: 100%;
+            height: auto;
+        }
+        .title {
+            text-align: center;
+            font-size: 16px;
+            font-weight: bold;
+            margin: 20px 0;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        .section p {
+            margin: 5px 0;
+        }
+        .section .label {
+            font-weight: normal;
+            display: inline-block;
+            width: 200px; /* Adjust this width as needed */
+        }
+        .text-bold {
+            font-weight: bold;
+        }
+        .section .value {
+            display: inline-block;
+            margin-left: 10px;
+            font-weight: bold;
+        }
+        .policy, .bank-details {
+            margin-top: 20px;
+        }
+        .policy p, .bank-details p {
+            margin: 5px 0;
+        }
+        hr {
+            border: 1px solid black;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <table class="header-table">
+            <tr>
+                <td class="property">
+                    <p><span class="text-bold"><%= hotelNameAlias %></span> <br/> Address : <%= property.address %> Tel : <%= property.telp %> Fax : <%= property.fax %> Email : <%= property.email %></p>
+                </td>
+                <%= -- mid image -- %>
+                <td class="logo" style="text-align: right; vertical-align: middle;">
+                    <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo Company" class="logo" style="max-width: 300px; height: auto;">
+                </td>
+            </tr>
+        </table>
+        
+        <h1 class="title">RESERVATION CONFIRMATION LETTER</h1>
+        <div class="header">
+            <div style="margin-bottom: 20px; text-align: right;">
+                <p><span class="label">Reservation No.</span>: <span class="value"><%= reservationNumber %></span></p>
+            </div>
+            <div class="section">
+                <p><span class="label">Attn</span>: <span class="value"><%= to %>, <%= title %></span></p>
+                <p><span class="label">To</span>: <span class="value"><%= company %></span></p>
+                <p><span class="label">Email</span>: <span class="value"><%= email %></span></p>
+                <p><span class="label">Telp</span>: <span class="value"><%= telephone %></span></p>
+                <p><span class="label">Reservation Staff</span>: <span class="value"><%= salesName %></span></p>
+                <p><span class="label">Date</span>: <span class="value"><%= date('d-F-Y') %></span></p>
+            </div>
+        </div>
+        <p>Greetings from <span class="label"><%= hotelNameAlias %></span></p>
+        <hr>
+        <p>We are pleased to confirm the following room reservation as follows:</p>
+        <div class="section">
+            <p><span class="label">Guest Name</span>: <span class="value"><%= guestName %></span></p>
+            <p><span class="label">Check - In</span>: <span class="value"><%= arrivalDate %></span></p>
+            <p><span class="label">Check - Out</span>: <span class="value"><%= departureDate %></span></p>
+            <p><span class="label text-bold">Total Room Night</span>: <span class="value"><%= totalNights %> Night</span></p>
+            <p><span class="label">Room Type</span>: <span class="value"><%= roomType %></span></p>
+            <p><span class="label text-bold">Room rates per Night</span> </p>
+            <% dailyRates.forEach(function(transaction) { %>
+                <p><span class="label"><%= key1+1 %>. <%= dailyRate.date %> <%= isset(dailyRate.folio) ? ' ( '.dailyRate.folio.' ) ' : "" %> </span>: <span class="value">IDR. <%= dailyRate.rate %></span></p>
+            <% }); %>
+            <% if (!empty(inclusives) { %>)
+                <p><span class="label text-bold">Inclusive</span> </p>
+                <% inclusives.forEach(function(transaction) { %>
+                    <p><span class="label"><%= key2+1 %>. <%= inclusive.name %> - <%= inclusive.frequency %></span>: <span class="value">(<%= strtolower(inclusive.calculator) != 'room' ? "Per Pax" : "Per Room" %>)</span></p>
+                <% }); %>
+            <% } %>
+            <%= -- <p><span class="label">Additional Charge</span>: <span class="value">IDR. <%= additionalFolio %> <%= additionalFolioName %></span></p> -- %>
+            <% if (!empty(additionalCharges) { %>)
+                <p><span class="label text-bold">Additional Charge</span></p>
+                <% additionalCharges.forEach(function(transaction) { %>
+                    <p><span class="label"><%= key3+1 %>. <%= charge.folio_number %> - <%= strtoupper(charge.name) %></span>: <span class="value">IDR. <%= (parseFloat(charge.amount) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) %></span></p>
+                <% }); %>
+                <p><span class="label">Total Additional Charge</span>: <span class="value">IDR. <%= additionalFolio %></span></p>
+            <% } %>
+            <p><span class="label">Total room Rate</span>: <span class="value">IDR. <%= totalRoomRate %></span></p>
+            <p><span class="label">Total Charge</span>: <span class="value">IDR. <%= totalCharge %></span></p>
+        </div>
+        <hr>
+        <div class="policy">
+            <p class="label">Cancelation Policy:</p>
+            <p>The above booking is confirmed and will be held until 6 pm on the day arrival. Should you wish to hold the
+                room for late arrival, please inform to us the latest 1 hour before cancelation time and details to guarantee
+                you reservation. 
+            </p>
+            <p>Cancelation prior arrival should be inform to us 2 days before and the information after time limit are
+                non-refundable.</p>
+            <p>*  early check in before 10 am, will be charge 50% from room rates, check in time start from 2 PM and request
+                for early check in is subject to availability 
+            </p>
+            <p>* Check out time 12 pm and late check out based on avaibility, 50% of charged will be apply for late check out
+                after 1 pm</p>
+            <p>* Additional breakfast will be charged IDR 100.000 nett/person</p>
+        </div>
+        <div class="bank-details section">
+            <p class="label">To guarantee you reservation by Bank Transfer, please find our bank and account No:</p>
+            <p>- <span class="label">Account Name</span> : <span class="value"><%= hotelNameAlias %></span></p>
+            <p>- <span class="label">Bank Name</span> : <span class="value"><%= bankName %></span></p>
+            <p>- <span class="label">Account No.</span> : <span class="value"><%= bankNameAccountNo %></span></p>
+        </div>
+    </div>
+</body>
+</html>

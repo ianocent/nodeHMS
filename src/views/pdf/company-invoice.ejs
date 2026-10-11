@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Company Invoice</title>
+    <style>
+        body { font-family: 'Gill Sans', 'Gill Sans MT', Calibri, 'Trebuchet MS', sans-serif; letter-spacing: normal; font-size: 14px; color: #000; margin: 0; padding: 20px; }
+        .container { width: 100%; max-width: 800px; margin: auto; }
+        .header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 8px; }
+        .header .left { flex: 0 0 auto; }
+        .header .center { flex: 1 1 46%; }
+        .header .right { flex: 1 1 46%; display: flex; justify-content: flex-end; }
+        .logo img { max-height: 80px; width: auto; display: block; }
+        .hotel-info { text-align: right; }
+        .hotel-info h2 { margin: 0; font-size: 22px; }
+        .invoice-title { font-weight: bold; font-size: 14px; text-align: right; margin-top: 6px; font-style: underline;}
+        .company-box {
+            border: 2px solid #000;
+            border-radius: 10px;
+            padding: 8px 12px;
+            margin: 0;
+            font-size: 11px;
+            max-width: 70%;
+        }
+        .right-block { display: flex; align-items: flex-start; gap: 12px; }
+        .printed-info { text-align: right; font-size: 11px; min-width: 150px; }
+        .page-info { text-align: right; font-size: 11px; margin-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 11px; }
+        th { border-bottom: 1px solid #000; padding: 8px 5px; text-align: left; font-weight: bold; background-color: #c6c6c6; }
+        td { padding: 6px 5px; border-bottom: 1px dashed #ccc; }
+        .text-right { text-align: right; }
+        .total-row td { border-top: 2px solid #000; border-bottom: none; font-weight: bold; }
+        .terbilang { margin-top: 5px; font-style: italic; font-size: 11px; }
+        .no-border { border: none !important; }
+        .master-row { background-color: #f0f0f0; font-weight: bold; }
+        .master-row td { border-bottom: 2px solid #000; }
+    </style>
+</head>
+<body>
+<%
+    $page = 1;
+    $totalPages = 1;
+%>
+
+<% companies.forEach(function(transaction) { %>
+<div class="container">
+    <!-- Header -.
+    <div class="header">
+        <div class="left">
+            <% if (!empty(c.logoBase64) { %>)
+                <div class="logo">
+                    <img src="data:image/<%= c.logoMime %>;base64,<%= c.logoBase64 %>" alt="Hotel Logo">
+                </div>
+            <% } else { %>
+                <div class="logo" style="background: #f0f0f0; display: flex; align-items: center; justify-content: center; height: 60px; width: 160px; color: #999; font-size: 10px;">
+                    NO LOGO
+                </div>
+            <% } %>
+        </div>
+
+        <div class="center hotel-info">
+            <h2 style="margin: 0;"><%= strtoupper(property.name) %></h2>
+            <p style="margin: 4px 0 0 0; font-size: 12px; line-height: 1.2;">
+                Address: <%= property.address %><br>
+                Phone: <%= property.phone %><br>
+                Email: <%= property.email %>
+            </p>
+            <div class="invoice-title">Invoice#</div>
+            <div style="font-weight: bold; font-size: 13px;"><%= c.invoice_number %></div>
+        </div>
+
+        <div class="right">
+            <div class="right-block">
+                <div class="company-box">
+                    <strong>Company:</strong> <%= strtoupper(c.company) %><br>
+                    <strong>Address:</strong> <%= c.address %>
+                </div>
+                <div class="printed-info">
+                    <strong>Printed by:</strong> <%= strtoupper(request().user().name ?? 'System') %><br>
+                    <strong>Date:</strong> <%= \Carbon\Carbon::new Date().toLocaleString('en-GB') %>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 3%;"></th>
+                <th style="width: 8%;">Unit</th>
+                <th style="width: 15%;">Folio No</th>
+                <th style="width: 20%;">Guest Name</th>
+                <th style="width: 18%;">Remarks</th>
+                <th style="width: 10%;">Arrival</th>
+                <th style="width: 10%;">Departure</th>
+                <th style="width: 13%;" class="text-right">Charge</th>
+                <th style="width: 3%;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            <% c.transactions.forEach(function(transaction) { %>
+                <% if (t.is_master) { %>
+                    <tr class="">
+                        <td></td>
+                        <td><%= t.unit %></td>
+                        <td><%= t.folio_no %></td>
+                        <td><%= t.guest %></td>
+                        <td><%= t.remarks %></td>
+                        <td><%= new Date(t.arrival).toLocaleDateString('en-GB') %></td>
+                        <td><%= new Date(t.departure).toLocaleDateString('en-GB') %></td>
+                        <td class="text-right"><%= number_format(t.charge, 0) %></td>
+                        <td></td>
+                    </tr>
+                    <% } else { %>
+                    <tr>
+                        <td></td>
+                        <td><%= t.unit %></td>
+                        <td><%= t.folio_no %></td>
+                        <td><%= t.guest %></td>
+                        <td><%= t.remarks %></td>
+                        <td><%= new Date(t.arrival).toLocaleDateString('en-GB') %></td>
+                        <td><%= new Date(t.departure).toLocaleDateString('en-GB') %></td>
+                        <td class="text-right"><%= number_format(t.charge, 0) %></td>
+                        <td></td>
+                    </tr>
+                <% } %>
+            <% }); %>
+
+            <tr class="total-row">
+                <td colspan="7" class="text-right"><strong>Total :</strong></td>
+                <td class="text-right"><strong><%= number_format(c.total_amount, 0) %></strong></td>
+                <td></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <div class="terbilang">
+        <strong>Saying :</strong><br>
+        <%= c.terbilang %>
+    </div>
+</div>
+
+<% page++ %>
+<hr style="page-break-after: auto; border: none; margin: 20px 0;">
+<% }); %>
+</body>
+</html>

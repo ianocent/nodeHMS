@@ -289,6 +289,11 @@ export const TABLES: Record<string, any[]> = {
     { label: 'Founder of Item', key: 'founder_of_item', type: 'text', is_search: true },
     { label: 'Contact number', key: 'contact_number_founder', type: 'text', is_search: true },
     { label: 'Item Description', key: 'item_description', type: 'text', is_search: true },
+    { label: 'Photo 1', key: 'photo_1', type: 'fileimage', is_search: false },
+    { label: 'Photo 2', key: 'photo_2', type: 'fileimage', is_search: false },
+    { label: 'Photo 3', key: 'photo_3', type: 'fileimage', is_search: false },
+    { label: 'Photo 4', key: 'photo_4', type: 'fileimage', is_search: false },
+    { label: 'Photo 5', key: 'photo_5', type: 'fileimage', is_search: false },
   ],
   master_hotel_competitors: [
     NO_COL(),

@@ -35,7 +35,7 @@ async function rateRowFor(rateId: bigint): Promise<any> {
     where: { id: rateId },
     include: {
       code_posts: { include: { code_billings: { select: { id: true, name: true } } } },
-      code_gls: false as any,
+      
     } as any,
   });
 }
@@ -49,6 +49,7 @@ export class CompanyContractRateController {
       const companyId = req.query.company_id as string;
       if (!companyId) { badRequest(res, 'company_id is required'); return; }
       const search = req.query.search as string;
+      const propertyId = BigInt(req.user?.lastProperty ?? 0);
 
       const linkWhere: any = { company_profile_id: BigInt(companyId), model_type: RATE_MODEL_TYPE };
       if (search) {
@@ -70,7 +71,7 @@ export class CompanyContractRateController {
         prisma.model_has_company_profiles.count({ where: linkWhere }),
       ]);
 
-      const ratesOpt = await prisma.rates.findMany({ where: { deleted_at: null }, select: { id: true, name: true, description: true } });
+      const ratesOpt = await prisma.rates.findMany({ where: { property_id: propertyId, deleted_at: null }, select: { id: true, name: true, description: true } });
       const table = [
         { label: 'Rate Code', key: 'contract_rate', type: 'select', options: ratesOpt.map(r => ({ value: Number(r.id), label: r.name })), is_search: true },
         { label: 'Description', key: 'description', type: 'none' }, // it says rate.description before, but we can't edit it directly. Actually, the backend code maps `rate` property. Let's keep `rate.description` for view, but edit will only send `contract_rate`. Wait, type 'none' is right for view-only cols.

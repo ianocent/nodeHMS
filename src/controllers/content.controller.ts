@@ -65,6 +65,21 @@ function perm(req: Request) {
   };
 }
 
+// Laravel OtherGuestController@index (:89-97) merges `hasPermission(view)` with
+// `hasCrudPermission(91, 'edit'|'delete')` — the Other Guest grid is gated on menu
+// 91, not on the module's own MENU_ID.
+const OTHER_GUEST_MENU_ID = 91;
+
+function otherGuestPerm(req: Request) {
+  const flags = getPermissionFlags(req.user, OTHER_GUEST_MENU_ID);
+  return {
+    view: true,
+    add: req.user?.superUser || flags.add,
+    edit: req.user?.superUser || flags.edit,
+    delete: req.user?.superUser || flags.delete,
+  };
+}
+
 export class ContentController {
 
   // â•â•â•â•â•â•â•â•â•â•â• CONTENTS (content-list, seo-home, room, config-pax) â•â•â•â•â•â•â•â•â•â•â•
@@ -595,57 +610,183 @@ export class ContentController {
   }
 
   // â•â•â•â•â•â•â•â•â•â•â• OTHER GUESTS â•â•â•â•â•â•â•â•â•â•â•
+  // Laravel OtherGuestController parity. The folio tab sends `folio_id` /
+  // `subfolio_id` in the query string and `idx[]` (guest profile ids) in the
+  // body; row ids on this grid are guest_profile_id, not other_guests.id.
+  private static otherGuestFolioId(req: Request): string {
+    const q = req.query as any;
+    const sub = q.subfolio_id;
+    const folio = q.folio_id;
+    if (sub !== undefined && sub !== 'null' && sub !== '') return String(sub);
+    return String(folio ?? '');
+  }
+
   static async otherGuestList(req: Request, res: Response): Promise<void> {
     try {
       const { page, limit, search } = parsePagination(req.query);
       const pid = BigInt(req.user?.lastProperty ?? 0);
+      const folioIdRaw = ContentController.otherGuestFolioId(req);
+      // Laravel index (:41-51) answers an invalid folio with an EMPTY list plus
+      // the table meta — never with every row in the property.
+      if (!/^\d+$/.test(folioIdRaw)) {
+        success(res, [], 'No guest ID provided.', 200, {
+          table: ContentController.otherGuestTable(),
+          permission: otherGuestPerm(req),
+          search_data: [],
+          pagination: { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 },
+        });
+        return;
+      }
       const where: any = { property_id: pid, deleted_at: null };
+      const folio = await prisma.folios.findUnique({
+        where: { id: BigInt(folioIdRaw) },
+        select: { id: true, parent: true, type_reservation: true },
+      });
+      if (!folio) {
+        success(res, [], 'No guest ID provided.', 200, {
+          table: ContentController.otherGuestTable(),
+          permission: otherGuestPerm(req),
+          search_data: [],
+          pagination: { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 },
+        });
+        return;
+      }
+      // Folio::isParentGIT() (Folio.php:426-429) = `type_reservation == 'git'
+      // && parent == 0`. The node port tested `parent != 0`, i.e. the SUB-folio
+      // case, so a GIT parent never expanded to its sub-folios and the tab came
+      // back empty.
+      const isParentGit = String(folio.type_reservation ?? '').toLowerCase() === 'git' && Number(folio.parent ?? 0) === 0;
+      let folioIds: number[] = [Number(folio.id)];
+      if (isParentGit) {
+        const subs = await prisma.folios.findMany({
+          where: { parent: folio.id, deleted_at: null },
+          select: { id: true },
+        });
+        if (subs.length) folioIds = subs.map((s: any) => Number(s.id));
+      }
+      where.folio_id = { in: folioIds };
+      if (search) {
+        where.guest_profiles = {
+          OR: [
+            { first_name: { contains: search } },
+            { last_name: { contains: search } }
+          ]
+        };
+      }
       const [data, total] = await Promise.all([
         prisma.other_guests.findMany({
           where,
           orderBy: { id: 'desc' },
           skip: (page - 1) * limit,
           take: limit,
-          include: { guest_profiles: { select: { id: true, first_name: true, last_name: true, nationality_id: true } } },
+          include: { guest_profiles: { select: { id: true, first_name: true, last_name: true } } },
         }),
         prisma.other_guests.count({ where }),
       ]);
-      success(res, bigintToNumber(data), 'Success', 200, {
-        table: [
-          { label: 'Guest', key: 'guest_profile_id', type: 'none', is_search: search !== undefined },
-          { label: 'Folio', key: 'folio_id', type: 'none', is_search: false },
-          { label: 'Check In', key: 'check_in_date', type: 'none', is_search: false },
-          { label: 'Check Out', key: 'check_out_date', type: 'none', is_search: false },
-          { label: 'Status', key: 'status', type: 'badge', is_search: false },
-          { label: 'Action', key: 'action', type: 'action', is_search: false },
-        ],
-        permission: perm(req),
-        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      // OtherGuest::formatData() (:30-46) keys the row on guest_profile_id and
+      // exposes the resolved guest_name / stay. The node port shipped the raw
+      // other_guests row (id = other_guests.id, no guest_name), so the grid
+      // rendered a different column set from the base reference.
+      const rows = (data as any[]).map((r: any, i: number) => ({
+        no: i + 1 + (page - 1) * limit,
+        id: Number(r.guest_profile_id),
+        guest_profile_id: Number(r.guest_profile_id),
+        folio_id: r.folio_id === null || r.folio_id === undefined ? null : Number(r.folio_id),
+        status_other_guest: r.status_other_guest,
+        check_in_date: r.check_in_date,
+        check_out_date: r.check_out_date,
+        guest_name: `${r.guest_profiles?.first_name ?? ''} ${r.guest_profiles?.last_name ?? ''}`.trim(),
+        stay: r.stay ?? 0,
+        status: r.status,
+        is_view: true,
+        is_edit: otherGuestPerm(req).edit,
+        is_need_approval: false,
+        relation: [],
+      }));
+      success(res, bigintToNumber(rows), 'Success', 200, {
+        table: ContentController.otherGuestTable(),
+        permission: otherGuestPerm(req),
+        search_data: [],
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(total / limit)), per_page: limit, total, from: total ? (page - 1) * limit + 1 : 0, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { console.error('Other guest list error:', err); error(res, 'Failed to list other guests', 500); }
+  }
+
+  private static otherGuestTable() {
+    // OtherGuest::formatTable() (:48-82)
+    return [
+      { label: 'No', key: 'no', type: 'none', is_search: false },
+      { label: 'Guest Name', key: 'guest_name', type: 'none', is_search: false },
+      { label: 'Check In Date', key: 'check_in_date', type: 'date', is_search: false },
+      { label: 'Check Out Date', key: 'check_out_date', type: 'date', is_search: false },
+      { label: 'Stay', key: 'stay', type: 'none', is_search: false },
+    ];
   }
 
   static async otherGuestStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { guest_profile_id, folio_id, status_other_guest, check_in_date, check_out_date, stay, status } = req.body;
-      if (!guest_profile_id) { badRequest(res, 'guest_profile_id is required'); return; }
-      const data = await prisma.other_guests.create({
-        data: {
-          property_id: pid,
-          guest_profile_id: BigInt(guest_profile_id),
-          folio_id: folio_id ? parseInt(folio_id) : 0,
-          status_other_guest: status_other_guest ?? 0,
-          check_in_date: check_in_date ? new Date(check_in_date) : null,
-          check_out_date: check_out_date ? new Date(check_out_date) : null,
-          stay: stay ?? 0,
-          status: status ?? 1,
-          created_at: new Date(),
-          updated_at: new Date(),
-          created_by: req.user?.id,
-        },
+      const body: any = req.body ?? {};
+      const folioIdRaw = ContentController.otherGuestFolioId(req) || (body.folio_id != null ? String(body.folio_id) : '');
+      if (!/^\d+$/.test(folioIdRaw)) { badRequest(res, 'The folio id field is required.'); return; }
+      // Laravel store() takes `idx` (array of guest_profiles ids) from the
+      // checked rows of the guest picker popup, not a single guest_profile_id.
+      let idx: any[] = Array.isArray(body.idx) ? body.idx : body.idx !== undefined ? [body.idx] : [];
+      if (idx.length === 0 && body.guest_profile_id !== undefined) idx = [body.guest_profile_id];
+      idx = idx
+        .map((i: any) => (i && typeof i === 'object' ? (i.value ?? i.id) : i))
+        .filter((i: any) => /^\d+$/.test(String(i ?? '')));
+      if (idx.length === 0) { badRequest(res, 'The guest profile field is required.'); return; }
+
+      const folio = await prisma.folios.findUnique({
+        where: { id: BigInt(folioIdRaw) },
+        select: { id: true, check_in_date: true, check_out_date: true },
       });
-      success(res, bigintToNumber(data), 'Other guest created', 200);
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+
+      const [lastReservation, guestRows, stayRows] = await Promise.all([
+        prisma.reservations.findFirst({
+          where: { folio_id: folio.id, deleted_at: null },
+          orderBy: { date: 'desc' },
+          select: { status_reservation: true },
+        }),
+        prisma.guest_profiles.findMany({ where: { id: { in: idx.map((i: string) => BigInt(i)) } }, select: { id: true } }),
+        prisma.folios.groupBy({
+          by: ['guest_profile_id'],
+          where: {
+            guest_profile_id: { in: idx.map((i: string) => BigInt(i)) },
+            deleted_at: null,
+            status_reservation: 1,
+            OR: [{ folio_number: { startsWith: 'F' } }, { type_reservation: 'git', parent: { not: 0 } }],
+          },
+          _count: { _all: true },
+        }).catch(() => [] as any[]),
+      ]);
+      const knownGuests = new Set(guestRows.map((g: any) => String(g.id)));
+      const stayByGuest = new Map<string, number>((stayRows as any[]).map((r) => [String(r.guest_profile_id), Number(r._count?._all ?? 0)]));
+
+      // Laravel: `$folio->otherGuests()->forceDelete()` then re-create.
+      await prisma.other_guests.deleteMany({ where: { folio_id: Number(folio.id) } });
+      for (const raw of idx) {
+        const guestId = String(raw);
+        if (!knownGuests.has(guestId)) continue;
+        await prisma.other_guests.create({
+          data: {
+            property_id: pid,
+            guest_profile_id: BigInt(guestId),
+            folio_id: Number(folio.id),
+            status_other_guest: lastReservation?.status_reservation ?? 0,
+            check_in_date: folio.check_in_date,
+            check_out_date: folio.check_out_date,
+            stay: stayByGuest.get(guestId) ?? 0,
+            status: body.status !== undefined ? Number(body.status?.value ?? body.status) : 1,
+            created_at: new Date(),
+            updated_at: new Date(),
+            created_by: req.user?.id ?? null,
+          },
+        });
+      }
+      success(res, null, 'Success', 200);
     } catch (err: any) { console.error('Other guest store error:', err); error(res, 'Failed to create other guest', 500); }
   }
 
@@ -653,26 +794,38 @@ export class ContentController {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Not found'); return; }
-      const { guest_profile_id, folio_id, status_other_guest, check_in_date, check_out_date, stay, status } = req.body;
-      const data: any = { updated_at: new Date(), updated_by: req.user?.id };
-      if (guest_profile_id !== undefined) data.guest_profile_id = BigInt(guest_profile_id);
-      if (folio_id !== undefined) data.folio_id = parseInt(folio_id);
-      if (status_other_guest !== undefined) data.status_other_guest = status_other_guest;
+      const { check_in_date, check_out_date } = req.body ?? {};
+      // Laravel update() looks the row up by (guest_profile_id, folio_id).
+      const folioIdRaw = ContentController.otherGuestFolioId(req) || (req.body?.folio_id != null ? String(req.body.folio_id) : '');
+      if (!/^\d+$/.test(folioIdRaw)) { badRequest(res, 'The folio id field is required.'); return; }
+      const row = await prisma.other_guests.findFirst({
+        where: { guest_profile_id: BigInt(idRaw), folio_id: parseInt(folioIdRaw, 10), deleted_at: null },
+      });
+      if (!row) { notFound(res, 'Not Found'); return; }
+      const data: any = { updated_at: new Date(), updated_by: req.user?.id ?? null };
       if (check_in_date !== undefined) data.check_in_date = check_in_date ? new Date(check_in_date) : null;
       if (check_out_date !== undefined) data.check_out_date = check_out_date ? new Date(check_out_date) : null;
-      if (stay !== undefined) data.stay = stay;
-      if (status !== undefined) data.status = status;
-      await prisma.other_guests.update({ where: { id: BigInt(idRaw) }, data });
-      success(res, null, 'Other guest updated');
+      await prisma.other_guests.update({ where: { id: row.id }, data });
+      success(res, null, 'Success', 200);
     } catch (err: any) { error(res, 'Failed to update other guest', 500); }
   }
 
   static async otherGuestDestroy(req: Request, res: Response): Promise<void> {
     try {
       const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-      if (!idRaw || !/^\d+$/.test(idRaw)) { notFound(res, 'Not found'); return; }
-      await prisma.other_guests.update({ where: { id: BigInt(idRaw) }, data: { deleted_at: new Date(), deleted_by: req.user?.id } });
-      success(res, null, 'Other guest deleted');
+      if (!idRaw) { notFound(res, 'Not Found'); return; }
+      // Laravel destroy() deletes by (guest_profile_id, folio_id).
+      const folioIdRaw = ContentController.otherGuestFolioId(req) || (req.body?.folio_id != null ? String(req.body.folio_id) : '');
+      const where: any = { deleted_at: null };
+      if (/^\d+$/.test(String(idRaw))) where.guest_profile_id = BigInt(idRaw);
+      if (/^\d+$/.test(folioIdRaw)) where.folio_id = parseInt(folioIdRaw, 10);
+      const row = await prisma.other_guests.findFirst({ where });
+      if (!row) { notFound(res, 'Not Found'); return; }
+      await prisma.other_guests.update({
+        where: { id: row.id },
+        data: { deleted_at: new Date(), status: 0, deleted_by: req.user?.id ?? null },
+      });
+      success(res, [], 'Success', 200);
     } catch (err: any) { error(res, 'Failed to delete other guest', 500); }
   }
 

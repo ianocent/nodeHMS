@@ -832,8 +832,18 @@ export class AdminController {
         if (!property.market_segment_4) excluded.push(22n);
       }
 
+      // `status = 0` means the menu row is retired: it keeps its id, url, nested-set
+      // position and role_menu_crud grants, so one UPDATE brings it back, but it must not
+      // appear in the UI. Without this filter the endpoint returned them and the tab
+      // strip rendered them — that is why Room Type (48) showed Main + Image + Facility
+      // after Image (1099) and Facility (1195) had been moved to Booking Engine Setup
+      // (1196/1197) and set to status 0.
+      //
+      // Only this endpoint filters. `/cms/menu` (the menu-management list and the
+      // sidebar) must keep showing inactive rows, otherwise an operator can never see
+      // or re-enable one.
       const allMenus = await getPrisma().menus.findMany({
-        where: { deleted_at: null },
+        where: { deleted_at: null, status: { not: 0 } },
         orderBy: [{ left: 'asc' }, { sort: 'asc' }],
       });
 
@@ -1546,6 +1556,10 @@ export class AdminController {
         latitude: b.latitude || null,
         longitude: b.longitude || null,
         status: b.status !== undefined && b.status !== null ? Number(b.status) : 1,
+        // Publication to the guest portal. Defaults to off so a new property is never
+        // published by accident — it has no facilities, terms or banner yet, and an
+        // empty hotel on /loyalty is worse than an absent one.
+        is_booking_engine: b.is_booking_engine === undefined || b.is_booking_engine === null ? 0 : Number(!!b.is_booking_engine),
         is_tax: b.is_tax === undefined || b.is_tax === null ? 0 : Number(!!b.is_tax),
         is_tax_exclude_room: b.is_tax_exclude_room === undefined || b.is_tax_exclude_room === null ? 0 : Number(!!b.is_tax_exclude_room),
         is_tax_exclude_restaurant: b.is_tax_exclude_restaurant === undefined || b.is_tax_exclude_restaurant === null ? 0 : Number(!!b.is_tax_exclude_restaurant),
@@ -1664,6 +1678,8 @@ export class AdminController {
         contract_expired: p.contract_expired ? new Date(p.contract_expired).toISOString().substring(0, 10) : null,
         join_date: p.join_date ? new Date(p.join_date).toISOString().substring(0, 10) : null,
         status: { value: statusOpt.value, label: statusOpt.label },
+        is_booking_engine: { value: p.is_booking_engine ? 1 : 0, label: p.is_booking_engine ? 'Active' : 'Inactive' },
+        is_booking_engine_flag: !!p.is_booking_engine,
         market_segment_1: { value: p.market_segment_1 ? 1 : 0, label: p.market_segment_1 ? 'Active' : 'Inactive' },
         market_segment_2: { value: p.market_segment_2 ? 1 : 0, label: p.market_segment_2 ? 'Active' : 'Inactive' },
         market_segment_3: { value: p.market_segment_3 ? 1 : 0, label: p.market_segment_3 ? 'Active' : 'Inactive' },
@@ -1738,6 +1754,12 @@ export class AdminController {
         latitude: b.latitude !== undefined ? b.latitude : existing.latitude,
         longitude: b.longitude !== undefined ? b.longitude : existing.longitude,
         status: b.status !== undefined && b.status !== null ? Number(b.status) : existing.status,
+        // Absent key leaves the flag alone, so a save from a form that predates this
+        // field cannot silently unpublish a live property.
+        is_booking_engine:
+          b.is_booking_engine === undefined || b.is_booking_engine === null
+            ? existing.is_booking_engine
+            : Number(!!b.is_booking_engine),
         is_tax: optInt(b.is_tax, existing.is_tax),
         is_tax_exclude_room: optInt(b.is_tax_exclude_room, existing.is_tax_exclude_room),
         is_tax_exclude_restaurant: optInt(b.is_tax_exclude_restaurant, existing.is_tax_exclude_restaurant),

@@ -1,0 +1,356 @@
+  <!DOCTYPE html>
+  <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Pre Registration Form</title>
+      <style>
+        body {
+          font-family: Arial, sans-serif;
+          font-size: 11px;
+          line-height: 1.3;
+          margin: 0;
+          padding: 18px 22px;
+          color: #000;
+        }
+        .header {
+          width: 100%;
+          margin-bottom: 8px;
+        }
+        .header-table {
+          width: 100%;
+          border-collapse: collapse;
+        }
+        .header-table td {
+          vertical-align: middle;
+        }
+        .brand {
+          font-weight: bold;
+          font-size: 14px;
+        }
+        .title {
+          text-align: right;
+          font-weight: bold;
+        }
+        .grid {
+          width: 100%;
+          border-collapse: collapse;
+        }
+        .grid td,
+        .grid th {
+          border: 1px solid #000;
+          padding: 6px;
+          vertical-align: top;
+        }
+        .muted {
+          background: #f2f2f2;
+          font-weight: bold;
+        }
+        .center {
+          text-align: center;
+        }
+        .small {
+          font-size: 10px;
+        }
+        .notice {
+          background: #f2f2f2;
+          font-weight: bold;
+          text-align: center;
+          border: 1px solid #000;
+          margin: 8px 0 2px 0;
+        }
+        .terms {
+          font-size: 9px;
+          line-height: 1.3;
+          margin-top: 8px;
+        }
+        .sign {
+          width: 100%;
+          border-collapse: collapse;
+          margin-top: 8px;
+        }
+        .sign td {
+          border: 1px solid #000;
+          padding: 10px;
+          height: 80px;
+          vertical-align: top;
+          text-align: center;
+        }
+        .icons {
+          text-align: right;
+        }
+        .checkbox {
+          display: inline-block;
+          width: 12px;
+          height: 12px;
+          border: 1px solid #000;
+          margin-right: 6px;
+        }
+        .row {
+          width: 100%;
+          border-collapse: collapse;
+        }
+        .row td {
+          border: 1px solid #000;
+          padding: 6px 10px;
+          text-align: center;
+        }
+        .header {
+          background: #f8f8f8;
+          font-weight: bold;
+        }
+        .headers {
+          background: #343434;
+          font-weight: bold;
+          color: #ffffff;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="headers" style="margin-bottom: 10px;">
+        <table class="header-table" style="width:100%; border-collapse:collapse;">
+          <tr>
+            <td style="width: 30%; padding:10px 20px; text-align:left;">
+              <% if (logoBase64) { %>
+              <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo" style="height:90px;" />
+              <% } %>
+            </td>
+
+            <td style="width: 40%; text-align:center; font-size:24px; font-weight:bold;">
+              <%= hotelName ?? property.name ?? '' %>
+            </td>
+
+            <td style="width: 30%; padding-right:20px; text-align:right; font-size:12px;">
+              Pre Registration Form
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <table class="grid">
+        <tr>
+          <td class="muted">No. Kamar<br />Room</td>
+          <td><%= roomNo %></td>
+          <td class="muted">Jumlah Tamu<br />No. of Person<br />(A) / (C)</td>
+          <td><%= noOfGuests %></td>
+          <td class="muted">Harga per malam/Daily rate</td>
+          <td><%= dailyRate == '' ? '' : 'IDR ' . dailyRate %></td>
+          <td class="muted">No. Reservasi<br />Reserv. No</td>
+          <td><%= confirmationNo %></td>
+        </tr>
+        <tr>
+          <td class="muted">Jumlah kamar<br />No. of Room</td>
+          <td>1</td>
+          <td class="muted">Jenis Kamar<br />Room Type</td>
+          <td><%= roomType %></td>
+          <td class="muted">Kode Harga<br />Rate Room</td>
+          <td><%= packagePlan %></td>
+          <td class="muted">Penerima tamu<br />Receptionist</td>
+          <td><%= userCreatedBy %></td>
+        </tr>
+      </table>
+
+      <div class="notice">
+        Waktu Lapor Keluar : Jam 12.00 siang<br />Check Out Time 12.00 Noon
+      </div>
+      <div class="center small" style="margin-bottom:6px;">
+        Harap Tulis dengan huruf Cetak - Please Print In Block Letters
+      </div>
+
+      <table class="grid">
+        <colgroup>
+          <col style="width: 18%;" />
+          <col style="width: 46%;" />
+          <col style="width: 18%;" />
+          <col style="width: 18%;" />
+        </colgroup>
+        <tr>
+          <td class="muted">Nama<br />Name</td>
+          <td><%= guestName %></td>
+          <td colspan="2" rowspan="2">
+            <table class="row">
+              <tr>
+                <td class="header">Waktu Kedatangan <br/> Arrival Time </td>
+              </tr>
+              <tr>
+                <td style="border:0"><%= etaTime %></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td class="muted">Tanggal Lahir<br />Date of Birth</td>
+          <td><%= dateOfBirth %></td>
+        </tr>
+        <tr>
+          <td colspan="2" style="padding:0">
+            <table class="row">
+              <tr>
+                <td class="header" style="border:0; width:33%">Kebangsaan <br/>Nasionality</td>
+                <td class="header" style="border:0; width:33%">No. KTP <br/> Passport No</td>
+                <td class="header" style="border:0; width:33%">Kebangsaan <br/>Nasionality</td>
+              </tr>
+              <tr>
+                <td style="border:0"><%= nationality %></td>
+                <td style="border:0"><%= passportNo %></td>
+                <td style="border:0"><%= nationality %></td>
+              </tr>
+            </table>
+          </td>
+          <td colspan="2" rowspan="1">
+            <table class="row">
+              <tr>
+                <td class="header" style="border:0; width:33%">Tanggal Kedatangan<br/> Arrival Date </td>
+              </tr>
+              <tr>
+                <td style="border:0"><%= arrivalDate %></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" rowspan="2">
+            <table class="row">
+              <tr>
+                <td class="header" style="border:0; width:50%">Alamat <br/>Address</td>
+                <td class="header" style="border:0; width:50%">Telephone/Phone <br/> Telepon/Ponsel</td>
+              </tr>
+              <tr>
+                <td style="border:0"><%= guestAddress %></td>
+                <td style="border:0"><%= telephone %></td>
+              </tr>
+            </table>
+            <table class="row">
+              <tr>
+                <td class="header" style="border:0; width:50%">Email <br/> Surel</td>
+                <td class="header" style="border:0; width:50%">Hand Phone <br/> Mobile Phone</td>
+              </tr>
+              <tr>
+                <td style="border:0"><%= email %></td>
+                <td style="border:0"><%= mobile_phone %></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2">
+            <table class="row">
+              <tr>
+                <td class="header" style="border:0; width:50%">Tanggal Keberangkatan<br/> Departure Date </td>
+              </tr>
+              <tr>
+                <td style="border:0"><%= departureDate %></td>
+              </tr>
+            </table>
+            <table class="row">
+              <tr>
+                <td class="header" style="border:0; width:50%">Tanda Tangan Tamu<br/> Signature </td>
+              </tr>
+              <tr>
+                <td style="border:0">&nbsp;</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td class="muted">No. Member / Member Card No</td>
+          <td colspan="3"></td>
+        </tr>
+        <tr>
+          <td class="muted">No. Kartu Kredit / Credit Card No</td>
+          <td colspan="3"><%= creditCardNo %></td>
+        </tr>
+        <tr style="border: 1px solid #000;">
+          <td class="muted">Cara Pembayaran<br />Method of Payment</td>
+          <td colspan="3" style="border: 0;height: 50px; text-align: center;">
+            <table class="row">
+              <tr>
+                <td style="border:0;"><span class="checkbox"></span> Visa</td>
+                <td style="border:0;"><span class="checkbox"></span> Master</td>
+                <td style="border:0;"><span class="checkbox"></span> Amex</td>
+              </tr>
+              <tr>
+                <td style="border:0;"><span class="checkbox"></span> Dinners</td>
+                <td style="border:0;"><span class="checkbox"></span> JCB</td>
+                <td style="border:0;"><span class="checkbox"></span> Other</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+
+      <table class="grid" style="margin-top:8px;">
+        <tr>
+          <td colspan="4" class="muted">PERATURAN / REGULATIONS</td>
+        </tr>
+        <tr>
+          <td colspan="4" style="padding:8px;">
+            kepada  <%= hotelName ?? property.name ?? '' %> HOTEL saya menyatakan bahwa saya baik sendiri maupun bersama-sama dengan perusahaan, asosiasi,perorangan
+            atau semuanya bertanggung jawab atas pembayaran semua tagihan yang terjadi. sehubungan dengan seluruh pelayanan yang anda
+            berikan sesuai formulir pendaftaran ini,
+            Barang berharga (perhiasan,uang dsb) dapat anda simpan dalam brankas di kamar anda atau di kantor depan.
+            <br/><br/><br/>
+            To  <%= hotelName ?? property.name ?? '' %> HOTEL, i knowledge that i'm jointly and severally liable with the fore going person,company or association and
+            if more than one all of them for payment of the amount of any charges payable orincurred in connecting with all service
+            provided by you under pre registration. For your valuable belonging (jewels, money etc) could safe in the safe deposit box in your room or in the
+            front
+          </td>
+        </tr>
+      </table>
+
+      <%
+          $baseUrl = app().environment('local')
+              ? 'http://127.0.0.1:8000'
+              : 'https://rndhms.dipstrategy.co.id';
+      %>
+
+      <table class="grid" style="margin-top:8px;">
+        <tr>
+          <td width=72% style="padding:8px; color:red; font-weight:bold;">
+            Saat ini anda menempati Kamar Asap Rokok. Kami berharap anda dan tamu anda untuk tidak membawa
+            hewan peliharaan, tidak membawa buah durian serta tidak menurunkan tempat tidur selama menginap. Bila hal itu terjadi, dengan
+            sangat menyesal kami akan bebankan kepada anda biaya sebesar Rp.1.000.000.
+            Mohon diperhatikan, jika kunci kamar anda hilang atau rusak, anda akan langsung dibebankan biaya Rp 100.000,-
+            <br/><br/><br/>
+            You are currently occupying a smoking room. We kindly ask you and your guests not to bring any pets, not to bring durian fruit, and not to move or lower the bed during your stay. Should any of these occur, we regret to inform you that a charge of IDR 1,000,000 will be applied.  
+            Please also note that if your room key is lost or damaged, a replacement fee of IDR 100,000 will be charged immediately.
+          </td>
+          <td style="padding:8px; text-align:center">
+            <% imgFiles = ['stop.png', 'no_pet.png', 'durian.png']; %>
+
+            <% imgFiles.forEach(function(transaction) { %>
+                <%
+                    $localPath = public_path('images/' . $img);
+                    $remoteUrl = $baseUrl . '/images/' . $img;
+                    $ext = pathinfo($img, PATHINFO_EXTENSION) ?: 'png';
+                %>
+
+                <% if (file_exists(localPath) { %> && is_readable($localPath))
+                    <% data = base64_encode(file_get_contents(localPath)); %>
+                    <img src="data:image/<%= ext %>;base64,<%= data %>" alt="<%= pathinfo(img, PATHINFO_FILENAME) %>" style="height:50px; margin:0 6px;" />
+                <% } else { %>
+                    <img src="<%= remoteUrl %>" alt="<%= pathinfo(img, PATHINFO_FILENAME) %>" style="height:50px; margin:0 6px;" />
+                <% } %>
+            <% }); %>
+        </td>
+        </tr>
+      </table>
+
+      <table class="grid" style="margin-top:8px;">
+        <tr>
+          <td width="20%" class="muted">Nomor Kotak Deposit<br />Safety Deposit Box Number</td>
+          <td width="15%"></td>
+          <td width="20%" class="muted">Dikeluarkan Oleh<br />Issued By</td>
+          <td width="15%"><%= currentUser %></td>
+          <td width="20%" class="muted">Tanggal<br />Date</td>
+          <td width="15%"><%= new Date().toLocaleString('en-GB') %></td>
+        </tr>
+        <tr>
+          <td class="muted">Melapor Masuk Oleh,<br />Checked-in By,</td>
+          <td></td>
+          <td class="muted">Melapor Keluar Oleh,<br />Checked-out By,</td>
+          <td colspan="3"></td>
+        </tr>
+      </table>
+    </body>
+  </html>

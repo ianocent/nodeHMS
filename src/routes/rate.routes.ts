@@ -6,7 +6,7 @@ import { RateAddonController } from '../controllers/rate-addon.controller';
 import { CompanyContractRateController } from '../controllers/company-contract-rate.controller';
 import { BarController } from '../controllers/bar.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { requirePermission } from '../middleware/permission.middleware';
+import { requirePermission, requirePermissionAny } from '../middleware/permission.middleware';
 
 const router = Router();
 
@@ -64,7 +64,7 @@ router.get('/rate/rate', authMiddleware, requirePermission(86, 'view'), (req, re
   req.params.rateId = rateIdFromQuery(req);
   return RateController.rateGrid(req, res);
 });
-router.post('/rate/rate', authMiddleware, requirePermission(86, 'view'), (req, res) => {
+router.post('/rate/rate', authMiddleware, requirePermissionAny('edit', [86]), (req, res) => {
   gridQuery(req);
   req.params.rateId = rateIdFromQuery(req);
   return RateController.rateGrid(req, res);
@@ -75,7 +75,7 @@ router.post('/rate/rate', authMiddleware, requirePermission(86, 'view'), (req, r
 // the rate-rate form reads all of those, and a wrong `data` leaves the grid's
 // start_date/end_date picks empty.
 router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.rateRateCreate);
-router.post('/rate/rate/store', authMiddleware, requirePermission(86, 'add'), (req, res) => {
+router.post('/rate/rate/store', authMiddleware, requirePermissionAny('edit', [86]), (req, res) => {
   if (req.body.rate_id === undefined && req.body.bar_id !== undefined) req.body.rate_id = req.body.bar_id;
   return RateController.rateRateStore(req, res);
 });
@@ -90,10 +90,10 @@ router.get('/rate/rate/:id/edit', authMiddleware, requirePermission(86, 'edit'),
 
 // ── /rate/rate-link-listing — RateRelationController parity (must precede /rate/:id) ──
 router.get('/rate/rate-link-listing', authMiddleware, requirePermission(86, 'view'), RateController.rateLinkListing);
-router.post('/rate/rate-link-listing', authMiddleware, requirePermission(86, 'edit'), RateController.rateLinkStore);
-router.put('/rate/rate-link-listing/:id', authMiddleware, requirePermission(86, 'edit'), RateController.rateLinkUpdate);
+router.post('/rate/rate-link-listing', authMiddleware, requirePermissionAny('edit', [86]), RateController.rateLinkStore);
+router.put('/rate/rate-link-listing/:id', authMiddleware, requirePermissionAny('edit', [86]), RateController.rateLinkUpdate);
 router.get('/rate/rate-link-listing/apply', authMiddleware, requirePermission(86, 'view'), RateController.rateLinkApplyList);
-router.post('/rate/rate-link-listing/apply', authMiddleware, requirePermission(86, 'edit'), RateController.rateLinkApply);
+router.post('/rate/rate-link-listing/apply', authMiddleware, requirePermissionAny('edit', [86]), RateController.rateLinkApply);
 
 // ── /rate/company-applicable — RateRelationController::company parity ──
 router.get('/rate/company-applicable', authMiddleware, requirePermission(86, 'view'), RateController.rateCompany);
@@ -101,7 +101,7 @@ router.post('/rate/company-applicable', authMiddleware, requirePermission(86, 'e
 router.delete('/rate/company-applicable/:id', authMiddleware, requirePermission(86, 'delete'), RateController.rateCompanyDelete);
 // /rate/code-item — RateRelationController::codeItem parity (must precede /rate/:id)
 router.get('/rate/code-item', authMiddleware, requirePermission(86, 'view'), RateController.rateCodeItemList);
-router.post('/rate/code-item', authMiddleware, requirePermission(86, 'add'), RateController.rateCodeItemStore);
+router.post('/rate/code-item', authMiddleware, requirePermissionAny('edit', [86]), RateController.rateCodeItemStore);
 router.put('/rate/code-item/:id', authMiddleware, requirePermission(86, 'edit'), RateController.rateCodeItemUpdate);
 router.delete('/rate/code-item/:id', authMiddleware, requirePermission(86, 'delete'), RateController.rateCodeItemDelete);
 // /rate/package — RateRelationController::package parity (cms.php:801-803)
@@ -110,8 +110,8 @@ router.post('/rate/package', authMiddleware, requirePermission(86, 'edit'), Rate
 router.delete('/rate/package/:id', authMiddleware, requirePermission(86, 'delete'), RateController.ratePackageDelete);
 // ── /rate/promotion — RateRelationController::promotion parity (must precede /rate/:id) ──
 router.get('/rate/promotion', authMiddleware, requirePermission(88, 'view'), PromotionController.ratePromotionList);
-router.post('/rate/promotion', authMiddleware, requirePermission(88, 'edit'), PromotionController.ratePromotionStore);
-router.delete('/rate/promotion/:id', authMiddleware, requirePermission(88, 'edit'), PromotionController.ratePromotionDelete);
+router.post('/rate/promotion', authMiddleware, requirePermissionAny('edit', [86, 88]), PromotionController.ratePromotionStore);
+router.delete('/rate/promotion/:id', authMiddleware, requirePermissionAny('edit', [86, 88]), PromotionController.ratePromotionDelete);
 router.get('/rate/:id', authMiddleware, requirePermission(86, 'view'), RateController.show);
 router.get('/rate/:id/edit', authMiddleware, requirePermission(86, 'edit'), RateController.edit);
 router.put('/rate/:id', authMiddleware, requirePermission(86, 'edit'), RateController.update);
@@ -160,7 +160,7 @@ router.get('/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), Ra
 // (delegating to RateController.rateGrid). Express keeps the first match, so
 // re-declaring it here silently shadowed that handler and rateRateIndex never ran.
 router.get('/rate/rate/create', authMiddleware, requirePermission(86, 'add'), RateController.rateRateCreate);
-router.post('/rate/rate/store', authMiddleware, requirePermission(86, 'add'), RateController.rateRateStore);
+router.post('/rate/rate/store', authMiddleware, requirePermissionAny('edit', [86]), RateController.rateRateStore);
 router.put('/rate/rate/:id', authMiddleware, requirePermission(86, 'edit'), RateController.rateRateUpdate);
 router.get('/rate/rate/:id/update', authMiddleware, requirePermission(86, 'edit'), RateController.rateRateCreate);
 
@@ -199,13 +199,13 @@ router.get('/bar/rate', authMiddleware, requirePermission(87, 'view'), (req, res
   req.query.rate_id = rateIdFromQuery(req);
   return RateController.barRateIndex(req, res);
 });
-router.post('/bar/rate', authMiddleware, requirePermission(87, 'view'), (req, res) => {
+router.post('/bar/rate', authMiddleware, requirePermissionAny('edit', [87]), (req, res) => {
   gridQuery(req);
   req.query.rate_id = rateIdFromQuery(req);
   return RateController.barRateIndex(req, res);
 });
 router.get('/bar/rate/create', authMiddleware, requirePermission(87, 'add'), RateController.barRateCreate);
-router.post('/bar/rate/store', authMiddleware, requirePermission(87, 'add'), (req, res) => {
+router.post('/bar/rate/store', authMiddleware, requirePermissionAny('edit', [87]), (req, res) => {
   if (req.body.rate_id === undefined && req.body.bar_id !== undefined) req.body.rate_id = req.body.bar_id;
   return RateController.barRateStore(req, res);
 });

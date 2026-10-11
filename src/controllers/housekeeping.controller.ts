@@ -43,6 +43,23 @@ function saveWorkOrderImages(workOrderId: number, images: any[]): string[] {
   return saved;
 }
 
+/**
+ * `work_orders.images` is a text column holding a JSON array. Laravel casts it to
+ * an array (`WorkOrder::$casts`), so every read path must decode it before the
+ * response — otherwise the edit form's `Array.isArray()` guard drops the list and
+ * no thumbnail renders.
+ */
+function decodeWorkOrderImages(raw: any): string[] {
+  if (Array.isArray(raw)) return raw.filter((v: any) => typeof v === 'string');
+  if (typeof raw !== 'string' || raw.trim() === '') return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v: any) => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 
 // rooms.cleaning_time is a raw TIME ("HH:MM") column in PostgreSQL modelled as
 // DateTime; ANCHOR TO THE UTC EPOCH so the column only ever carries a time-of-day
@@ -763,7 +780,7 @@ const [areaTypes, workTypeTypes] = await Promise.all([
 static async workOrderStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to } = req.body;
+      const { reported_by, unique_code, area, work_type, date, room_id, work_description, notes, assign_to, estimated_time } = req.body;
 
       // Laravel validator parity (WorkOrderController:143-152)
       if (!reported_by) { badRequest(res, 'The reported by field is required.'); return; }
@@ -828,6 +845,7 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
           room_id: room_id ? BigInt(room_id) : null,
           work_description,
           notes,
+          estimated_time: estimated_time ? new Date(estimated_time) : null,
           assign_to: assign_to ? BigInt(assign_to) : null,
           status: 1,
           created_at: new Date(),
@@ -887,7 +905,11 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
       const id = idParam(req.params.id);
       const data = await         prisma.work_orders.findUnique({ where: { id }, include: { rooms: { select: { name: true } }, work_order_stocks: true } });
       if (!data) { notFound(res, 'Work order not found'); return; }
-      success(res, bigintToNumber(data), 'Success');
+      // WorkOrder::formatData() (:93) hands back a decoded array. Postgres has no
+      // json column here, so `images` arrives JSON-encoded; leaving it as a string
+      // made the edit form's `Array.isArray(datavaled.images)` guard fail and the
+      // thumbnails disappear on reopen.
+      success(res, { ...bigintToNumber(data), images: decodeWorkOrderImages(data.images) }, 'Success');
     } catch (err: any) { error(res, 'Failed to load work order', 500); }
   }
 
@@ -976,6 +998,7 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
       }) : [];
 
       const formattedData: any = bigintToNumber(data);
+      formattedData.images = decodeWorkOrderImages(formattedData.images);
 
       // Map area and work_type as select objects
       const areaType = typeRows.find((t: any) => t.group === 'area');
@@ -1004,7 +1027,7 @@ static async workOrderStore(req: Request, res: Response): Promise<void> {
 static async workOrderUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
-      const { area, work_type, assign_to, status_work_order, start_date, end_date, start_time, end_time, work_description, notes } = req.body;
+      const { area, work_type, assign_to, status_work_order, start_date, end_date, start_time, end_time, work_description, notes, estimated_time } = req.body;
 
       const oldWo = await prisma.work_orders.findUnique({ where: { id }, select: { room_id: true, start_date: true, assign_to: true, deleted_at: true, images: true } });
       if (!oldWo || oldWo.deleted_at) { notFound(res, 'Work order not found'); return; }
@@ -1020,6 +1043,7 @@ static async workOrderUpdate(req: Request, res: Response): Promise<void> {
       const data: any = { updated_at: new Date(), updated_by: req.user?.id };
       if (work_description !== undefined) data.work_description = work_description;
       if (notes !== undefined) data.notes = notes;
+      if (estimated_time !== undefined) data.estimated_time = estimated_time ? new Date(estimated_time) : null;
       if (status_work_order !== undefined) data.status_work_order = num(status_work_order, 0);
       if (assignToVal !== null && assignToVal !== undefined) data.assign_to = BigInt(assignToVal);
 
@@ -1034,14 +1058,14 @@ static async workOrderUpdate(req: Request, res: Response): Promise<void> {
 
       // start/end dipaksa ke business date + waktu sekarang (Laravel :370-389)
       if (start_date !== undefined && start_date !== null) {
-        data.start_date = new Date(`${bussinesDate}T00:00:00`);
+        data.start_date = new Date(`${bussinesDate}T00:00:00Z`);
         data.start_time = new Date().toTimeString().slice(0, 8);
       }
       if (end_date !== undefined && end_date !== null) {
-        data.end_date = new Date(`${bussinesDate}T00:00:00`);
+        data.end_date = new Date(`${bussinesDate}T00:00:00Z`);
         data.end_time = new Date().toTimeString().slice(0, 8);
         if (!oldWo.start_date) {
-          data.start_date = new Date(`${bussinesDate}T00:00:00`);
+          data.start_date = new Date(`${bussinesDate}T00:00:00Z`);
           data.start_time = new Date().toTimeString().slice(0, 8);
         }
       }

@@ -138,6 +138,7 @@ function bigintToNumber(val: any): any {
 }
 
 function reservationBn(val: any): any {
+  if (val instanceof Date) return val.toISOString();
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(reservationBn);
   if (val && typeof val === 'object') { const o: any = {}; for (const [k, v] of Object.entries(val)) o[k] = reservationBn(v); return o; }
@@ -431,8 +432,11 @@ function rateRowData(r: any, codePostById: Map<any, any>): any {
     contract_rate: { value: Number(r.id), label: r.code },
     code_color: [{ value: r.code, label: r.code }],
     is_color: true,
-    sort_by_company: r.module == 'rate' ? 2 : 3,
-    color: r.module == 'rate' ? 'bg-primary' : 'bg-secondary',
+    // Laravel Rate::formatData parity: company rates (any model_has_company_profiles
+    // row) sort first and render with the success (green) highlight.
+    sort_by_company: r.module == 'rate' ? ((r.model_has_company_profiles?.length ?? 0) > 0 ? 1 : 2) : 0,
+    color: r.module == 'rate' ? ((r.model_has_company_profiles?.length ?? 0) > 0 ? 'bg-success' : 'bg-primary') : 'bg-secondary',
+    companyProfile: r.model_has_company_profiles?.length ? r.model_has_company_profiles : [],
     start_date: fmtDateOnly(r.start_date),
     end_date: fmtDateOnly(r.end_date),
     term_condition: r.term_condition,
@@ -457,7 +461,7 @@ function barRowData(b: any, codePostById: Map<any, any>): any {
     contract_rate: { value: Number(b.id), label: 'BAR' },
     code_color: [{ value: 'BAR', label: 'BAR' }],
     is_color: true,
-    sort_by_company: 3,
+    sort_by_company: 0,
     color: 'bg-secondary',
     start_date: fmtDateOnly(b.start_date),
     end_date: fmtDateOnly(b.end_date),
@@ -1257,7 +1261,15 @@ success(res, formatted, 'Success', 200, {
         prisma.reservations.findMany({
           where: { folio_id: folio.id, deleted_at: null },
           orderBy: { date: 'asc' },
-          include: { rates: { select: { code: true } } },
+          // Laravel Reservation::formatData falls back to the `roomType` / `room`
+          // relations when the denormalised `room_type_name` / `room_name`
+          // columns are empty. Without these includes Company / Room Type / Room
+          // / Staf all rendered blank in the Folio Room grid.
+          include: {
+            rates: { select: { code: true } },
+            room_types: { select: { id: true, name: true } },
+            rooms: { select: { id: true, name: true } },
+          },
         }),
         prisma.types.findMany({
           where: {
@@ -1303,6 +1315,22 @@ success(res, formatted, 'Success', 200, {
         5: 'Pending',
       };
 
+      // Laravel formatData: 'company_idx' falls back to the folio's company and
+      // 'company_id' to the CompanyProfile name; 'Staf' is updatedBy->name.
+      const folioCompanyId = folio.company_profile_id ? Number(folio.company_profile_id) : null;
+      const companyIds = Array.from(new Set(rows.map((r: any) => Number(r.company_profile_id)).filter((n: number) => n > 0)));
+      const staffIds = Array.from(new Set(rows.map((r: any) => Number(r.updated_by)).filter((n: number) => n > 0)));
+      const [companyRows, staffRows] = await Promise.all([
+        companyIds.length
+          ? prisma.company_profiles.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } })
+          : Promise.resolve([] as any[]),
+        staffIds.length
+          ? prisma.users.findMany({ where: { id: { in: staffIds } }, select: { id: true, name: true } })
+          : Promise.resolve([] as any[]),
+      ]);
+      const companyName = new Map(companyRows.map((c: any) => [Number(c.id), c.name]));
+      const staffName = new Map(staffRows.map((u: any) => [Number(u.id), u.name]));
+
       const data = rows.map((r: any) => ({
         id: Number(r.id),
         rate_id: r.rate_id ? Number(r.rate_id) : null,
@@ -1311,6 +1339,7 @@ success(res, formatted, 'Success', 200, {
           label: r.rate_name || r.rates?.code || '',
         },
         action_table: r.is_posting ? false : true,
+        updated_by: r.updated_by ? staffName.get(Number(r.updated_by)) ?? null : null,
         date: r.date,
         remark_room: typeGroup(r.id, 'remark-room'),
         market_segment_1: typeGroup(r.id, 'market-segment-1'),
@@ -1318,8 +1347,8 @@ success(res, formatted, 'Success', 200, {
         market_segment_3: typeGroup(r.id, 'market-segment-3'),
         market_segment_4: typeGroup(r.id, 'market-segment-4'),
         source: typeGroup(r.id, 'source'),
-        company_id: r.company_profile_name || null,
-        company_idx: r.company_profile_id ? Number(r.company_profile_id) : null,
+        company_id: r.company_profile_name || companyName.get(Number(r.company_profile_id)) || null,
+        company_idx: r.company_profile_id ? Number(r.company_profile_id) : folioCompanyId,
         rate_price: Number(r.amount || 0),
         total_extra_bed: Number(r.total_extra_bed || 0),
         total: Number(r.total || 0),
@@ -1327,14 +1356,14 @@ success(res, formatted, 'Success', 200, {
         check_out_date: r.check_out_date,
         room_type_id: {
           value: r.room_type_id ? Number(r.room_type_id) : null,
-          label: r.room_type_name || '',
+          label: r.room_type_name || r.room_types?.name || '',
         },
-        room_type: r.room_type_name || '',
+        room_type: r.room_types?.name || r.room_type_name || '',
         room_id: {
           value: r.room_id ? Number(r.room_id) : null,
-          label: r.room_name || '',
+          label: r.room_name || r.rooms?.name || '',
         },
-        room: r.room_name || '',
+        room: r.rooms?.name || r.room_name || '',
         stay: '0',
         night: r.night,
         status_reservation: {
@@ -1577,6 +1606,10 @@ success(res, formatted, 'Success', 200, {
         market_segment_2: market_segment_2,
         market_segment_3: market_segment_3,
         market_segment_4: market_segment_4,
+        // Laravel syncTypes() walks every group in config('cms.type.group'),
+        // which includes 'source' - without it the Source select on the Folio
+        // Room grid never persisted.
+        source: (req.body as any).source,
       };
       for (const [group, typeId] of Object.entries(typeMap)) {
         if (typeId === undefined || typeId === null || typeId === '') continue;
@@ -1901,10 +1934,19 @@ success(res, formatted, 'Success', 200, {
         check_in_date,
         check_out_date,
         reservation_list = [],
-        room_reservation_list = [],
+        room_reservation_list: roomReservationListRaw,
+        room_reservation_list_raw,
         promo_code,
         dept_branch,
       } = body;
+
+      // The GIT form posts `room_reservation_list`; older clients (and the
+      // room-git table hook) post `room_reservation_list_raw`. Accept either so
+      // the create is not rejected with "Room reservation list is required".
+      const roomReservationSource = roomReservationListRaw ?? room_reservation_list_raw;
+      const room_reservation_list = Array.isArray(roomReservationSource)
+        ? roomReservationSource
+        : Object.values(roomReservationSource || {});
 
       // Laravel ReservationController@store:619-660 resolves the company from the
       // company-type tag when the caller did not send one and the booking is a walk-in
@@ -1959,11 +2001,17 @@ success(res, formatted, 'Success', 200, {
             if (!row?.check_out_date) {
               errors[`reservation_list.${idx}.check_out_date`] = ['Check out date is required'];
             }
+            if (row?.check_in_date && row?.check_out_date && new Date(row.check_out_date) <= new Date(row.check_in_date)) {
+              errors[`reservation_list.${idx}.check_out_date`] = ['Check out date must be after check in date'];
+            }
           });
         }
       } else {
         if (!check_in_date) errors.check_in_date = ['Check in date is required'];
         if (!check_out_date) errors.check_out_date = ['Check out date is required'];
+        if (check_in_date && check_out_date && new Date(check_out_date) <= new Date(check_in_date)) {
+          errors.check_out_date = ['Check out date must be after check in date'];
+        }
         if (type_reservation === 'git') {
           if (room_reservation_list.length === 0) {
             errors.room_reservation_list = ['Room reservation list is required'];
@@ -2020,7 +2068,18 @@ success(res, formatted, 'Success', 200, {
       // Pricing inputs (Laravel Folio::saveReservation engine)
       const property = await prisma.properties.findUnique({ where: { id: propertyId! }, select: { is_tax: true } });
       const isTax = (property as any)?.is_tax === 1;
-      const uniqueRateIds = [...new Set(reservation_list.map((i: any) => String(i.rate_id)).filter((r: string) => r && r !== '0'))] as string[];
+      // Laravel marks `reservation_list.*.rate_id` nullable (ReservationController:414),
+      // and the GIT room grid rows carry no rate_id at all. `String(undefined)` is
+      // the truthy string "undefined", so the old `r && r !== '0'` guard let it
+      // through and `BigInt("undefined")` aborted the whole create with
+      // "Cannot convert undefined to a BigInt".
+      const uniqueRateIds = [
+        ...new Set(
+          reservation_list
+            .map((i: any) => (i?.rate_id === undefined || i?.rate_id === null ? '' : String(i.rate_id)))
+            .filter((r: string) => /^\d+$/.test(r) && r !== '0')
+        ),
+      ] as string[];
       const rateRows = uniqueRateIds.length
         ? await prisma.rates.findMany({
             where: { id: { in: uniqueRateIds.map((r) => BigInt(r)) } },
@@ -2276,7 +2335,19 @@ success(res, formatted, 'Success', 200, {
       if (type_reservation === 'git' && room_reservation_list.length > 0) {
         let subIndex = 1;
         for (const roomItem of room_reservation_list) {
-          const qty = roomItem.qty || 1;
+          // Both ids come straight off the room-git grid and are nullable in
+          // practice. Guard BEFORE creating the sub-folio so a blank row is
+          // skipped instead of aborting the create (BigInt(undefined)) or
+          // leaving an orphan folio behind.
+          if (!/^\d+$/.test(String(roomItem?.id ?? ''))) {
+            console.warn('[reservation store] GIT room row without a room type id, skipped:', roomItem);
+            continue;
+          }
+          const gitRateId = /^\d+$/.test(String(roomItem.rate_id ?? '')) && String(roomItem.rate_id) !== '0'
+            ? BigInt(String(roomItem.rate_id))
+            : null;
+          const gitRoomTypeId = BigInt(String(roomItem.id));
+          const qty = Number(roomItem.qty) > 0 ? Number(roomItem.qty) : 1;
           for (let i = 0; i < qty; i++) {
             const subFolioNumber = `${folio.folio_number}/${String(subIndex).padStart(3, '0')}`;
 
@@ -2297,15 +2368,17 @@ success(res, formatted, 'Success', 200, {
                 check_in_date: new Date(actualCheckIn),
                 check_out_date: new Date(actualCheckOut),
                 res_date: new Date(),
-                res_time: new Date().toISOString().substring(11, 16),
+                // folios.res_time is a `timestamp without time zone` column in
+                // Postgres, so Prisma rejects an "HH:mm" string
+                // ("input contains invalid characters. Expected ISO-8601
+                // DateTime"). Same value the parent folio already writes.
+                res_time: new Date(),
                 status: STATUS_ACTIVE,
                 status_reservation: statusReservation,
                 created_by: userId,
               },
             });
 
-            const gitRateId = roomItem.rate_id && String(roomItem.rate_id) !== '0' ? BigInt(roomItem.rate_id) : null;
-            const gitRoomTypeId = BigInt(roomItem.id);
             const gitCheckIn = new Date(actualCheckIn);
             const gitCheckOut = new Date(actualCheckOut);
             let gitNights = Math.ceil((gitCheckOut.getTime() - gitCheckIn.getTime()) / (1000 * 60 * 60 * 24));
@@ -2791,7 +2864,11 @@ success(res, formatted, 'Success', 200, {
         : { value: folio.status_reservation ?? 3, label: STATUS_RESERVATION_MAP[folio.status_reservation ?? 3] ?? 'Reservation' };
 
       // ---- actions (Laravel Folio::formatAction parity) ----
-      const appUrl = process.env.APP_URL ?? 'http://localhost:8000';
+      // APP_URL is this API's own origin, and the action icons are served out of its
+      // storage root. The old fallback pointed at port 8000 — the port the Laravel app
+      // used before it moved to 8001 — so an unset APP_URL silently produced 404 icons
+      // on every reservation row instead of an obvious config error.
+      const appUrl = (process.env.APP_URL || 'http://localhost:3001').replace(/\/+$/, '');
       const actions = (() => {
         const mapAction = (list: typeof ACTION_RESERVATION) =>
           list.map((a) => ({ label: a.name, key: a.key, icon: appUrl + a.icon, line: a.line ?? false }));
@@ -3038,6 +3115,13 @@ success(res, formatted, 'Success', 200, {
         is_pending,
         status_reservation,
         dept_branch,
+        cash_on_arrival,
+        guaranted,
+        print_status,
+        use_allotment,
+        is_do_not_disturb,
+        is_incognito,
+        is_long_stay,
       } = req.body;
 
       // Resolve company name
@@ -3110,6 +3194,13 @@ success(res, formatted, 'Success', 200, {
         if (sr !== undefined) updateData.status_reservation = Number(sr);
       }
       if (dept_branch !== undefined) updateData.dept_branch = dept_branch;
+      if (cash_on_arrival !== undefined) updateData.cash_on_arrival = !!cash_on_arrival;
+      if (guaranted !== undefined) updateData.guaranted = !!guaranted;
+      if (print_status !== undefined) updateData.print_status = !!print_status;
+      if (use_allotment !== undefined) updateData.use_allotment = !!use_allotment;
+      if (is_do_not_disturb !== undefined) updateData.is_do_not_disturb = !!is_do_not_disturb;
+      if (is_incognito !== undefined) updateData.is_incognito = !!is_incognito;
+      if (is_long_stay !== undefined) updateData.is_long_stay = !!is_long_stay;
 
       await prisma.folios.update({ where: { id }, data: updateData });
 
@@ -3579,7 +3670,14 @@ success(res, formatted, 'Success', 200, {
       }
 
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const roomTypeIds = room_reservation_list.map((item: any) => BigInt(item.id));
+      const roomList = Array.isArray(room_reservation_list) ? room_reservation_list : Object.values(room_reservation_list || {});
+      const roomTypeIds = roomList
+        .filter((item: any) => item?.id !== undefined && item?.id !== null && item?.id !== '')
+        .map((item: any) => BigInt(item.id));
+      if (roomTypeIds.length === 0) {
+        badRequest(res, 'room_reservation_list is required');
+        return;
+      }
 
       // Batch availability: one query for all reserved rooms + all rooms across requested types.
       const [reservedRoomRows, allRoomRows] = await Promise.all([
@@ -3626,18 +3724,46 @@ success(res, formatted, 'Success', 200, {
       let allAvailable = true;
       const roomIds: Record<number, number[]> = {};
 
-      for (const item of room_reservation_list) {
+      for (const item of roomList) {
+        if (item?.id === undefined || item?.id === null || item?.id === '') continue;
         const roomTypeId = BigInt(item.id);
         const reservedIds = reservedByType.get(String(roomTypeId)) || new Set<number>();
         const availableRoomIds = (roomsByType.get(String(roomTypeId)) || []).filter((id) => !reservedIds.has(id));
         roomIds[Number(item.id)] = availableRoomIds;
 
-        if (availableRoomIds.length < (item.qty || 1)) {
+        if (availableRoomIds.length < (Number(item.qty) || 1)) {
           allAvailable = false;
         }
       }
 
-      success(res, { check: allAvailable, roomIds }, 'Success');
+      const fakeReservationList: any[] = [];
+      for (const item of roomList) {
+        if (item?.id === undefined || item?.id === null || item?.id === '') continue;
+        const qty = Number(item.qty || 1);
+        for (let i = 0; i < qty; i++) {
+          // Laravel onCheck (:2041-2051) maps the room-git row's `id` (the room
+          // TYPE id) onto `room_type_id`. Passing the row through untouched left
+          // roomTypeId null inside getCharge, so the per-night price shown after
+          // a successful availability check was always the rate's default.
+          fakeReservationList.push({
+            rate_id,
+            room_type_id: item.id,
+            check_in_date,
+            check_out_date,
+            adult: item.adult,
+            child: item.child,
+            add_bed: 0,
+          });
+        }
+      }
+      const fakeReq = { ...req, body: { ...req.body, reservation_list: fakeReservationList } } as any;
+      const fakeRes = {
+        json: (payload: any) => {
+          success(res, { check: allAvailable, roomIds, date: payload?.data?.date, charge: payload?.data?.charge }, 'Success');
+        },
+        status: (s: number) => fakeRes,
+      } as any;
+      await ReservationController.getCharge(fakeReq, fakeRes);
     } catch (err: any) {
       console.error('Reservation onCheck error:', err);
       error(res, 'Failed to check availability', 500);
@@ -3897,8 +4023,10 @@ success(res, formatted, 'Success', 200, {
           contact_person_id: existing.contact_person_id,
           check_in_date: existing.check_in_date,
           check_out_date: existing.check_out_date,
-          res_date: new Date(),
-          res_time: new Date().toISOString().substring(11, 16),
+res_date: new Date(),
+                // `res_time` is a timestamp column, not TIME — an "HH:mm" string
+                // makes Prisma throw and aborts the whole GIT create.
+                res_time: new Date(),
           status: STATUS_ACTIVE,
           status_reservation: STATUS_RESERVATION.reservation.id,
           is_compliment_tour_leader: false,
@@ -4563,57 +4691,109 @@ success(res, formatted, 'Success', 200, {
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const search = req.query.search as string;
-      const folioIdRaw = String(req.query.folio_id ?? '');
+      const q = req.query as any;
+      const folioIdRaw = String(q.subfolio_id && q.subfolio_id !== 'null' && q.subfolio_id !== '' ? q.subfolio_id : (q.folio_id ?? ''));
       const pid = BigInt(req.user?.lastProperty ?? 0);
 
-      let where: any = { property_id: pid, deleted_at: null };
-      if (search) where.name = { contains: search, mode: 'insensitive' };
+      const codePosts = await prisma.code_posts.findMany({
+        where: { deleted_at: null, status: 1, type: 'DEFAULT', ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const codePostOptions = codePosts.map((cp: any) => ({ value: Number(cp.id), label: cp.name }));
+      const reasonTypes = await prisma.types.findMany({
+        where: { deleted_at: null, status: 1, group: 'remark-additional-item', ...(req.user?.lastProperty ? { property_id: pid } : {}) },
+        select: { id: true, name: true },
+      });
 
-      // Get folio's rate to filter code items (Laravel parity via model_has_code_items)
-      let rateId: bigint | null = null;
-      if (folioIdRaw && /^\d+$/.test(folioIdRaw)) {
-        const folio = await prisma.folios.findUnique({
-          where: { id: BigInt(folioIdRaw) },
-          include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1 } },
-        });
-        if (folio?.reservations?.[0]?.rate_id) {
-          rateId = folio.reservations[0].rate_id;
-        }
-      }
-
-// Filter code_items by rate via model_has_code_items (Laravel parity)
-      if (rateId) {
-        const codeItemIds = await prisma.$queryRaw<{ code_item_id: bigint }[]>(
-          Prisma.sql`SELECT DISTINCT code_item_id FROM model_has_code_items WHERE model_type = ${'App\\Models\\Rate'} AND model_id = ${rateId} AND code_item_id IS NOT NULL`
-        );
-        const ids = codeItemIds.map((r) => r.code_item_id);
-        if (ids.length > 0) {
-          where.id = { in: ids };
-        } else {
-          where.id = -1;
-        }
-      }
-
-      const [data, total] = await Promise.all([
-        prisma.code_items.findMany({
-          where,
-          include: { code_posts: { select: { id: true, name: true } } },
-          orderBy: { name: 'asc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
-        prisma.code_items.count({ where }),
-      ]);
       const table = [
         { label: 'Code', key: 'code', type: 'none', is_search: false },
-        { label: 'Name', key: 'name', type: 'none', is_search: true },
+        { label: 'Name', key: 'name', type: 'none', is_search: false },
+        { label: 'Description', key: 'description', type: 'none', is_search: false },
+        { label: 'Post Code', key: 'code_post_id', type: 'none', is_search: false, options: codePostOptions },
         { label: 'Sales', key: 'sales', type: 'number', is_search: false },
+        { label: 'Start Date', key: 'start_date', type: 'date', is_search: false },
+        { label: 'End Date', key: 'end_date', type: 'date', is_search: false },
+        { label: 'Reason', key: 'reason', type: 'select', options: reasonTypes.map((t: any) => ({ value: Number(t.id), label: t.name })), is_search: false },
+        { label: 'Upsales', key: 'upsales', type: 'number', is_search: false },
         { label: 'Status', key: 'status', type: 'badge', is_search: false },
       ];
-      success(res, reservationBn(data), 'Success', 200, {
+
+      const empty = (msg: string) => success(res, [], msg, 200, {
         table,
         permission: { view: true, add: true, edit: true, delete: true },
-        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+        pagination: { current_page: page, last_page: 1, per_page: limit, total: 0, from: 0, to: 0 },
+      });
+
+      if (!/^\d+$/.test(folioIdRaw)) { empty('No guest ID provided.'); return; }
+      const folio: any = await prisma.folios.findUnique({ where: { id: BigInt(folioIdRaw) } });
+      if (!folio) { empty('No guest ID provided.'); return; }
+
+      // Laravel: CodeItem::whereHas('Folio') - i.e. only the items actually
+      // attached to THIS folio through model_has_code_items. Listing the master
+      // catalogue instead made a freshly added Additional Item invisible.
+      const pivot = await prisma.$queryRaw<any[]>(
+        Prisma.sql`SELECT * FROM model_has_code_items
+                   WHERE model_type = ${'App\\Models\\Folio'} AND model_id = ${folio.id}
+                   ORDER BY code_item_id ASC NULLS LAST`
+      );
+      const itemIds = Array.from(new Set(pivot.map((p: any) => Number(p.code_item_id)))).filter((n) => n > 0);
+      const pivotByItem = new Map<number, any>();
+      for (const p of pivot) if (!pivotByItem.has(Number(p.code_item_id))) pivotByItem.set(Number(p.code_item_id), p);
+
+      const master: any[] = itemIds.length
+        ? await prisma.code_items.findMany({
+            where: { id: { in: itemIds }, deleted_at: null },
+            select: { id: true, name: true, description: true, sales: true, code_post_id: true, process_on: true },
+          })
+        : [];
+      const masterById = new Map(master.map((m: any) => [Number(m.id), m]));
+      const postIdLabel = new Map(codePosts.map((cp: any) => [Number(cp.id), cp.name]));
+      const typeName = new Map(reasonTypes.map((t: any) => [Number(t.id), t.name]));
+
+      let rows = itemIds.map((id) => {
+        const m = masterById.get(id);
+        const p = pivotByItem.get(id);
+        const pid2 = p ? Number(p.code_post_id) : (m ? Number(m.code_post_id) : null);
+        return {
+          id,
+          name: p && p.name ? p.name : (m?.name ?? null),
+          description: p && p.description ? p.description : (m?.description ?? null),
+          code: (m as any)?.code ?? null,
+          code_post_id: {
+            value: pid2,
+            label: pid2 !== null ? (postIdLabel.get(pid2) ?? String(pid2)) : '',
+          },
+          process_on: p && p.process_on
+            ? { value: p.process_on, label: p.process_on }
+            : { value: m?.process_on ?? null, label: m?.process_on ?? null },
+          sales: Number((p && p.sales !== null && p.sales !== undefined ? p.sales : m?.sales) ?? 0),
+          start_date: p && p.start_date ? new Date(p.start_date) : (folio.check_in_date ?? null),
+          end_date: p && p.end_date ? new Date(p.end_date) : (folio.check_out_date ?? null),
+          upsales: Number(p?.upsales ?? 0),
+          reason: p && p.reason
+            ? { value: Number(p.reason), label: typeName.get(Number(p.reason)) ?? String(p.reason) }
+            : [],
+          action_table: p ? !(Number(p.is_posting) === 1) : true,
+          status: Number(m?.status ?? 0),
+        };
+      });
+      if (search) {
+        const needle = String(search).toLowerCase();
+        rows = rows.filter((r) => String(r.name ?? '').toLowerCase().includes(needle));
+      }
+
+      const total = rows.length;
+      const start = (page - 1) * limit;
+      const pageRows = rows.slice(start, start + limit);
+      success(res, reservationBn(pageRows), 'Success', 200, {
+        table,
+        folio: reservationBn(folio),
+        permission: { view: true, add: true, edit: true, delete: true },
+        pagination: {
+          current_page: page, last_page: Math.max(1, Math.ceil(total / limit)), per_page: limit,
+          total, from: total === 0 ? 0 : start + 1, to: Math.min(page * limit, total),
+        },
       });
     } catch (err: any) { console.error('Code item list error:', err); error(res, 'Failed to list code items', 500); }
   }
@@ -4796,7 +4976,7 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
       }
 
       const [rates, total, codePost] = await Promise.all([
-        prisma.rates.findMany({ where, orderBy: { sort: 'asc' }, skip: (page - 1) * limit, take: limit }),
+        prisma.rates.findMany({ where, orderBy: { sort: 'asc' }, skip: (page - 1) * limit, take: limit, include: { model_has_company_profiles: { where: { model_type: 'App\\Models\\Rate' }, select: { company_profile_id: true } } } }),
         prisma.rates.count({ where }),
         fetchCodePostOptions(),
       ]);
@@ -4849,12 +5029,12 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
         rateWhere.OR = searchConds;
       }
 
-      let rates = await prisma.rates.findMany({ where: rateWhere, orderBy: { module: 'desc' } });
+      let rates = await prisma.rates.findMany({ where: rateWhere, orderBy: { module: 'desc' }, include: { model_has_company_profiles: { where: { model_type: 'App\\Models\\Rate' }, select: { company_profile_id: true } } } });
       let totalData = rates.length;
       if (rates.length === 0 && dayUse !== '1') {
         const fallbackWhere: any = { ...baseWhere, model_has_company_profiles: { none: { model_type: 'App\\Models\\Rate' } } };
         if (searchConds.length > 0) fallbackWhere.AND = searchConds;
-        rates = await prisma.rates.findMany({ where: fallbackWhere, orderBy: { module: 'desc' } });
+        rates = await prisma.rates.findMany({ where: fallbackWhere, orderBy: { module: 'desc' }, include: { model_has_company_profiles: { where: { model_type: 'App\\Models\\Rate' }, select: { company_profile_id: true } } } });
         totalData = rates.length;
       }
 
@@ -4882,7 +5062,7 @@ static async rateListHelper(req: Request, res: Response): Promise<void> {
             description: 'BAR',
             rate_type: 'BAR',
             code_post_id: 'BAR',
-            sort_by_company: 3,
+            sort_by_company: 0,
             code_color: [{ value: 'BAR', label: 'BAR' }],
             is_color: true,
             color: 'bg-secondary',

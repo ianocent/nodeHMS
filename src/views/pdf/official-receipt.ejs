@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Official Receipt</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            line-height: 1.3;
+            text-transform: uppercase; 
+        }
+        thead { display: table-header-group; }
+        tfoot { display: table-footer-group; }
+        tr { page-break-inside: avoid; }
+
+        .header {
+            background-color: #D3D3D3;
+            padding: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo {
+            width: 315px;
+            height: auto;
+        }
+        .title {
+            font-size: 18px;
+            font-weight: bold;
+            text-align: right;
+        }
+        .date {
+            margin-top: 10px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        table, th, td {
+            border: 1px solid black;
+        }
+        th, td {
+            padding: 5px;
+            text-align: left;
+        }
+        .no-border {
+            border: none;
+        }
+        .signature-box {
+            margin-top: 20px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .signature-line {
+            width: 45%;
+            border-top: 1px solid black;
+            padding-top: 5px;
+            text-align: center;
+        }
+        .footer {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .signature-table {
+        width: 100%;
+        margin-top: 30px;
+        border: 1px solid black;
+    }
+    
+    .signature-table th {
+        padding: 8px;
+        border: 1px solid black;
+        text-align: center;
+        font-weight: normal;
+        background-color: #fff;
+    }
+    
+    .signature-table td {
+        height: 80px; /* Sesuaikan tinggi area tanda tangan */
+        border: 1px solid black;
+        vertical-align: bottom; /* Untuk memastikan teks berada di bawah */
+        padding: 8px;
+    }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo Company" class="logo">
+        <!-- <img src="<%= logoBase64 %>" alt="Hotels Logo" class="logo "> -.
+        <div class="title">
+            Folio No. <%= folioNumber %><br>
+            OFFICIAL RECEIPT
+        </div>
+    </div>
+
+    <div class="date">
+        Date : <%= date %>
+    </div>
+
+    <table style="margin-top: 20px;">
+        <tr>
+            <td><strong>Guest Name / Company Name</strong></td>
+            <td><%= guestName %><%= companyName ? ' / ' . companyName : '' %></td>
+        </tr>
+        <tr>
+            <td><strong>Room Number / Tel. No.</strong></td>
+            <td><%= roomNumber %> / <%= telNo %></td>
+        </tr>
+        <tr>
+            <td><strong>Amount in (Rp)</strong></td>
+            <td>Rp. <%= amountInRp %></td>
+        </tr>
+        <tr>
+            <td><strong>Amount in Words</strong></td>
+            <td><%= amountInWords %></td>
+        </tr>
+        <tr>
+            <td><strong>Explanation</strong></td>
+            <td>
+                <%= explanation %><br>
+                <%= paymentDetails %>
+            </td>
+        </tr>
+    </table>
+
+    <table class="signature-table">
+        <tr>
+            <th width="50%">Handled By</th>
+            <th width="50%">Autorized Signature</th>
+        </tr>
+        <tr>
+            <td></td>
+            <td></td>
+        </tr>
+    </table>
+
+    <div class="footer">
+        (0711) 359333<br>
+        08117893933
+    </div>
+</body>
+</html>

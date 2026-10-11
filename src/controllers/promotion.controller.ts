@@ -228,7 +228,12 @@ export class PromotionController {
 
   static async ratePromotionStore(req: Request, res: Response): Promise<void> {
     try {
-      const rateId = req.body.rate_id;
+      // Laravel reads `$request->rate_id`, which sees query AND body. TableView's picker
+      // Save posts `{idx:[...]}` and carries the rate in the query string
+      // (`/rate/promotion?group=promotion&rate_id=57`), so reading the body only always
+      // 404'd — that was the "Add Promotion Error". The delete twin below already
+      // read req.query.
+      const rateId = req.body.rate_id ?? req.query.rate_id;
       if (!/^\d+$/.test(String(rateId ?? ''))) { notFound(res, 'Rate is not found'); return; }
       const rate = await prisma.rates.findUnique({ where: { id: BigInt(rateId) } });
       if (!rate) { notFound(res, 'Rate is not found'); return; }

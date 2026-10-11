@@ -74,6 +74,42 @@ function dbGuard(res: Response): boolean {
   return false;
 }
 
+/**
+ * The redemption-scoping columns, in the column order of the insert statement.
+ *
+ * Extracted so `rewardStore` and `rewardUpdate` cannot disagree about how an empty value
+ * is normalised. `''` from an untouched form field has to become `null`, not `0` — a
+ * `room_type_id` of 0 or a `min_nights` of 0 would silently restrict a reward to nothing.
+ */
+function rewardScope(body: any): any[] {
+  const nullable = (v: any): any => (v === undefined || v === null || v === '' ? null : v);
+  const nullableInt = (v: any): any => {
+    const n = nullable(v);
+    return n === null ? null : Number(n);
+  };
+  const nullableDate = (v: any): any => {
+    const s = nullable(v);
+    if (s === null) return null;
+    const d = String(s).slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
+  };
+  const type = String(nullable(body.redemption_type) ?? 'benefit');
+  const discountType = nullable(body.discount_type);
+
+  return [
+    nullableInt(body.room_type_id),
+    nullableDate(body.valid_from),
+    nullableDate(body.valid_until),
+    nullableInt(body.min_nights),
+    nullableInt(body.max_nights),
+    type === 'discount' ? 'discount' : 'benefit',
+    type === 'discount' ? (discountType === 'amount' ? 'amount' : 'percent') : null,
+    // A discount with no value is meaningless; the column is nullable so a benefit can
+    // leave it empty, but a discount is forced to a number.
+    type === 'discount' ? Number(body.discount_value ?? 0) : null,
+  ];
+}
+
 export class LoyaltyController {
   // ── Loyalty Reward (loyalty_rewards) — full CRUD, the guest portal reads it ──
   static async rewardList(req: Request, res: Response): Promise<void> {
@@ -152,6 +188,7 @@ export class LoyaltyController {
     try {
       if (!dbGuard(res)) return;
       const { property_id, name, description, points_cost, image, stock, sort, status } = req.body ?? {};
+      const scope = rewardScope(req.body ?? {});
       const errors: string[] = [];
       if (!name) errors.push('The name field is required.');
       if (points_cost === undefined || points_cost === null || points_cost === '') {
@@ -167,8 +204,10 @@ export class LoyaltyController {
       const pid = property_id ?? req.user?.lastProperty ?? 0;
       const result: any = await bookingExecute(
         `insert into loyalty_rewards
-           (property_id, name, description, points_cost, image, stock, sort, status, created_at, updated_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, now(), now())`,
+           (property_id, name, description, points_cost, image, stock, sort, status,
+            room_type_id, valid_from, valid_until, min_nights, max_nights,
+            redemption_type, discount_type, discount_value, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())`,
         [
           String(pid),
           String(name),
@@ -178,6 +217,7 @@ export class LoyaltyController {
           stock === undefined || stock === null || stock === '' ? null : Number(stock),
           Number(sort ?? 0),
           Number(status ?? 1),
+          ...scope,
         ]
       );
       const rows = await bookingQuery('select * from loyalty_rewards where id = ?', [result.insertId]);
@@ -221,6 +261,23 @@ export class LoyaltyController {
       if (stock !== undefined && stock !== null) push('stock', Number(stock));
       if (sort !== undefined && sort !== null) push('sort', Number(sort));
       if (status !== undefined && status !== null) push('status', Number(status));
+
+      // Scoping. Only touched when the caller actually sent one of the keys: an update
+      // that omits them entirely must not strip a reward's existing restrictions. Once a
+      // key is present, `rewardScope` normalises '' to null, which is how a form clears
+      // a restriction on purpose.
+      const scopeKeys = [
+        'room_type_id', 'valid_from', 'valid_until', 'min_nights', 'max_nights',
+        'redemption_type', 'discount_type', 'discount_value',
+      ];
+      if (scopeKeys.some((k) => k in (req.body ?? {}))) {
+        const scope = rewardScope(req.body ?? {});
+        const cols = [
+          'room_type_id', 'valid_from', 'valid_until', 'min_nights', 'max_nights',
+          'redemption_type', 'discount_type', 'discount_value',
+        ];
+        cols.forEach((col, i) => push(col, scope[i]));
+      }
       if (!sets.length) {
         const unchanged = await bookingQuery('select * from loyalty_rewards where id = ?', [id]);
         success(res, unchanged[0], 'Reward updated successfully.');

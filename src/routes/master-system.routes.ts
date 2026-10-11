@@ -122,8 +122,13 @@ router.get('/allocation-history', authMiddleware, requirePermission(69, 'view'),
 // ══════════════════════════════════════════════════════════
 
 router.get('/shift-confirmation', authMiddleware, requirePermission(69, 'view'), SystemController.shiftConfirmationList);
+router.put('/shift-confirmation/:id', authMiddleware, requirePermission(69, 'edit'), SystemController.shiftConfirmationUpdate);
 router.post('/shift-confirmation/confirmation', authMiddleware, requirePermission(69, 'edit'), SystemController.shiftConfirmationSubmit);
 router.get('/shift/detail', authMiddleware, requirePermission(69, 'view'), SystemController.shiftDetail);
+// Laravel cms.php:1132 registers the SAME ShiftConfirmationController@update at
+// /shift/detail/{id} — the end-of-day screen's inline Closing edit. Without it the
+// end-of-day grid PUTs to a 404 and the day can never be closed out.
+router.put('/shift/detail/:id', authMiddleware, requirePermission(69, 'edit'), SystemController.shiftConfirmationUpdate);
 router.post('/night-audit/post-audit', authMiddleware, requirePermission(69, 'edit'), SystemController.nightAuditPost);
 router.get('/check-value', authMiddleware, requirePermission(69, 'view'), SystemController.checkValue);
 

@@ -25,6 +25,20 @@ export interface ApiMeta {
   total_transaction?: any;
   ledger_id?: any;
   connect_room_type?: any;
+  reservation?: any;
+  /**
+   * Shift-confirmation payload keys Laravel emits at the TOP level of the response
+   * (`status`, `details`, `debug`, `count`, `is_self`, `name`, `image`). The end-shift
+   * page gates on `response.status !== "error"` and `response.is_self`, so nesting them
+   * under `data` made an unbalanced submit look like a success.
+   */
+  status?: string;
+  details?: string[];
+  debug?: any;
+  count?: number;
+  is_self?: boolean;
+  name?: string;
+  image?: string;
   /**
    * Field-schema envelope used by the module create/edit screens. Laravel puts
    * `form` at the TOP level of the response (and often sends no `data` key at
@@ -117,6 +131,14 @@ export function success(
     ...(meta?.total_transaction !== undefined ? { total_transaction: meta.total_transaction } : {}),
     ...(meta?.ledger_id !== undefined ? { ledger_id: meta.ledger_id } : {}),
     ...(meta?.connect_room_type !== undefined ? { connect_room_type: meta.connect_room_type } : {}),
+    ...(meta?.reservation !== undefined ? { reservation: meta.reservation } : {}),
+    ...(meta?.status !== undefined ? { status: meta.status } : {}),
+    ...(meta?.details !== undefined ? { details: meta.details } : {}),
+    ...(meta?.debug !== undefined ? { debug: meta.debug } : {}),
+    ...(meta?.count !== undefined ? { count: meta.count } : {}),
+    ...(meta?.is_self !== undefined ? { is_self: meta.is_self } : {}),
+    ...(meta?.name !== undefined ? { name: meta.name } : {}),
+    ...(meta?.image !== undefined ? { image: meta.image } : {}),
 ...(meta?.form !== undefined ? { form: meta.form } : {}),
   });
 }

@@ -401,7 +401,7 @@ async function calculateExtraRatios(propertyId: bigint): Promise<{ extra_adult_r
 }
 
 // Shared engine — Laravel DynamicRateService::calculate.
-async function runCalculation(configRow: any, roomTypeIds: any[] | undefined, userId?: bigint | null): Promise<number> {
+export async function runCalculation(configRow: any, roomTypeIds: any[] | undefined, userId?: bigint | null): Promise<number> {
   const propertyId = configRow.property_id;
   const lookbackDays = Number(configRow.lookback_days ?? 30);
   const forecastDays = Number(configRow.forecast_days ?? 30);
@@ -550,7 +550,7 @@ async function runCalculation(configRow: any, roomTypeIds: any[] | undefined, us
 }
 
 // Shared applier — Laravel DynamicRateService::applyRates.
-async function runApply(configRow: any, opts: { startDate?: string; endDate?: string; roomTypeId?: any }, userId?: bigint | null): Promise<{ applied: number; eaRatio: number; ecRatio: number }> {
+export async function runApply(configRow: any, opts: { startDate?: string; endDate?: string; roomTypeId?: any }, userId?: bigint | null): Promise<{ applied: number; eaRatio: number; ecRatio: number }> {
   const startDate = opts.startDate;
   const endDate = opts.endDate ?? opts.startDate;
 

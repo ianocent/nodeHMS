@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hotel Accommodation Confirmation Letter</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1;
+            font-size: 12px;
+        }
+
+        thead { display: table-header-group; }
+        tfoot { display: table-footer-group; }
+        tr { page-break-inside: avoid; }
+
+        .text-header {
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .header {
+            text-align: left;
+            margin-bottom: 20px;
+        }
+        .header img {
+            width: 315px;
+            height: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            border: 1px solid #ccc;
+        }
+        th, td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .subject {
+           
+            font-weight: bold;
+            margin: 20px 0;
+        }
+        .footer {
+            margin-top: 20px;
+        }
+
+        .total-row {
+            background-color: #9ca3af;
+        }
+        .font-bold {
+            font-weight: bold;
+        }
+        .text-center {
+            text-align: center;
+        }
+
+        .logo {
+            width: 315px;
+            height: auto;
+        }
+
+        .container {
+            background-color: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .container p {
+            margin: 0 0 5px;
+        }
+        .container .details p {
+            margin: 4px 0;
+        }
+        .container .details span {
+            font-weight: bold;
+        }
+
+        .container-footer {
+            /* font-color gray */
+            font-size: 12px;
+            font-weight: 300;
+            color: #9ca3af;
+            text-align: center;
+        }
+        .container-footer p {
+            margin: 5px 0;
+        }
+        .container-footer .title {
+            font-weight: bold;
+        }
+
+        @page {
+            margin: 50px 50px;
+        }
+
+        footer {
+            position: fixed;
+            bottom: -15px;
+            left: 0px;
+            right: 0px;
+            height: 50px;
+        }
+        .avoid-break { page-break-inside: avoid; }
+        .force-break { page-break-after: always; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <!-- <img src="<%= public_path('images/property.png') %>" alt="Hotels Logo" class="logo"> -.
+        <!-- <img src="<%= logoBase64 %>" alt="Hotels Logo" class="logo "> -.
+        <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo Company" class="logo">
+    </div>
+
+    <footer>
+        <div class="container-footer">
+            <p class="title">
+                <%= hotelNameAlias %>
+            </p>
+            <p>
+                <%= property.address %>
+            </p>
+            <p>Ph. <%= property.telp %></p>
+            <p>
+                <%= property.email %>
+            </p>
+        </div>
+    </footer>
+
+    <main>
+        <p style="margin-bottom: 10px">Jakarta , 15 Januari 2024</p>
+        <% - contactPerson %>
+        <div class="subject" style="margin-bottom: 10px; text-align: center;">Letter Of Agreement</div>
+        <p>
+            Dear <%= to %>,
+        </p>
+        <p>
+            Thank you for your interest in <%= hotelName %> for your forthcoming group in <%= dateReservation %> .
+            <%= hotelName %> is one of hotel that located in Kemang Jakarta, managed by <%= hotelName %>. 
+            <%= hotelName %> is located in a Kemang, which near to kemang raya and various unique shops.
+            10 minutes drive to Kemang Village Mall, 30 minutes to Halim Perdana Kusuma Airport, 60 minutes to Soekarno Hatta Airport and surrounded by commercial areas.
+            Further to your inqury, I am pleased to submit our proposal for your kind consideration. However, we are not presently holding any 
+            room for this group. Room will be held on acceptance of this quotation and based on room still being available when you request to proceed.   
+        </p>
+
+        <p>
+            I will contact you to discuss this proposal further. In the meantime, should you require any assistance, please don't hesitate to contact me at email <%= property.email %> and Mobile : 
+            <%= property.telp %>. I look forward to the opportunity of working closely with you for this group.</p>
+
+        <div class="subject" style="margin-bottom: 10px">Event Arrangement</div>
+
+
+
+        <div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Type Of Room</th>
+                        <th>Total Of Room</th>
+                        <th>Check IN</th>
+                        <th>Check OUT</th>
+                        <th>Rate</th>
+                        <th>Request</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% rooms.forEach(function(transaction) { %>
+                    <tr>
+                        <td><%= room.room_type %></td>
+                        <td><%= room.total_room %> Rooms</td>
+                        <td><%= room.check_in %></td>
+                        <td><%= room.check_out %></td>
+                        <td>IDR <%= (parseFloat(room.rate) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) %>/Room/Night</td>
+                        <td><%= room.total_room %> <%= room.room_type %>
+                            <% if (room.is_breakfast) { %>
+                                (Include Breakfast <%= room.pax %> pax)
+                            <% } %>
+                        </td>
+                    </tr>
+                    <% }); %>
+                </tbody>
+            </table>
+        </div>
+        <br>
+        <div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Type Of Room</th>
+                        <th>Rate per Room</th>
+                        <th>No of Room</th>
+                        <th>Total per day</th>
+                        <th>DAY(S)</th>
+                        <th>TOTAL CHARGES</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% roomGroups.forEach(function(transaction) { %>
+                        <tr>
+                            <td><%= roomGroup.name %></td>
+                            <td>
+                                <div>IDR</div>
+                                <div><%= (parseFloat(roomGroup.amount) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) %>/Room/Night</div>
+                            </td>
+                            <td><%= roomGroup.total_room %> Rooms</td>
+                            <td class="font-bold">IDR <%= (parseFloat(roomGroup.total_per_day) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) %></td>
+                            <td><%= roomGroup.totalDay %></td>
+                            <td>IDR <%= (parseFloat(roomGroup.total_charges) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) %></td>
+                        </tr>
+                    <% }); %>
+                    <tr class="total-row">
+                        <td colspan="5" class="font-bold text-center">TOTAL</td>
+                        <td class="font-bold">
+                            <%= (parseFloat(total ) || 0).toLocaleString('en-US', {minimumFractionDigits: 2}) %>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <p>
+            Remarks : <%= folio.remark %>
+        </p>
+        <p>
+            Include : <%= inclusives %>
+        </p>
+
+        <div class="force-break"></div>
+        <div class="subject" style="margin-bottom: 10px">Guarantee Number of Room </div>
+        <p>
+            Confirmation of guaranteed number of room required must be received not later than 5 (five) working day(s) prior to commencement of the arrival day. If the number of room and legth of stay more than the guaranteed then the client will be charged for actual number of room and length of stay. If the number of room and period of stay less than guaranteed, then the client will be charged for the guaranteed no of room and length of stay. 
+        </p>
+
+        <div class="subject" style="margin-bottom: 10px">Pricing Policy </div>
+        <p>
+            Rates above are quoted net inclusive 10% service charge and 11% prevailing government tax and noncommissionable. This quotation will remain valid for the above group and period of stay only.  Please be informed that prices quoted may be subject to change, depending on change in group size and dates. 
+        </p>
+
+        <div class="subject" style="margin-bottom: 10px">Group Concesion Policy </div>
+        <p>
+            <%= hotelName %> regards as a group a minimum of 10 (ten) paying rooms traveling together in the same period of stay. Deposit payment is required upon making reservation not later than 7 (seven) day(s) prior group arrival.
+        </p>
+
+        <div class="subject" style="margin-bottom: 10px">Early Arrival and Extension </div>
+        <p>
+            The room rate will be extended for stay 3 (three) day(s) prior to the arrival and after the departure. 
+        </p>
+
+        <div class="subject" >Payment Policy  </div>
+            <p>Signing the contract require 50% non refundable deposit, the remaining 50% should be received 2 (two) week(s) prior to event. Payments can be settled by cash, credit card, cheque, or bank transfer, to following account:</p>
+            <div class="details">
+                <p><span>Beneficiary Name</span> : <%= hotelNameAlias %></p>
+                <p><span>Bank Name</span> :<%= bankName %></p>
+                <p><span>Account No.</span> :<%= bankNameAccountNo %></p>
+            </div>
+            <p><span>Please send a copy of the bank transfer addressed to us via whatsapp to <%= property.telp %> or e-mail to us.</span></p>
+
+        <div class="subject" >Cancellation Policy </div>
+        <p>
+            In case of a resentment by the clients, please understand that the following cancellation charges will be imposed: 
+        </p>
+        <div class="details">
+            <p><span>Within 7 days prior to arrival / event </span> : 50% of total estimated revenue </p>
+            <p><span>Within 3 days prior to arrival / event </span> : 75% of total estimated revenue </p>
+            <p><span>Within 24 hours prior to arrival / event </span> : 100% of total estimated revenue</p>
+        </div>
+        <p><span>Please send a copy of the bank transfer addressed to us via whatsapp to <%= property.telp %> or e-mail to us.</span></p>
+
+        <div class="subject" style="margin-bottom: 10px">Security </div>
+        <p>
+            Organizer acknowledges that <%= hotelName %>, cannot be held responsible for the safe keeping of equipment, supplies, written material, or other valuable items left in the public areas.     
+        </p>
+
+        <div class="subject" style="margin-bottom: 10px">Impossibilities of Performance  </div>
+        <p>
+            This agreement will terminate without liability to either party if substantial performance of either party's obligations is delayed, impeded or prevented by any cause reasonably beyond that party’s control.  Such causes include, but are not limited to, acts of God, regulations or orders or governmental authorities, fire, flood or explosion, global war, disaster, civil disorder, curtailment of transportation facilities, regional health warning or epidemics, high risks of regional terrorist attacks or other emergencies making it inadvisable, illegal or otherwise impossible to provide the facilities or the services as to hold any function.
+        </p>
+
+        <div class="subject" style="margin-bottom: 10px">Default </div>
+        <p>
+            If the Organizer fails to pay any sum due under this agreement or otherwise does not comply with its terms, the Hotel may terminate this agreeme
+        </p>
+
+        <div class="subject" style="margin-bottom: 10px">Default </div>
+        <p>
+            The terms of this agreement shall be binding upon the hotel only if this agreement is dully signed by the Organizer and returned to the hotel on 16 Januari 2024 . Any amendement shall be made with acknowledgement of both party. 
+        </p>
+        <div class="subject" style="margin-bottom: 10px"></div>
+        <p>
+            We trust the above is in order and meets your requirements. Should you need further details or discussion on the arrangements above, please do not hesitate to contact us directly. 
+        </p>
+
+        <div class="footer">
+            <table>
+                <tr>
+                    <td>
+                        Best Regards,<br><br><br><br><br><br>
+
+                        <%= salesName %><br>
+                        <%= salesPosition %><br>
+                    </td>
+                    <td>
+                        Agreed & approved by,<br><br><br><br><br><br>
+                        Name :<br>
+                        Date :<br>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    </main>
+    
+
+    <script type="text/php">
+        if (isset($pdf)) {
+            $pdf.page_script('
+                $font = $fontMetrics.get_font("Arial, Helvetica, sans-serif", "normal");
+                $pdf.text(750, 570, "Page " . $PAGE_NUM . " of " . $PAGE_COUNT, $font, 10);
+            ');
+        }
+    </script>
+</body>
+</html>

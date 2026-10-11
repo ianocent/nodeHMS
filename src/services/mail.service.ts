@@ -83,21 +83,52 @@ function esc(v: any): string {
     .replace(/"/g, '&quot;');
 }
 
+/**
+ * Booking confirmation to the guest.
+ *
+ * `preRegistrationUrl` is the guest's own pre-registration link, minted by
+ * services/preRegistrationLink.service.ts once payment clears. When present it becomes
+ * the primary call to action: an online guest is exactly the person who should not be
+ * standing at the front desk filling in a paper form, and the link is the only place the
+ * single-use token exists outside the database.
+ */
 export async function sendBookingConfirmationEmails(
   folio: { email?: string | null; first_name?: string | null; last_name?: string | null; folio_number?: string | null },
   hotelName: string,
-  pdfBuffer?: Buffer
+  pdfBuffer?: Buffer,
+  preRegistrationUrl?: string
 ): Promise<void> {
   const guestName = `${folio.first_name ?? ''} ${folio.last_name ?? ''}`.trim();
-  if (folio.email) {
-    await sendMail({
-      to: folio.email,
-      subject: 'Booking Confirmation',
-      html: `<p>Dear ${esc(guestName)},</p><p>Your booking <strong>${esc(folio.folio_number ?? '')}</strong> at <strong>${esc(hotelName)}</strong> has been confirmed. Please find the confirmation letter attached.</p>`,
-      attachmentName: `booking-confirmation-${folio.folio_number ?? 'guest'}.pdf`,
-      pdfBuffer,
-    });
-  }
+  if (!folio.email) return;
+
+  const folioNumber = esc(folio.folio_number ?? '');
+  const hotel = esc(hotelName);
+
+  const preRegistrationBlock = preRegistrationUrl
+    ? `<div style="margin:28px 0;padding:20px;background:#f7f4ee;border-left:4px solid #8a6a2f">
+         <p style="margin:0 0 6px;font-weight:bold;color:#0f2a43">Fill in your details before you arrive</p>
+         <p style="margin:0 0 14px;color:#4a5568;line-height:1.6">
+           Checking in takes about a minute instead of ten. The link is personal to you
+           and works once.
+         </p>
+         <a href="${esc(preRegistrationUrl)}"
+            style="display:inline-block;background:#0f2a43;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:bold">
+           Fill in my details
+         </a>
+       </div>`
+    : '';
+
+  await sendMail({
+    to: folio.email,
+    subject: `Booking Confirmation — ${folioNumber}`,
+    html:
+      `<p>Dear ${esc(guestName)},</p>` +
+      `<p>Your booking <strong>${folioNumber}</strong> at <strong>${hotel}</strong> has been confirmed. Please find the confirmation letter attached.</p>` +
+      preRegistrationBlock +
+      `<p>See you soon.</p>`,
+    attachmentName: `booking-confirmation-${folio.folio_number || 'guest'}.pdf`,
+    pdfBuffer,
+  });
 }
 
 // EmailBuilder template dispatch (Laravel Folio.php:1408-1419 / 1811-1820 parity):

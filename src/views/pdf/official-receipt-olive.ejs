@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Refund Deposit Receipt</title>
+    <style>
+
+        @page {
+            size: A5 landscape;
+            margin: 10mm;
+        }
+
+        @media print {
+            body {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+                margin: 0;
+                padding: 10mm;
+                font-size: 11pt;
+            }
+        }
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 28px 34px;
+            font-size: 14px;
+            line-height: 1.4;
+            color: #000;
+        }
+        .top {
+            margin-bottom: 18px;
+        }
+        .hotel-name {
+            font-weight: bold;
+            letter-spacing: 0.5px;
+        }
+        .phone {
+            margin-top: 2px;
+        }
+        .title {
+            text-align: center;
+            margin: 22px 0 24px 0;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .info {
+            margin-bottom: 18px;
+        }
+        .info-row {
+            margin: 2px 0;
+        }
+        .info-label {
+            display: inline-block;
+            width: 82px;
+        }
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+            margin-bottom: 16px;
+        }
+        .thead th {
+            text-align: left;
+            border-bottom: 1px solid #000;
+            padding-bottom: 4px;
+        }
+        .col-currency { width: 10%; }
+        .col-desc { width: 70%; }
+        .col-amount { width: 20%; }
+        .tbody td {
+            padding-top: 10px;
+        }
+        .footer-info {
+            margin-top: 18px;
+            margin-bottom: 34px;
+        }
+        .signatures {
+            width: 100%;
+            margin-top: 34px;
+            text-align: center;
+        }
+        .signatures td {
+            width: 50%;
+            vertical-align: bottom;
+            height: 80px;
+        }
+        .sig-label {
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header-container header">
+        <div class="p-12">
+            <br>
+            <div class="p-4">
+                <br>
+            </div>
+        </div>
+    </div>
+
+    <div class="top">
+        <div class="hotel-name"><%= hotelName ?? 'OLIVE HOTEL' %></div>
+        <div class="phone">Phone <%= phone ?? '+62-021-29517777' %></div>
+    </div>
+
+    <div class="title"><%= typeTransaction ?? 'Transaction Deposit Receipt' %></div>
+
+    <div class="info">
+        <div class="info-row"><span class="info-label">Guest Name</span> : <span><%= guest.', '.title %></span></div>
+        <div class="info-row"><span class="info-label">Room No</span> : <span><%= roomNo %></span></div>
+        <div class="info-row"><span class="info-label">Arrival</span> : <span><%= arrival %></span></div>
+        <div class="info-row"><span class="info-label">Departure</span> : <span><%= departure %></span></div>
+    </div>
+
+    <%
+        $refundAmount = $refundAmount ?? ($totalAmount ?? null);
+        if (!$refundAmount && !empty($transactions)) {
+            $last = collect($transactions).last();
+            $refundAmount = last.credit ?? last.debit ?? null;
+        }
+    %>
+
+    <table class="table">
+        <thead class="thead">
+            <tr>
+                <th class="col-currency">CURRENCY</th>
+                <th class="col-desc">DESCRIPTION</th>
+                <th class="col-amount">AMOUNT</th>
+            </tr>
+        </thead>
+        <tbody class="tbody">
+            <% transactions.forEach(function(transaction) { %>
+                <tr>
+                    <td class="col-currency">Rp</td>
+                    <td class="col-desc"><%= strtoupper(transaction.description) %></td>
+                    <td class="col-amount"><%= transaction.amount %></td>
+                </tr>
+            <% }); %>
+        </tbody>
+    </table>
+
+    <div class="footer-info">
+        <div>Date Transaction: <%= (new Date().toLocaleString('en-GB')) %></div>
+    </div>
+
+    <table class="signatures">
+        <tr>
+            <td>
+                <div>Hotel</div>
+                <div></div>
+            </td>
+            <td>
+                <div>Guest</div>
+                <div></div>
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <div></div>
+                <div></div>
+            </td>
+            <td>
+                <div></div>
+                <div></div>
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <div></div>
+                <div class="sig-label">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</div>
+            </td>
+            <td>
+                <div></div>
+                <div class="sig-label">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</div>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+

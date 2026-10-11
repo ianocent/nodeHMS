@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proforma Invoice</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            line-height: 1.3;
+            margin: 0;
+            padding: 20px;
+        }
+        
+        .header {
+            background-color: #d4c5a9;
+            padding: 15px 20px;
+            margin: -20px -20px 30px -20px;
+            width: 100%;
+        }
+        
+        .header-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .header-table td {
+            border: none;
+            padding: 0;
+            vertical-align: middle;
+        }
+        
+        .logo-section {
+            text-align: left;
+            width: 70%;
+        }
+        
+        .logo {
+            max-height: 50px;
+            max-width: 200px;
+        }
+        
+        .invoice-info {
+            text-align: right;
+            width: 30%;
+        }
+        
+        .invoice-number {
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .guest-info {
+            width: 100%;
+            margin-bottom: 30px;
+        }
+        
+        .guest-info-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .guest-info-table td {
+            border: none;
+            padding: 0;
+            vertical-align: top;
+            width: 50%;
+        }
+        
+        .guest-details {
+            padding-right: 40px;
+        }
+        
+        .guest-details-right {
+            padding-left: 20px;
+        }
+        
+        .info-row {
+            margin-bottom: 8px;
+        }
+        
+        .info-label {
+            font-weight: bold;
+            display: inline-block;
+            width: 120px;
+        }
+        
+        .info-value {
+            display: inline-block;
+        }
+        
+        .transactions-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+        }
+        
+        .transactions-table th {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+            font-weight: bold;
+        }
+        
+        .transactions-table th.date-col,
+        .transactions-table th.ref-col,
+        .transactions-table th.amount-col {
+            background-color: #d4c5a9;
+        }
+        
+        .transactions-table th.desc-col,
+        .transactions-table th.qty-col {
+            background-color: #e8e8e8;
+        }
+        
+        .transactions-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+        }
+        
+        .transactions-table td.date-col,
+        .transactions-table td.ref-col,
+        .transactions-table td.amount-col {
+            background-color: #d4c5a9;
+        }
+        
+        .transactions-table td.desc-col,
+        .transactions-table td.qty-col {
+            background-color: #e8e8e8;
+        }
+        
+        .transactions-table .date-col {
+            width: 15%;
+        }
+        
+        .transactions-table .desc-col {
+            width: 30%;
+        }
+        .transactions-table .ref-col {
+            width: 15%;
+        }
+        
+        .transactions-table .amount-col {
+            width: 20%;
+            text-align: right;
+        }
+        
+        .summary {
+            margin-bottom: 30px;
+        }
+        
+        .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        
+        .summary-table td {
+            border: none;
+            padding: 5px 0;
+            font-weight: bold;
+        }
+        
+        .summary-label {
+            text-align: right;
+            width: 70%;
+            padding-right: 20px;
+        }
+        
+        .summary-value {
+            text-align: right;
+            width: 30%;
+        }
+        
+        .bottom-section {
+            margin-top: 30px;
+        }
+        
+        .bottom-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .bottom-table td {
+            border: none;
+            padding: 0;
+            vertical-align: top;
+        }
+        
+        .signature-section {
+            width: 50%;
+            padding-right: 20px;
+        }
+        
+        .signature-text {
+            margin-bottom: 40px;
+            font-size: 11px;
+            line-height: 1.4;
+        }
+        
+        .signature-line {
+            border-bottom: 1px dotted #000;
+            width: 250px;
+            margin-top: 20px;
+            margin-bottom: 5px;
+        }
+        
+        .signature-label {
+            font-size: 11px;
+            text-align: center;
+            width: 250px;
+        }
+        
+        .balance-section {
+            width: 50%;
+            text-align: right;
+        }
+        
+        .balance-amount {
+            font-size: 18px;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+        
+        .amount {
+            text-align: right;
+        }
+        
+        .empty-row {
+            height: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <table class="header-table">
+            <tr>
+                <td class="logo-section">
+                    <img src="data:image/png;base64,<%= logoBase64 %>" alt="Logo Company" class="logo">
+                </td>
+                <td class="invoice-info">
+                    <div class="invoice-number">No. <%= folioNumber %></div>
+                    <div class="title">PROFORMA INVOICE</div>
+                </td>
+            </tr>
+        </table>
+    </div>
+    
+    <div class="guest-info">
+        <table class="guest-info-table">
+            <tr>
+                <td class="guest-details">
+                    <div class="info-row">
+                        <span class="info-label">Guest Name</span>
+                        <span class="info-value">: <%= guestName %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Company</span>
+                        <span class="info-value">: <%= company %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Address</span>
+                        <span class="info-value">: <%= address %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Voucher No</span>
+                        <span class="info-value">: <%= voucherNumber %></span>
+                    </div>
+                </td>
+                <td class="guest-details-right">
+                    <div class="info-row">
+                        <span class="info-label">Room No</span>
+                        <span class="info-value">: <%= roomNo %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Room Type</span>
+                        <span class="info-value">: <%= roomType %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Check In</span>
+                        <span class="info-value">: <%= checkInDate %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Check Out</span>
+                        <span class="info-value">: <%= checkOutDate %></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Pax</span>
+                        <span class="info-value">: <%= noOfAdults %> Adult(s), <%= noOfChild %> Child(ren)</span>
+                    </div>
+                </td>
+            </tr>
+        </table>
+    </div>
+    
+    <table class="transactions-table">
+        <thead >
+            <tr >
+                <th class="date-col" style="background-color: #2b281e !important; color: #fff !important;">Date</th>
+                <th class="desc-col" style="background-color: #2b281e !important; color: #fff !important;">Description</th>
+                <th class="amount-col" style="background-color: #2b281e !important; color: #fff !important;">DR</th>
+                <th class="amount-col" style="background-color: #2b281e !important; color: #fff !important;">CR</th>
+            </tr>
+        </thead>
+        <tbody>
+            <% transactions.forEach(function(transaction) { %>
+            <tr>
+                <td class="date-col"><%= new Date(transaction.date).toLocaleDateString('en-GB') %></td>
+                <td class="desc-col">Room Revenue</td>
+                <td class="amount-col"><%= transaction.charge %></td>
+                <td class="amount-col"><%= transaction.total %></td>
+            </tr>
+            <% }); %>
+            
+            <%= -- Add empty rows for additional transactions -- %>
+            @for($i = count($transactions); $i < 10; $i++)
+            <tr class="empty-row">
+                <td class="date-col"></td>
+                <td class="desc-col"></td>
+                <td class="amount-col"></td>
+                <td class="amount-col"></td>
+            </tr>
+            @endfor
+        </tbody>
+    </table>
+    
+    <div class="summary">
+        <table class="summary-table">
+            <tr>
+                <td class="summary-label">Total Amount Include 21% Service Charge & GST:</td>
+                <td class="summary-value"><%= (totalAmount).toLocaleString('en-US', {minimumFractionDigits: 2}) %></td>
+            </tr>
+            <tr>
+                <td class="summary-label">BALANCE:</td>
+                <td class="summary-value"><%= (totalAmount).toLocaleString('en-US', {minimumFractionDigits: 2}) %></td>
+            </tr>
+        </table>
+    </div>
+    
+    <div class="bottom-section">
+        <table class="bottom-table">
+            <tr>
+                <td class="signature-section">
+                    <div class="signature-text">
+                        Terms & Conditions:<br>
+                        Payment due upon receipt of invoice.<br>
+                        Thank you for your business.
+                    </div>
+                    <div class="signature-line"></div>
+                    <div class="signature-label">Authorized Signature</div>
+                </td>
+                <td class="balance-section">
+                    <div class="balance-amount"><%= (totalAmount).toLocaleString('en-US', {minimumFractionDigits: 2}) %></div>
+                </td>
+            </tr>
+        </table>
+    </div>
+    
+</body>
+</html>

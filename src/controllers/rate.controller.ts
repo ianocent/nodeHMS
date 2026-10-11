@@ -167,7 +167,7 @@ async function applyLinkedRateCascade(
     for (const date of dates) {
       const existing: any = await prisma.rate_rates.findUnique({
         where: {
-          rate_rates_rate_id_room_type_id_date_key: {
+          rate_id_room_type_id_date: {
             rate_id: rule.rateId,
             room_type_id: rule.roomTypeId,
             date,
@@ -198,15 +198,9 @@ async function applyLinkedRateCascade(
       data.extra_adult = extraAdult !== undefined ? getValueRate(extraAdult, rule.offsetExtraAdult, rule.type) : (existing?.extra_adult ?? 0);
       data.extra_child = extraChild !== undefined ? getValueRate(extraChild, rule.offsetExtraChild, rule.type) : (existing?.extra_child ?? 0);
 
-      await prisma.rate_rates.upsert({
-        where: {
-          rate_rates_rate_id_room_type_id_date_key: {
-            rate_id: rule.rateId,
-            room_type_id: rule.roomTypeId,
-            date,
-          },
-        } as any,
-        create: {
+      await saveRateRate(
+        { rate_id: rule.rateId, room_type_id: rule.roomTypeId, date },
+        {
           ...data,
           rate_id: rule.rateId,
           room_type_id: rule.roomTypeId,
@@ -214,8 +208,8 @@ async function applyLinkedRateCascade(
           created_by: userId,
           created_at: new Date(),
         },
-        update: data,
-      });
+        data,
+      );
     }
   }
 }
@@ -264,6 +258,21 @@ function getDatesInRange(start: Date, end: Date): Date[] {
     current.setDate(current.getDate() + 1);
   }
   return dates;
+}
+
+// Prisma's `upsert` generates Postgres ON CONFLICT and therefore needs a real UNIQUE
+// index in the live database. These rate_rates writes historically failed with
+// "no unique or exclusion constraint matching the ON CONFLICT specification", so
+// use the same find-then-write pattern Laravel's Eloquent updateOrCreate uses.
+async function saveRateRate(where: { rate_id: bigint; room_type_id: bigint; date: Date }, create: any, update: any): Promise<any> {
+  const existing = await prisma.rate_rates.findFirst({
+    where: { rate_id: where.rate_id, room_type_id: where.room_type_id, date: where.date },
+    select: { id: true },
+  });
+  if (existing) {
+    return prisma.rate_rates.update({ where: { id: existing.id }, data: update });
+  }
+  return prisma.rate_rates.create({ data: create });
 }
 
 // Laravel BarRate/RateRate store/index parse flat checkbox keys: days_*, room_type_*, fields_*
@@ -599,11 +608,15 @@ export class RateController {
         if (exists) { badRequest(res, `${incomingName} already exist`); return; }
       }
 
+      const pickValue = (v: any): any => (v && typeof v === 'object' && 'value' in v ? v.value : v);
+      const codePostIdValue = pickValue(code_post_id);
+      const codePostExtraBedIdValue = pickValue(code_post_extra_bed_id);
+
       const rate = await prisma.rates.create({
         data: {
           property_id: propertyId!,
-          code_post_id: BigInt(code_post_id),
-          code_post_extra_bed_id: code_post_extra_bed_id ? BigInt(code_post_extra_bed_id) : null,
+          code_post_id: BigInt(String(codePostIdValue)),
+          code_post_extra_bed_id: codePostExtraBedIdValue ? BigInt(String(codePostExtraBedIdValue)) : null,
           name,
           code,
           start_date: new Date(start_date),
@@ -829,8 +842,15 @@ prisma.types.findMany({
       }
       if (name !== undefined && name !== null && name !== '') data.name = name;
       if (code !== undefined && code !== null && code !== '') data.code = code;
-      if (code_post_id !== undefined && code_post_id !== null && code_post_id !== '') data.code_post_id = BigInt(code_post_id);
-      if (code_post_extra_bed_id !== undefined && code_post_extra_bed_id !== null && code_post_extra_bed_id !== '') data.code_post_extra_bed_id = BigInt(code_post_extra_bed_id);
+      const pickValue = (v: any): any => (v && typeof v === 'object' && 'value' in v ? v.value : v);
+      if (code_post_id !== undefined && code_post_id !== null && code_post_id !== '') {
+        const v = pickValue(code_post_id);
+        if (v !== undefined && v !== null && v !== '' && /^\d+$/.test(String(v))) data.code_post_id = BigInt(String(v));
+      }
+      if (code_post_extra_bed_id !== undefined && code_post_extra_bed_id !== null && code_post_extra_bed_id !== '') {
+        const v = pickValue(code_post_extra_bed_id);
+        if (v !== undefined && v !== null && v !== '' && /^\d+$/.test(String(v))) data.code_post_extra_bed_id = BigInt(String(v));
+      }
       if (start_date !== undefined && start_date !== null && start_date !== '') data.start_date = new Date(start_date);
       if (end_date !== undefined && end_date !== null && end_date !== '') data.end_date = new Date(end_date);
 
@@ -1233,19 +1253,13 @@ prisma.types.findMany({
           }
           fieldsByRoomType.set(Number(rtId), preserved);
 
-          await prisma.rate_rates.upsert({
-            where: {
-              rate_rates_rate_id_room_type_id_date_key: {
-                rate_id: rateId,
-                room_type_id: rtId,
-                date: date,
-              },
-            } as any,
-            create: {
+          await saveRateRate(
+            { rate_id: rateId, room_type_id: rtId, date },
+            {
               property_id: propertyId!,
               rate_id: rateId,
               room_type_id: rtId,
-              date: date,
+              date,
               one_adult: preserved.one_adult ?? 0,
               two_adult: preserved.two_adult ?? 0,
               extra_adult: preserved.extra_adult ?? 0,
@@ -1255,7 +1269,7 @@ prisma.types.findMany({
               status: STATUS_ACTIVE,
               created_by: userId,
             },
-            update: {
+            {
               one_adult: preserved.one_adult ?? 0,
               two_adult: preserved.two_adult ?? 0,
               extra_adult: preserved.extra_adult ?? 0,
@@ -1266,7 +1280,7 @@ prisma.types.findMany({
               updated_by: userId,
               updated_at: new Date(),
             },
-          });
+          );
         }
       }
 
@@ -1277,7 +1291,7 @@ prisma.types.findMany({
       success(res, { updated: targetDates.length * targetRoomTypes.length }, 'Success');
     } catch (err: any) {
       console.error('Rate grid store error:', err);
-      error(res, 'Failed to save rate grid', 500);
+      error(res, `Failed to save rate grid: ${err?.message ?? err}`, 500);
     }
   }
 
@@ -1374,29 +1388,23 @@ prisma.types.findMany({
       for (const [rtId, fields] of fieldsByRoomType) {
         const updateData: any = {
           property_id: propertyId!,
-          rate_id: rateId,
-          room_type_id: BigInt(rtId),
-          date: targetDate,
           updated_by: userId,
           updated_at: new Date(),
           status: STATUS_ACTIVE,
           ...fields,
         };
 
-        await prisma.rate_rates.upsert({
-          where: {
-            rate_rates_rate_id_room_type_id_date_key: {
-              rate_id: rateId,
-              room_type_id: BigInt(rtId),
-              date: targetDate,
-            },
-          } as any,
-          create: {
+        await saveRateRate(
+          { rate_id: rateId, room_type_id: BigInt(rtId), date: targetDate },
+          {
             ...updateData,
+            rate_id: rateId,
+            room_type_id: BigInt(rtId),
+            date: targetDate,
             created_by: userId,
           },
-          update: updateData,
-        });
+          updateData,
+        );
       }
 
       // Laravel RateRateController@update (:439-469): sync flags + cascade + BE dispatch
@@ -1560,9 +1568,6 @@ prisma.types.findMany({
         for (const rtId of targetRoomTypeIds) {
           const updateData: any = {
             property_id: propertyId!,
-            rate_id: rateId,
-            room_type_id: rtId,
-            date,
             updated_by: userId,
             updated_at: new Date(),
             status: STATUS_ACTIVE,
@@ -1575,20 +1580,17 @@ prisma.types.findMany({
           }
 
           // Laravel restrictionStore writes restrictions only — no cascade/dispatch there.
-          await prisma.rate_rates.upsert({
-            where: {
-              rate_rates_rate_id_room_type_id_date_key: {
-                rate_id: rateId,
-                room_type_id: rtId,
-                date,
-              },
-            } as any,
-            create: {
+          await saveRateRate(
+            { rate_id: rateId, room_type_id: rtId, date },
+            {
               ...updateData,
+              rate_id: rateId,
+              room_type_id: rtId,
+              date,
               created_by: userId,
             },
-            update: updateData,
-          });
+            updateData,
+          );
         }
       }
 
@@ -1988,15 +1990,9 @@ prisma.types.findMany({
           stored.status = STATUS_ACTIVE;
           fieldsByRoomType.set(Number(rt.id), stored);
 
-          await prisma.rate_rates.upsert({
-            where: {
-              rate_rates_rate_id_room_type_id_date_key: {
-                rate_id: rateId,
-                room_type_id: rt.id,
-                date,
-              },
-            } as any,
-            create: {
+          await saveRateRate(
+            { rate_id: rateId, room_type_id: rt.id, date },
+            {
               property_id: propertyId!,
               rate_id: rateId,
               room_type_id: rt.id,
@@ -2013,7 +2009,7 @@ prisma.types.findMany({
               status: STATUS_ACTIVE,
               created_by: userId,
             },
-            update: {
+            {
               one_adult: stored.one_adult ?? 0,
               two_adult: stored.two_adult ?? 0,
               extra_adult: stored.extra_adult ?? 0,
@@ -2024,7 +2020,7 @@ prisma.types.findMany({
               updated_by: userId,
               updated_at: new Date(),
             },
-          });
+          );
         }
       }
 
@@ -2035,7 +2031,7 @@ prisma.types.findMany({
       success(res, { updated: allDates.length * roomTypeIds.length }, 'Success');
     } catch (err: any) {
       console.error('Bar rate store error:', err);
-      error(res, 'Failed to save bar rates', 500);
+      error(res, `Failed to save bar rates: ${err?.message ?? err}`, 500);
     }
   }
 
@@ -2224,15 +2220,9 @@ prisma.types.findMany({
           stored.status = STATUS_ACTIVE;
           fieldsByRoomType.set(Number(rt.id), stored);
 
-          await prisma.rate_rates.upsert({
-            where: {
-              rate_rates_rate_id_room_type_id_date_key: {
-                rate_id: rateId,
-                room_type_id: rt.id,
-                date,
-              },
-            } as any,
-            create: {
+          await saveRateRate(
+            { rate_id: rateId, room_type_id: rt.id, date },
+            {
               property_id: propertyId!,
               rate_id: rateId,
               room_type_id: rt.id,
@@ -2246,7 +2236,7 @@ prisma.types.findMany({
               status: STATUS_ACTIVE,
               created_by: userId,
             },
-            update: {
+            {
               one_adult: stored.one_adult ?? 0,
               two_adult: stored.two_adult ?? 0,
               extra_adult: stored.extra_adult ?? 0,
@@ -2257,7 +2247,7 @@ prisma.types.findMany({
               updated_by: userId,
               updated_at: new Date(),
             },
-          });
+          );
         }
       }
 
@@ -2266,7 +2256,7 @@ prisma.types.findMany({
       success(res, { updated: allDates.length * roomTypeIds.length }, 'Success');
     } catch (err: any) {
       console.error('Rate rate store error:', err);
-      error(res, 'Failed to save rate rates', 500);
+      error(res, `Failed to save rate rates: ${err?.message ?? err}`, 500);
     }
   }
 
@@ -2762,12 +2752,20 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
   static async rateLinkUpdate(req: Request, res: Response): Promise<void> {
     try {
       const id = String(req.params.id);
-      const { rate_id, amount, type, offsetAdult1, offsetAdult2, offsetExtraAdult, offsetExtraChild, applied_to_ori } = req.body;
-      if (!rate_id || !/^\d+$/.test(String(rate_id)) || !/^\d+$/.test(id)) { badRequest(res, 'rate_id and id are required'); return; }
-      const rateId = BigInt(rate_id);
+      // The inline grid save posts only the row's own columns (room_type, amount, type,
+      // offset*) and carries the rate in the query string, exactly like every other
+      // TableView inline edit in this app. Reading `rate_id` from the body only made the
+      // handler answer 400 "rate_id and id are required", so Rate Link could never be saved.
+      const { amount, type, offsetAdult1, offsetAdult2, offsetExtraAdult, offsetExtraChild, applied_to_ori } = req.body;
+      // frontend-node FinalPOstDat strips `_ori` keys, so the multi-select value
+      // arrives as `applied_to` instead — accept both (Laravel reads applied_to_ori).
+      const appliedToRaw = Array.isArray(applied_to_ori) ? applied_to_ori : (Array.isArray(req.body.applied_to) ? req.body.applied_to : undefined);
+      const rateIdRaw = req.body.rate_id ?? req.query.rate_id;
+      if (!rateIdRaw || !/^\d+$/.test(String(rateIdRaw)) || !/^\d+$/.test(id)) { badRequest(res, 'rate_id and id are required'); return; }
+      const rateId = BigInt(String(rateIdRaw));
       const roomTypeIds: bigint[] = [BigInt(id)];
-      if (Array.isArray(applied_to_ori)) {
-        for (const at of applied_to_ori) {
+      if (Array.isArray(appliedToRaw)) {
+        for (const at of appliedToRaw) {
           const v = at?.value ?? at;
           if (v && /^\d+$/.test(String(v))) roomTypeIds.push(BigInt(v));
         }
@@ -2810,33 +2808,46 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
 
-      let idx: any[] = req.body.idx || [];
-      if (!Array.isArray(idx)) idx = [idx];
-      if (idx.includes(0)) {
-        const bars = await prisma.rates.findMany({ where: { module: 'bar', deleted_at: null } });
-        idx = bars.map(b => b.id);
+      let idxRaw: any[] = Array.isArray(req.body.idx) ? req.body.idx : req.body.idx !== undefined ? [req.body.idx] : [];
+      const first = idxRaw[0];
+      const firstToken = typeof first === 'object' && first !== null ? (first.value ?? first.id ?? first.label) : first;
+      let selectedIds: bigint[] = [];
+      if (String(firstToken ?? '') === '0') {
+        const propertyId = req.user?.lastProperty;
+        const bars = await prisma.rates.findMany({
+          where: { module: 'bar', deleted_at: null, status: STATUS_ACTIVE, ...(propertyId ? { property_id: BigInt(propertyId) } : {}) },
+          select: { id: true },
+        });
+        selectedIds = bars.map((b) => b.id);
+      } else {
+        selectedIds = idxRaw
+          .map((i: any) => (i && typeof i === 'object' ? (i.value ?? i.id) : i))
+          .filter((i: any) => /^\d+$/.test(String(i ?? '')) && Number(i) > 0)
+          .map((i: any) => BigInt(String(i)));
       }
-      const selectedIds = idx.filter((i: any) => /^\d+$/.test(String(i))).map((i: any) => BigInt(i));
+
+      const existing = await prisma.model_has_rates.findMany({
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+        select: { rate_id: true, status: true },
+      });
+      const existingIds = existing.map((e: any) => e.rate_id);
+      const mergeIds = Array.from(new Set([...existingIds, ...selectedIds]));
 
       await prisma.model_has_rates.deleteMany({
-        where: { model_id: rateId, model_type: 'App\\Models\\Rate', status: 1 },
+        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
       });
-      if (selectedIds.length > 0) {
+      if (mergeIds.length > 0) {
         await prisma.model_has_rates.createMany({
-          data: selectedIds.map(rid => ({
+          data: mergeIds.map((rid) => ({
             rate_id: rid,
             model_type: 'App\\Models\\Rate',
             model_id: rateId,
-            status: 1,
+            status: 0,
             temp_status: 1,
           })),
           skipDuplicates: true,
         });
       }
-      await prisma.model_has_rates.updateMany({
-        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
-        data: { status: 0 },
-      });
       success(res, null, 'Success');
     } catch (err: any) {
       console.error('Rate link store error:', err);
@@ -2846,7 +2857,7 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
 
   static async rateLinkApply(req: Request, res: Response): Promise<void> {
     try {
-      const rateId = BigInt(String(req.query.rate_id ?? ''));
+      const rateId = BigInt(String(req.query.rate_id ?? req.body.rate_id ?? ''));
       const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
 
@@ -3240,32 +3251,61 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       if (!hasRateRate) { badRequest(res, 'Rate ini belum punya data harga per kamar/tanggal'); return; }
 
       const staahService = new (await import('../services/staah.service')).StaahService();
-      const mapping = await prisma.staah_rate_mappings.findFirst({ where: { rate_id: id, deleted_at: null } });
-      const iface = mapping
-        ? await prisma.staah_interfaces.findUnique({ where: { id: mapping.staah_interface_id } })
-        : null;
+      const iface = await prisma.staah_interfaces.findFirst({ where: { property_id: rate.property_id, deleted_at: null } });
+      if (!iface) {
+        // No Staah interface means nothing to map/push yet. Do not surface a hard
+        // "not enabled" alert for a setup state that is expected until mappings exist.
+        success(res, { skipped: true }, 'Tidak ada Staah interface; sync dilewati');
+        return;
+      }
 
-      if (mapping && iface) {
-        const base = {
+      const mapping = await prisma.staah_rate_mappings.findFirst({ where: { rate_id: id, deleted_at: null } });
+      const isInitialAri = !mapping || !mapping.last_sync_at;
+      let action = isInitialAri ? 'New' : 'Overlay';
+      const pushRateId = mapping?.staah_rate_plan_id || String(rate.code || rate.name).toLowerCase().replace(/\s+/g, '');
+      const mealPlanId = mapping?.meal_plan_id ?? 15;
+      const makePayload = (notifType: string) => ({
+        RatePlans: {
           hotelid: iface.hotel_id,
-          rateplanid: mapping.staah_rate_plan_id,
-          mealplanid: mapping.meal_plan_id,
-          name: rate.name,
-          description: rate.description ?? undefined,
-        };
-        const action = mapping.last_sync_at ? 'Overlay' : 'New';
-        try {
-          await staahService.createUpdateDeleteRatePlan({ ...base, action });
-        } catch (firstErr: any) {
-          const msg = String(firstErr?.message ?? '');
-          if (action === 'New' && msg.includes('already exists')) {
-            await staahService.createUpdateDeleteRatePlan({ ...base, action: 'Overlay' });
-          } else if (action === 'Overlay' && msg.includes('not exists')) {
-            await staahService.createUpdateDeleteRatePlan({ ...base, action: 'New' });
-          } else {
-            throw firstErr;
-          }
+          RatePlan: [{
+            RatePlanNotifType: notifType,
+            rateplanid: pushRateId,
+            MealPlanID: String(mealPlanId),
+            Description: { Name: rate.name, Text: rate.description ?? '' },
+          }],
+        },
+      });
+
+      let pushResponse: any = await staahService.createUpdateDeleteRatePlan(makePayload(action));
+      const StaahServiceRef = (await import('../services/staah.service')).StaahService;
+      if (!StaahServiceRef.isSuccess(pushResponse)) {
+        const msg = StaahServiceRef.extractErrorMsg(pushResponse);
+        const actionErr = `${action} ${msg}`.toLowerCase();
+        if (action === 'New' && actionErr.includes('already exists')) {
+          action = 'Overlay';
+          pushResponse = await staahService.createUpdateDeleteRatePlan(makePayload(action));
+        } else if (action === 'Overlay' && actionErr.includes('not exists')) {
+          action = 'New';
+          pushResponse = await staahService.createUpdateDeleteRatePlan(makePayload(action));
         }
+      }
+
+      if (!StaahServiceRef.isSuccess(pushResponse)) {
+        throw new Error(StaahServiceRef.extractErrorMsg(pushResponse));
+      }
+
+      const data = {
+        staah_rate_plan_id: pushRateId,
+        meal_plan_id: mealPlanId,
+        status: 'active',
+        last_sync_at: new Date(),
+        data: { last_push_response: pushResponse },
+        updated_at: new Date(),
+      } as any;
+      if (mapping) {
+        await prisma.staah_rate_mappings.update({ where: { id: mapping.id }, data });
+      } else {
+        await prisma.staah_rate_mappings.create({ data: { staah_interface_id: iface.id, rate_id: id, ...data, created_at: new Date() } });
       }
 
       // ARI push per calendar-year chunk starting today (skip past dates).

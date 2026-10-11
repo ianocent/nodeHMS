@@ -1,0 +1,207 @@
+{{-- <div class="header">
+    <img src="<%= logoBase64 %>" alt="Hotels Logo" class="logo">
+</div> --}}
+<div class="header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+    <div class="logo-container" style="flex: 1;">
+        <img src="data:image/png;base64,<%= logoBase64 %>" 
+            alt="Logo Company" 
+            class="logo" 
+            style="max-height: 100%; object-fit: contain;">
+    </div>
+<div class="title" style="text-align: right; font-weight: bold;">
+    No. <%= folioNumber %><br>
+    Registration Card
+</div>
+</div>
+
+<table>
+    <tr>
+        <td colspan="3">
+            <div style="display: flex; justify-content: space-between;">
+                <div style="flex: 1;">
+                    <strong>SURNAME (MR / MRS / MISS)</strong><br>
+                    Nama Keluarga<br>
+                    <%= surname %>
+                </div>
+                <div style="flex: 1;">
+                    <strong>FIRST NAME / INITIALS</strong><br>
+                    Nama Depan / Inisial<br>
+                    <%= firstName %>
+                </div>
+            </div>
+        </td>
+        <td colspan="2">
+            <strong>FIRST NAME / INITIALS</strong><br>
+            Nama Depan / Inisial<br>
+            <%= firstName %>
+        </td>
+        <td colspan="2">
+            <strong>ROOM RATE</strong><br>
+            Harga Kamar<br>
+            <%= $print_status == 1 ? $roomRate : "" %>
+        </td>
+        <td >
+            <strong>ROOM TYPE</strong><br>
+            Tipe Kamar<br>
+            <%= roomType %>
+        </td>
+        <td>
+            <strong>ROOM NUMBER</strong><br>
+            Nomor Kamar<br>
+            <%= roomNumber %>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="3" rowspan="4">
+            <strong>ADDRESS/Alamat</strong><br>
+            <%= address %><br>
+            
+        </td>
+        <td colspan="4">
+            <strong>NO OF PERSON</strong><br>
+            Jumlah Orang <br>
+            Adult/Dewasa: <%= adult %><br>
+            Child/Anak-anak: <%= child %> <br>
+            Additional Bed: <%= additionalBed %> 
+        </td>
+        <td colspan="2" >
+            <strong>CHECK IN / Kedatangan</strong><br>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="4" ><strong>DATE OF BIRTH/Tanggal Lahir </strong>
+            <br>
+            <%= dateOfBirth %>
+        </td>
+        <td  ><strong>DATE/Tanggal:</strong>
+        </td>
+        <td>
+            <%= checkInDate %>
+        </td>
+
+    </tr>
+    <tr>
+        <td colspan="4"> <strong>COMPANY/Perusahaan</strong><br>
+            <%= company %></td>
+
+            <td ><strong> TIME/Jam:</strong>
+            </td>
+            <td>
+            </td>
+    </tr>
+    <tr>
+        <td colspan="4" class="black-bg">
+            CHECK IN TIME 14:00 HOURS
+        </td>
+        <td ><strong>VEHICLE NUMBER / No Kendaraan:</strong>
+        </td>
+        <td>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="2" rowspan="2">
+            <strong>EMAIL ADDRESS</strong><br>
+            Alamat Email<br>
+            <%= email %>
+        </td>
+        <td rowspan="2">
+            <strong>TELP NO/HP</strong><br>
+            No Telepon/HP<br>
+            <%= telephone %>
+        </td>
+        <td colspan="6">
+            <strong>CHECK OUT / Keberangkatan</strong><br>
+            DATE/Tanggal: <%= checkOutDate %>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="6">TIME/Jam: </td>
+    </tr>
+    <tr>
+        <td colspan="2" rowspan="2">
+            <strong>CITY/Kota</strong><br>
+            <%= city %>
+        </td>
+        <td rowspan="2">
+            <strong>COUNTRY/Negara</strong><br>
+            <%= country %>
+        </td>
+        <td colspan="6" class="black-bg">
+            CHECK OUT TIME 12:00 HOURS
+        </td>
+    </tr>
+    <tr>
+        <td colspan="6">
+            Purpose of visit / Maksud Kedatangan
+        </td>
+    </tr>
+    <tr>
+        <td colspan="2" >
+            <strong>PASSPORT/ID NO</strong><br>
+            No Passport/Kartu Identitas<br>
+            <%= passportId %>
+        </td>
+        <td>
+            <strong>NATIONALITY</strong><br>
+            Kewarganegaraan<br>
+            <%= nationality %>
+        </td>
+        <td colspan="6" rowspan="2">
+            <table style="border-collapse: collapse;" class="table-no-border">
+                <thead>
+                    <tr>
+                        <th>HOTEL ROOM POLICY</th>
+                        <th>GUEST CHECKLIST</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td  class="content">
+                            <ul style="padding:0px;margin:0px;">
+                                <% rules.forEach(function($2) { %>
+                                    <li>
+                                        <span><%= rule['indo'] %></span>
+                                        <br><%= rule['en'] %>
+                                    </li>
+                                <% }); %>
+                            </ul>
+                        </td>
+                        <td>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="3">
+            <strong>FO CLERK</strong><br>
+            Petugas FO
+            <div style="height: 50px; border-bottom: 1px solid black;">
+            </div>
+        </td>
+    </tr>
+    <tr>
+        <td colspan="3" >
+            <strong>Authorize Signature</strong><br>
+            Tanda Tangan
+            <div style="height: 50px; border-bottom: 1px solid black;">
+            </div>
+            By signing below, I give my consent to Hotel 
+            that my phone number accepts 
+            Regular Media Promotion from <%= hotelName %>
+        </td>
+        
+        <td colspan="6" >
+            <strong>Authorize Signature</strong><br>
+            Tanda Tangan
+            <div style="height: 50px; border-bottom: 1px solid black;">
+            </div>
+            By signing this form, I hereby acknowledge that I have completely read and fully understand <%= hotelName %> Room Policy  
+        </td>
+    </tr>
+</table>
+
+<div class="footer" style="  color: #8B4513;">
+    <%= hotelAddress %>
+</div>

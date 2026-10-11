@@ -93,6 +93,11 @@ export function requestParser(
     }
   }
 
+  // Fix Express parsing ?search=&&search= into an array
+  if (Array.isArray(req.query.search)) {
+    req.query.search = String(req.query.search[0] || '');
+  }
+
   // Response encryption for text/plain responses (matches Laravel EncryptResponseMiddleware)
   const originalJson = res.json.bind(res);
   res.json = function (body: any) {

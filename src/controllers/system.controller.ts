@@ -941,7 +941,12 @@ export class SystemController {
   static async shiftConfirmationList(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 10;
+      // Laravel defaults this to 9999 (ShiftConfirmationController:38), NOT 10.
+      // `merge($TypePayment)->sortBy('sort')` puts every type_payment row first
+      // (sort 0) and the DEFAULT code_post rows — the ones a manual posting lands
+      // in — after them (sort 1), so a 10-row page showed only payment types at
+      // 0,00 and hid the very rows the end-shift has to balance.
+      const limit = parseInt(req.query.limit as string) || 9999;
       const propertyId = req.user?.lastProperty ?? 0n;
       const isOpen = req.query.is_open === '1' || req.query.is_open === 'true';
 
@@ -959,19 +964,15 @@ export class SystemController {
       }
       if (!targetUserId) targetUserId = req.user?.id ?? 0n;
 
-      // Get business date
-      const logAudit = await getPrisma().log_audits.findFirst({
-        where: { deleted_at: null, property_id: Number(propertyId) },
-        orderBy: { date: 'desc' },
-      });
-      let businessDate: Date;
-      if (logAudit) {
-        const [y, m, d] = logAudit.date.toISOString().substring(0, 10).split('-').map(Number);
-        businessDate = new Date(Date.UTC(y, m - 1, d + 1));
-      } else {
-        businessDate = new Date(Date.now() + 7 * 60 * 60 * 1000);
-        businessDate.setUTCHours(0, 0, 0, 0);
-      }
+      // Get business date. `transactions.date` is a `timestamp without time zone`
+      // stamped at UTC midnight (`<businessDate>T00:00:00.000Z`) by every writer,
+      // and node-postgres serialises a JS Date using its UTC wall clock — so the
+      // filter has to be a half-open range built from UTC midnight. A local
+      // midnight bound shifts by the host offset and matches nothing.
+      const bussinesDateStr = await AuthController.getBusinessDate(propertyId);
+      const dayStart = new Date(`${bussinesDateStr}T00:00:00.000Z`);
+      const dayEnd = new Date(dayStart.getTime() + 86400000);
+      const dateRange = { gte: dayStart, lt: dayEnd };
 
       // PHP: Transaction::where('is_posting', 0)->where('created_by', $userID)->where('date', $logAudit)->onlyActive()
       const transactions = await getPrisma().transactions.findMany({
@@ -979,20 +980,22 @@ export class SystemController {
           property_id: propertyId,
           is_posting: 0,
           created_by: targetUserId,
-          date: businessDate,
+          date: dateRange,
           deleted_at: null,
           status: 1,
         },
       });
 
-      // PHP: CodePost::where('type', 'DEFAULT')->onlyActive()
+      // PHP: CodePost::where('type', 'DEFAULT')->onlyActive() — CodePost carries
+      // HasProperties, so the global scope narrows it to last_property. Both
+      // models do; without it the grid listed every property's chart of accounts.
       const codePosts = await getPrisma().code_posts.findMany({
-        where: { type: 'DEFAULT', deleted_at: null, status: 1 },
+        where: { type: 'DEFAULT', deleted_at: null, status: 1, property_id: propertyId },
       });
 
       // PHP: TypePayment::onlyActive()
       const typePayments = await getPrisma().type_payments.findMany({
-        where: { deleted_at: null, status: 1 },
+        where: { deleted_at: null, status: 1, property_id: propertyId },
       });
 
       // PHP: TypePayment->map (:63-78) — balance per type_payment
@@ -1052,8 +1055,19 @@ export class SystemController {
         { label: 'Closing', key: 'closingFormat', type: 'number', is_search: false },
       ];
 
+      // Laravel index (:106-122) also sends `permission` (menu 1027) and
+      // `search_data`. Without `permission.edit` the grid never calls
+      // `setisedit(true)`, so the Closing column stays read-only and there is no
+      // way to record a counted closing at all.
       success(res, paginated, 'Success', 200, {
         table,
+        permission: {
+          view: true,
+          add: false,
+          edit: getPermissionFlags(req.user, 1027).edit === 1,
+          delete: false,
+        },
+        search_data: [],
         pagging: {
           limit_data: limit,
           total_data: totalData,
@@ -1077,7 +1091,103 @@ export class SystemController {
     }
   }
 
-      static async shiftConfirmationSubmit(req: Request, res: Response): Promise<void> {
+  /**
+   * PUT /shift-confirmation/{id} — Laravel ShiftConfirmationController@update (:227-309).
+   *
+   * Row ids are `<codePostId>-code` / `<typePaymentId>-payment`. The operator types
+   * the physical cash counted for that payment method / code post into `closingFormat`
+   * and the row is saved: if the typed closing does not match the ledger sum the
+   * request is rejected with "Balance not match" (plus both numbers so the grid can
+   * show the delta); if it matches, every transaction in the group is flagged
+   * `is_endshift = 1` (`is_end_of_day = 1` when `group=end-of-day`).
+   *
+   * Without this the Closing column was inert: `confirmation()` only auto-posts
+   * groups whose sum is exactly 0, so any real shift with cash counted could never
+   * be closed out.
+   */
+  static async shiftConfirmationUpdate(req: Request, res: Response): Promise<void> {
+    try {
+      const propertyId = req.user?.lastProperty ?? 0n;
+      const authUserId = req.user?.id ?? 0n;
+      const group = String(req.query.group ?? req.body?.group ?? '');
+
+      const idRaw = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      if (!idRaw) { badRequest(res, 'The id field is required.'); return; }
+      const [keyId, kind] = String(idRaw).split('-');
+      if (!/^\d+$/.test(String(keyId ?? '')) || !['code', 'payment'].includes(String(kind))) {
+        badRequest(res, 'The id field is required.');
+        return;
+      }
+
+      const rawClosing = (req.body ?? {}).closingFormat;
+      if (rawClosing === undefined || rawClosing === null || rawClosing === '') {
+        badRequest(res, 'The closingFormat field is required.');
+        return;
+      }
+      const closing = Number(rawClosing);
+      if (!Number.isFinite(closing)) {
+        badRequest(res, 'The closingFormat field must be a number.');
+        return;
+      }
+
+      // Same user resolution as the list / confirmation endpoints.
+      let targetUserId: bigint | null = null;
+      const rawUserId = req.query.user_id as string | undefined;
+      if (rawUserId && rawUserId !== 'null' && rawUserId !== 'undefined') {
+        if (rawUserId.includes('trx')) targetUserId = BigInt(rawUserId.split('-')[1]);
+        else if (/^\d+$/.test(rawUserId)) {
+          const shift = await getPrisma().shifts.findUnique({ where: { id: BigInt(rawUserId) }, select: { user_id: true } });
+          if (shift) targetUserId = shift.user_id;
+        }
+      }
+      if (!targetUserId) targetUserId = authUserId;
+
+      const bussinesDateStr = await AuthController.getBusinessDate(propertyId);
+      const dayStart = new Date(`${bussinesDateStr}T00:00:00.000Z`);
+      const dayEnd = new Date(dayStart.getTime() + 86400000);
+
+      const where: any = {
+        property_id: propertyId,
+        date: { gte: dayStart, lt: dayEnd },
+        deleted_at: null,
+        status: 1,
+      };
+      // `group=end-of-day` is the night-audit pass, which is not per-operator and
+      // not limited to unposted rows (Laravel :246-256).
+      if (group !== 'end-of-day') {
+        where.created_by = targetUserId;
+        where.is_posting = 0;
+      }
+      if (kind === 'payment') where.type_payment_id = BigInt(keyId);
+      else where.code = keyId;
+
+      const transactions = await getPrisma().transactions.findMany({ where });
+      if (transactions.length === 0) { badRequest(res, 'Transaction not found'); return; }
+
+      const sum = transactions.reduce(
+        (s, t: any) => s + (t.type_amount === 'PLUS' ? Number(t.total ?? 0) : -Number(t.total ?? 0)),
+        0
+      );
+      const sumRounded = Math.round(sum * 100) / 100;
+
+      if (Math.abs(sumRounded - closing) > 0.01) {
+        success(res, { sum: sumRounded, closingFormat: closing }, 'Balance not match', 400);
+        return;
+      }
+
+      const flag = group === 'end-of-day' ? { is_end_of_day: 1 } : { is_endshift: 1 };
+      for (const t of transactions as any[]) {
+        await getPrisma().transactions.update({ where: { id: t.id }, data: flag });
+      }
+
+      success(res, null, 'Success', 200);
+    } catch (err: any) {
+      console.error('Shift confirmation update error:', err);
+      error(res, 'Failed to update shift confirmation', 500);
+    }
+  }
+
+  static async shiftConfirmationSubmit(req: Request, res: Response): Promise<void> {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
       const authUserId = req.user?.id ?? 0n;
@@ -1096,8 +1206,12 @@ export class SystemController {
       const isSelf = targetUserId === authUserId;
 
       // Business date — NOT local today (Laravel LogAudit::getBusinessDate :333).
+      // Must match shiftConfirmationList exactly: `transactions.date` is stamped
+      // at UTC midnight and node-postgres serialises a JS Date by its UTC wall
+      // clock, so a local-midnight bound (this host is UTC+7) shifted the window
+      // 7 hours and the end-shift picked up nothing to post.
       const bussinesDateStr = await AuthController.getBusinessDate(propertyId);
-      const day = new Date(`${bussinesDateStr}T00:00:00`);
+      const day = new Date(`${bussinesDateStr}T00:00:00.000Z`);
       const nextDay = new Date(day.getTime() + 86400000);
       const dateRange = { gte: day, lt: nextDay };
 
@@ -1161,17 +1275,23 @@ export class SystemController {
         }
       }
 
-      // Unbalanced → HTTP 200 with status:'error' + details (Laravel :417-430)
+      // Unbalanced → Laravel :417-430 answers HTTP 200 with a top-level
+      // `status: "error"` plus the unbalanced group names. Nesting those under
+      // `data` (the old behaviour) left `response.status === undefined` on the
+      // client, so `status !== "error"` was true and the failed end-shift was
+      // treated as a success — the page moved on instead of holding for a match.
       if (remaining > 0) {
         const details = [...new Set(debug.filter((d) => Math.round(d.sum) !== 0).map((d) => d.name.toUpperCase()))];
-        success(res, { code: '200', status: 'error', details, debug, count: remaining }, undefined as any);
+        success(res, null, 'Unbalanced Types!', 200, { status: 'error', details, debug, count: remaining });
         return;
       }
 
-      // Laravel :432-448 — post ALL remaining open transactions for the user
-      // (no date filter here, mirroring base).
+      // Laravel :444-450 — post ALL remaining open transactions for the user.
+      // Transaction uses the HasProperties trait, so every Eloquent query is
+      // implicitly scoped to `request()->user()->last_property`; dropping
+      // property_id here posted other properties' rows as well.
       const rest = await getPrisma().transactions.findMany({
-        where: { created_by: targetUserId, is_posting: 0, deleted_at: null },
+        where: { property_id: propertyId, created_by: targetUserId, is_posting: 0, deleted_at: null },
         select: { id: true },
       });
       for (const t of rest) await flagPosted(t.id);
@@ -1192,6 +1312,9 @@ export class SystemController {
 
       const propertyRow: any = await getPrisma().properties.findUnique({ where: { id: propertyId } });
 
+      // Laravel :494-501 returns these at the TOP level; the end-shift page reads
+      // `response.is_self` to decide between logging out and swapping the login
+      // blob, so they must not be nested under `data`.
       const payload: any = {
         code: 200,
         name: propertyRow?.name ?? '',
@@ -1257,7 +1380,11 @@ export class SystemController {
         };
       }
 
-      success(res, payload);
+      success(res, payload.data ?? null, 'Success', 200, {
+        name: propertyRow?.name ?? '',
+        image: '',
+        is_self: isSelf,
+      });
     } catch (err: any) {
       console.error('Shift confirmation submit error:', err);
       error(res, err?.message ?? 'Failed to submit shift confirmation', 500);
@@ -1324,35 +1451,122 @@ export class SystemController {
     }
   }
 
+  /**
+   * GET /cms/shift/detail — Laravel ShiftConfirmationController@detail (:152-220).
+   *
+   * This is the END-OF-DAY screen, a different beast from the end-shift screen
+   * (`shiftConfirmationList`): it is NOT per-operator and NOT limited to unposted
+   * rows — it lists every active transaction for the business date so the whole
+   * day can be closed out. The node port used to answer with a plain `shifts`
+   * listing here, so the end-of-day page rendered the wrong table entirely and
+   * had no Closing column to edit.
+   *
+   * `closing` is driven by `is_end_of_day` (not `is_endshift`): a group whose
+   * rows are still unposted shows 0 until the night audit posts it.
+   */
   static async shiftDetail(req: Request, res: Response): Promise<void> {
     try {
       const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 10;
+      const limit = parseInt(req.query.limit as string) || 9999;
       const propertyId = req.user?.lastProperty ?? 0n;
+      const isOpen = req.query.is_open === '1' || req.query.is_open === 'true';
 
-      const where: any = { property_id: propertyId, deleted_at: null };
+      // Same user resolution as the other shift endpoints.
+      let targetUserId: bigint | null = null;
+      const rawUserId = req.query.user_id as string | undefined;
+      if (rawUserId && rawUserId !== 'null' && rawUserId !== 'undefined') {
+        if (rawUserId.includes('trx')) targetUserId = BigInt(rawUserId.split('-')[1]);
+        else if (/^\d+$/.test(rawUserId)) {
+          const shift = await getPrisma().shifts.findUnique({ where: { id: BigInt(rawUserId) }, select: { user_id: true } });
+          if (shift) targetUserId = shift.user_id;
+        }
+      }
 
-      const [data, total] = await Promise.all([
-        getPrisma().shifts.findMany({
-          where,
-          include: {
-            users: { select: { id: true, name: true } },
-          },
-          orderBy: { id: 'desc' },
-          skip: (page - 1) * limit,
-          take: limit,
-        }),
-        getPrisma().shifts.count({ where }),
-      ]);
+      const bussinesDateStr = await AuthController.getBusinessDate(propertyId);
+      const dayStart = new Date(`${bussinesDateStr}T00:00:00.000Z`);
+      const dayEnd = new Date(dayStart.getTime() + 86400000);
 
-      success(res, bigintToNumber(data), 'Success', 200, {
-        pagination: {
+      // Laravel :161-163 — onlyActive() + date, deliberately no is_posting and no
+      // created_by restriction: end-of-day closes the whole property's day.
+      const transactions = await getPrisma().transactions.findMany({
+        where: {
+          property_id: propertyId,
+          date: { gte: dayStart, lt: dayEnd },
+          deleted_at: null,
+          status: 1,
+        },
+      });
+
+      const codePosts = await getPrisma().code_posts.findMany({
+        where: { type: 'DEFAULT', deleted_at: null, status: 1, property_id: propertyId },
+      });
+      const typePayments = await getPrisma().type_payments.findMany({
+        where: { deleted_at: null, status: 1, property_id: propertyId },
+      });
+
+      const sumOf = (rows: any[]) =>
+        rows.reduce((s, t) => s + (t.type_amount === 'PLUS' ? Number(t.total ?? 0) : -Number(t.total ?? 0)), 0);
+
+      const paymentRows = typePayments.map((tp: any) => {
+        const rows = transactions.filter((t: any) => Number(t.type_payment_id) === Number(tp.id));
+        const sum = sumOf(rows);
+        const hasUnposted = rows.some((t: any) => t.is_end_of_day === 0);
+        return {
+          id: `${tp.id}-payment`,
+          description: tp.name,
+          balance: isOpen ? moneyFormat(Math.round(sum * 100) / 100) : '***',
+          closingFormat: moneyFormat(Math.round((hasUnposted ? 0 : sum) * 100) / 100),
+          sort: 0,
+        };
+      });
+
+      const codeRows = codePosts.map((cp: any) => {
+        const rows = transactions.filter((t: any) => String(t.code) === String(cp.id));
+        const sum = sumOf(rows);
+        const hasUnposted = rows.some((t: any) => t.is_end_of_day === 0);
+        return {
+          id: `${cp.id}-code`,
+          description: cp.name,
+          balance: isOpen ? moneyFormat(Math.round(sum * 100) / 100) : '***',
+          closingFormat: moneyFormat(Math.round((hasUnposted ? 0 : sum) * 100) / 100),
+          sort: 1,
+        };
+      });
+
+      const merged = [...codeRows, ...paymentRows].sort((a, b) => a.sort - b.sort);
+      const totalData = merged.length;
+      const paginated = merged.slice((page - 1) * limit, page * limit);
+
+      const table = [
+        { label: 'type', key: 'description', type: 'none', is_search: false },
+        { label: 'Balance', key: 'balance', type: 'no', is_search: false },
+        { label: 'Closing', key: 'closingFormat', type: 'number', is_search: false },
+      ];
+
+      success(res, paginated, 'Success', 200, {
+        table,
+        permission: {
+          view: true,
+          add: false,
+          edit: getPermissionFlags(req.user, 1027).edit === 1,
+          delete: false,
+        },
+        search_data: [],
+        pagging: {
+          limit_data: limit,
+          total_data: totalData,
+          start_paging: 1,
+          end_paging: Math.ceil(totalData / limit),
+          prev_jump: 0,
+          prev: 0,
+          next: 0,
+          next_jump: 0,
           current_page: page,
-          last_page: Math.ceil(total / limit),
+          last_page: Math.ceil(totalData / limit),
           per_page: limit,
-          total,
-          from: (page - 1) * limit + 1,
-          to: Math.min(page * limit, total),
+          total: totalData,
+          from: totalData ? (page - 1) * limit + 1 : 0,
+          to: Math.min(page * limit, totalData),
         },
       });
     } catch (err: any) {
@@ -1398,7 +1612,16 @@ export class SystemController {
         const debug = [...byCode.entries()].map(([id, g]) => ({ id, sum: Math.round(g.sum * 100) / 100, label: g.label }));
         const unbalanced = debug.filter((d) => Math.abs(d.sum) > 0.001);
         if (unbalanced.length > 0) {
-          res.json({ code: 200, status: 'error', details: [...new Set(unbalanced.map((d) => d.label))], debug, count: unbalanced.length });
+          // Laravel :477-483 returns HTTP 200 with a top-level `status: "error"`.
+          // This used to call res.json() directly, which bypasses the envelope
+          // every other endpoint encrypts — the client's GetDecrypt() threw and
+          // the end-of-day submit could never report the unbalanced groups.
+          success(res, null, 'Success', 200, {
+            status: 'error',
+            details: [...new Set(unbalanced.map((d) => d.label))],
+            debug,
+            count: unbalanced.length,
+          });
           return;
         }
         await getPrisma().transactions.updateMany({
@@ -2265,6 +2488,12 @@ export class SystemController {
       const searchValue = req.query.search_value as string;
 
       const where: any = { booking_engine_uuid: { not: null } };
+      // Property scope: booking-engine folios belong to one hotel. Without this
+      // filter every user saw every hotel's online bookings and cancellations.
+      const scopePropertyId = (req as any).user?.lastProperty;
+      if (scopePropertyId !== null && scopePropertyId !== undefined) {
+        where.property_id = scopePropertyId;
+      }
       if (search) {
         where.OR = [
           { first_name: { contains: search, mode: 'insensitive' } },
@@ -3037,7 +3266,10 @@ export class SystemController {
         where: { property_id: propertyId, date: dayRange, is_posting: 0, deleted_at: null },
       });
       if (transactions.length > 0) {
-        res.json({ code: 400, transaction: bigintToNumber(transactions), message: 'Please confirm all transaction first' });
+        // Laravel :359-365 returns the un-posted rows at top level with code 400.
+        // res.json() here bypassed the encrypted envelope, so GetDecrypt() threw
+        // client-side and the "please confirm all transaction" guard never showed.
+        success(res, bigintToNumber(transactions), 'Please confirm all transaction first', 400);
         return;
       }
 
@@ -3106,7 +3338,14 @@ export class SystemController {
 
       const property = await getPrisma().properties.findUnique({
         where: { id: propertyId },
-        select: { id: true, name: true, alias: true, logo: true, image: true, address: true, email: true, telp: true },
+        select: {
+          id: true, name: true, alias: true, logo: true, image: true,
+          address: true, email: true, telp: true,
+          // Drives the Booking Engine launcher: a front-desk user at a hotel that is not
+          // published to the guest portal has nothing to open, so the button is hidden
+          // rather than leading to a portal with no hotels in it.
+          is_booking_engine: true,
+        },
       });
 
       const responsePayload = {
@@ -3120,6 +3359,7 @@ export class SystemController {
           address: property.address,
           email: property.email,
           phone: property.telp ? Number(property.telp) : null,
+          is_booking_engine: !!property.is_booking_engine,
         } : null,
         dateLog,
         start_date: sd,
@@ -4522,7 +4762,7 @@ const rooms = await prisma.rooms.findMany({
       success(res, data, 'Success', 200, {
         table: COMPETITOR_TABLE,
         pagination: laravelPaging(data.length, limit, page),
-        permission: { view: true, add: false, edit: false, delete: false },
+        permission: { view: getPermissionFlags(req.user, 80).view, add: getPermissionFlags(req.user, 80).add, edit: getPermissionFlags(req.user, 80).edit, delete: getPermissionFlags(req.user, 80).delete },
       });
     } catch (err: any) {
       console.error('Hotel competitor dashboard error:', err);

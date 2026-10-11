@@ -3,6 +3,7 @@ import { prisma } from '../config/prisma';
 import { ApprovalMatrixController } from '../controllers/approval-matrix.controller';
 import { AuthController } from '../controllers/auth.controller';
 import { GenericController } from '../controllers/generic.controller';
+import { SystemController } from '../controllers/system.controller';
 import { RoomController } from '../controllers/room.controller';
 import { StaahController } from '../controllers/staah.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -11,7 +12,7 @@ import { moneyFormat } from '../utils/cmsConfig';
 import { TABLES } from '../utils/tableMeta';
 import { STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 import { encrypt } from '../utils/encryption';
-import { error, success } from '../utils/response';
+import { badRequest, error, notFound, success } from '../utils/response';
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -111,6 +112,43 @@ router.get('/message', authMiddleware, (req, res) => {
   req.params.model = 'messages';
   return generic.list(req, res);
 });
+// Laravel MessageController@store parity: frontend sends folio_id via the
+// queryString (and date is server-side), neither of which generic.create handled,
+// so Add Message always 500'd on the missing required prisma fields.
+router.post('/message', authMiddleware, async (req, res) => {
+  try {
+    const body: any = req.body ?? {};
+    const folioIdRaw = body.folio_id ?? req.query.folio_id ?? req.query.data;
+    if (!folioIdRaw) { badRequest(res, 'The folio id field is required.'); return; }
+    if (!body.message) { badRequest(res, 'The message field is required.'); return; }
+    if (!body.from_name) { badRequest(res, 'The from name field is required.'); return; }
+    const isOpenRaw = body.is_open?.value ?? body.is_open;
+    const isOpen = isOpenRaw === true || isOpenRaw === 1 || isOpenRaw === '1' || isOpenRaw === 'true';
+    const data: any = {
+      property_id: BigInt(req.user?.lastProperty ?? body.property_id),
+      folio_id: BigInt(String(folioIdRaw)),
+      message: String(body.message),
+      from_name: String(body.from_name),
+      is_open: isOpen,
+      date: new Date(),
+      status: body.status !== undefined ? Number(body.status?.value ?? body.status) : 1,
+      created_at: new Date(),
+      updated_at: new Date(),
+      created_by: req.user?.id ? BigInt(req.user.id) : null,
+    };
+    if (!isOpen && req.user?.id) data.closed_by = BigInt(req.user.id);
+    const record = await prisma.messages.create({ data });
+    success(res, bigintToNumber(record), 'Success', 200);
+  } catch (err: any) {
+    console.error('Message create error:', err);
+    error(res, 'Failed to create', 500);
+  }
+});
+router.get('/message/create', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.createForm(req, res); });
+router.get('/message/:id/update', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.editForm(req, res); });
+router.get('/message/:id/edit', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.editForm(req, res); });
+router.put('/message/:id', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.update(req, res); });
+router.delete('/message/:id', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.destroy(req, res); });
 
 // Rate Package (Laravel Route::resource('package', PackageController); the rate
 // form renders it as a TableView picker with uriSave="/cms/rate/package").
@@ -171,25 +209,25 @@ router.post('/allotments/:id/restore', authMiddleware, requirePermission(80, 'ed
 //  Overbooking 
 // Dedicated matrix handler — the reference returns a date x room-type grid, not
 // a flat row list, so generic.list produced the wrong shape on screen.
-router.get('/overbooking', authMiddleware, requirePermission(80, 'view'), (req, res) => { generic.overbookingList(req, res); });
-router.get('/overbooking/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
-router.post('/overbooking', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
-router.get('/overbooking/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.show(req, res); });
-router.get('/overbooking/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
-router.get('/overbooking/:id/edit', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
-router.put('/overbooking/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.update(req, res); });
-router.delete('/overbooking/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
-router.post('/overbooking/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
+router.get('/overbooking', authMiddleware, requirePermission(91, 'view'), (req, res) => { generic.overbookingList(req, res); });
+router.get('/overbooking/create', authMiddleware, requirePermission(91, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
+router.post('/overbooking', authMiddleware, requirePermission(91, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
+router.get('/overbooking/:id', authMiddleware, requirePermission(91, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.show(req, res); });
+router.get('/overbooking/:id/update', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
+router.get('/overbooking/:id/edit', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
+router.put('/overbooking/:id', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.update(req, res); });
+router.delete('/overbooking/:id', authMiddleware, requirePermission(91, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
+router.post('/overbooking/:id/restore', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
 
-router.get('/overbookings', authMiddleware, requirePermission(80, 'view'), (req, res) => { generic.overbookingList(req, res); });
-router.get('/overbookings/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
-router.post('/overbookings', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
-router.get('/overbookings/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.show(req, res); });
-router.get('/overbookings/:id/update', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
-router.get('/overbookings/:id/edit', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
-router.put('/overbookings/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.update(req, res); });
-router.delete('/overbookings/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
-router.post('/overbookings/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
+router.get('/overbookings', authMiddleware, requirePermission(91, 'view'), (req, res) => { generic.overbookingList(req, res); });
+router.get('/overbookings/create', authMiddleware, requirePermission(91, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.createForm(req, res); });
+router.post('/overbookings', authMiddleware, requirePermission(91, 'add'), (req, res) => { req.params.model = 'overbooking'; generic.create(req, res); });
+router.get('/overbookings/:id', authMiddleware, requirePermission(91, 'view'), (req, res) => { req.params.model = 'overbooking'; generic.show(req, res); });
+router.get('/overbookings/:id/update', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
+router.get('/overbookings/:id/edit', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.editForm(req, res); });
+router.put('/overbookings/:id', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.update(req, res); });
+router.delete('/overbookings/:id', authMiddleware, requirePermission(91, 'delete'), (req, res) => { req.params.model = 'overbooking'; generic.destroy(req, res); });
+router.post('/overbookings/:id/restore', authMiddleware, requirePermission(91, 'edit'), (req, res) => { req.params.model = 'overbooking'; generic.restore(req, res); });
 
 //  Yield 
 router.get('/yield', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'yield'; generic.list(req, res); });
@@ -218,40 +256,85 @@ router.delete('/yields/:id', authMiddleware, requirePermission(80, 'delete'), (r
 router.post('/yields/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'yield'; generic.restore(req, res); });
 
 //  Hotel Competitor 
-router.get('/hotel-competitor', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.list(req, res); });
+router.get('/hotel-competitor', authMiddleware, requirePermission(1035, 'view'), SystemController.hotelCompetitorDashboard);
 // The generic CRUD blocks below were missing GET /create, so TableView's Add
 // button hit a dead route and the form never opened.
-router.get('/hotel-competitor/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.createForm(req, res); });
-router.post('/hotel-competitor', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.create(req, res); });
-router.get('/hotel-competitor/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.show(req, res); });
-router.put('/hotel-competitor/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.update(req, res); });
-router.delete('/hotel-competitor/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'hotel_competitor'; generic.destroy(req, res); });
-router.post('/hotel-competitor/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.restore(req, res); });
+router.get('/hotel-competitor/create', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.createForm(req, res); });
+router.post('/hotel-competitor', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.create(req, res); });
+router.get('/hotel-competitor/:id', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.show(req, res); });
+  // Laravel HotelCompetitorController@update parity: the grid row id is the
+  // master_hotel_competitor id, and the handler upserts hotel_competitors by
+  // (master_hotel_competitor_id, date). generic.update treated it as
+  // hotel_competitors.id, so competitor data never saved.
+  async function hotelCompetitorUpsert(req: any, res: any) {
+    try {
+      const masterId = String(req.params.id);
+      if (!/^\d+$/.test(masterId)) { badRequest(res, 'Invalid competitor id'); return; }
+      const master = await prisma.master_hotel_competitors.findUnique({ where: { id: BigInt(masterId) } });
+      if (!master) { notFound(res, 'Not Found'); return; }
+      const dateStr = (req.body?.date as string) || (await AuthController.getBusinessDate(req.user?.lastProperty ?? null));
+      const s = new Date(String(dateStr).slice(0, 10) + 'T00:00:00Z');
+      const e = new Date(s.getTime() + 86400000);
+      const propertyId = req.user?.lastProperty;
+      const existing = await prisma.hotel_competitors.findFirst({
+        where: { master_hotel_competitor_id: BigInt(masterId), date: { gte: s, lt: e }, deleted_at: null },
+      });
+      const data: any = {
+        room_available: req.body?.room_available !== undefined ? Number(req.body.room_available) : 0,
+        room_sold: req.body?.room_sold !== undefined ? Number(req.body.room_sold) : 0,
+        arr: req.body?.arr !== undefined ? Number(req.body.arr) : 0,
+        total_revenue: req.body?.total_revenue !== undefined ? Number(req.body.total_revenue) : 0,
+        updated_at: new Date(),
+      };
+      if (existing) {
+        await prisma.hotel_competitors.update({ where: { id: existing.id }, data });
+      } else {
+        await prisma.hotel_competitors.create({
+          data: {
+            master_hotel_competitor_id: BigInt(masterId),
+            property_id: BigInt(propertyId),
+            date: s,
+            status: 1,
+            created_at: new Date(),
+            created_by: req.user?.id ? BigInt(req.user.id) : null,
+            ...data,
+          },
+        });
+      }
+      success(res, [], 'Success', 200);
+    } catch (err: any) {
+      console.error('Hotel competitor update error:', err);
+      error(res, 'Failed to update', 500);
+    }
+  }
+  router.put('/hotel-competitor/:id', authMiddleware, requirePermission(1035, 'edit'), hotelCompetitorUpsert);
+router.delete('/hotel-competitor/:id', authMiddleware, requirePermission(1035, 'delete'), (req, res) => { req.params.model = 'hotel_competitor'; generic.destroy(req, res); });
+router.post('/hotel-competitor/:id/restore', authMiddleware, requirePermission(1035, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.restore(req, res); });
 
-router.get('/hotel-competitors', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.list(req, res); });
-router.get('/hotel-competitors/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.createForm(req, res); });
-router.post('/hotel-competitors', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.create(req, res); });
-router.get('/hotel-competitors/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.show(req, res); });
-router.put('/hotel-competitors/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.update(req, res); });
-router.delete('/hotel-competitors/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'hotel_competitor'; generic.destroy(req, res); });
-router.post('/hotel-competitors/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.restore(req, res); });
+router.get('/hotel-competitors', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.list(req, res); });
+router.get('/hotel-competitors/create', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.createForm(req, res); });
+router.post('/hotel-competitors', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'hotel_competitor'; generic.create(req, res); });
+router.get('/hotel-competitors/:id', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'hotel_competitor'; generic.show(req, res); });
+  router.put('/hotel-competitors/:id', authMiddleware, requirePermission(1035, 'edit'), hotelCompetitorUpsert);
+router.delete('/hotel-competitors/:id', authMiddleware, requirePermission(1035, 'delete'), (req, res) => { req.params.model = 'hotel_competitor'; generic.destroy(req, res); });
+router.post('/hotel-competitors/:id/restore', authMiddleware, requirePermission(1035, 'edit'), (req, res) => { req.params.model = 'hotel_competitor'; generic.restore(req, res); });
 
 //  Master Hotel Competitor 
-router.get('/master-hotel-competitor', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.list(req, res); });
-router.get('/master-hotel-competitor/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.createForm(req, res); });
-router.post('/master-hotel-competitor', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.create(req, res); });
-router.get('/master-hotel-competitor/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.show(req, res); });
-router.put('/master-hotel-competitor/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.update(req, res); });
-router.delete('/master-hotel-competitor/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.destroy(req, res); });
-router.post('/master-hotel-competitor/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.restore(req, res); });
+router.get('/master-hotel-competitor', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.list(req, res); });
+router.get('/master-hotel-competitor/create', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.createForm(req, res); });
+router.post('/master-hotel-competitor', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.create(req, res); });
+router.get('/master-hotel-competitor/:id', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.show(req, res); });
+router.put('/master-hotel-competitor/:id', authMiddleware, requirePermission(1035, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.update(req, res); });
+router.delete('/master-hotel-competitor/:id', authMiddleware, requirePermission(1035, 'delete'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.destroy(req, res); });
+router.post('/master-hotel-competitor/:id/restore', authMiddleware, requirePermission(1035, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.restore(req, res); });
 
-router.get('/master-hotel-competitors', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.list(req, res); });
-router.get('/master-hotel-competitors/create', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.createForm(req, res); });
-router.post('/master-hotel-competitors', authMiddleware, requirePermission(80, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.create(req, res); });
-router.get('/master-hotel-competitors/:id', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.show(req, res); });
-router.put('/master-hotel-competitors/:id', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.update(req, res); });
-router.delete('/master-hotel-competitors/:id', authMiddleware, requirePermission(80, 'delete'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.destroy(req, res); });
-router.post('/master-hotel-competitors/:id/restore', authMiddleware, requirePermission(80, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.restore(req, res); });
+router.get('/master-hotel-competitors', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.list(req, res); });
+router.get('/master-hotel-competitors/create', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.createForm(req, res); });
+router.post('/master-hotel-competitors', authMiddleware, requirePermission(1035, 'add'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.create(req, res); });
+router.get('/master-hotel-competitors/:id', authMiddleware, requirePermission(1035, 'view'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.show(req, res); });
+router.put('/master-hotel-competitors/:id', authMiddleware, requirePermission(1035, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.update(req, res); });
+router.delete('/master-hotel-competitors/:id', authMiddleware, requirePermission(1035, 'delete'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.destroy(req, res); });
+router.post('/master-hotel-competitors/:id/restore', authMiddleware, requirePermission(1035, 'edit'), (req, res) => { req.params.model = 'master_hotel_competitor'; generic.restore(req, res); });
 
 //  Statistic Occupancy 
 // Laravel parity: StatisticController@occupancy - grid Room Type x dates (start..end, default end=start+7),

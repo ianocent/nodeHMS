@@ -47,10 +47,38 @@ export function requirePermission(menuId: bigint | number, action: PermissionAct
 }
 
 /**
+ * Permission gate that accepts the action on ANY of the given menus.
+ *
+ * Laravel registers the rate/bar relation + rate grid store routes with no CRUD guard
+ * at all (routes/cms.php only wraps them in auth:sanctum), and their buttons are gated
+ * client-side by the PARENT module menu (`useFormPermission(86)` for the Rate Setup
+ * sub-tabs, `useFormPermission(87)` for BAR Setup). Guarding them with a single
+ * `requirePermission(<submenu>, 'add')` therefore 403'd saves for roles that hold
+ * `edit` on the module — "Apply Rate tidak tersimpan" / "Add Promotion Error".
+ */
+export function requirePermissionAny(action: PermissionAction, menuIds: Array<bigint | number>) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const user = req.user;
+    if (!user) { forbidden(res, 'Not authenticated'); return; }
+    if (user.superUser) { next(); return; }
+    if (!PERMISSION_CODES[action]) { forbidden(res, `Unknown permission '${action}'`); return; }
+    const crudKey = action as keyof RoleMenuCrud;
+    const granted = menuIds.some((menuId) => {
+      const crud = user.permissions.get(BigInt(menuId));
+      return !!crud && !!crud[crudKey];
+    });
+    if (!granted) {
+      forbidden(res, `Missing '${action}' permission for menu ${menuIds.join(' or ')}`);
+      return;
+    }
+    next();
+  };
+}
+
+/**
  * Check transaction-level permission within a menu.
  * Replicates HasPermissions::hasTransactionPermission().
- */
-export function requireTransactionPermission(
+ */export function requireTransactionPermission(
   menuId: bigint | number,
   transactionAction: string
 ) {

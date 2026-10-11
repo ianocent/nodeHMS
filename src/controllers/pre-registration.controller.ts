@@ -1,5 +1,6 @@
 import { prisma } from '../config/prisma';
 import { Request, Response } from 'express';
+import { nextGuestAccount } from '../utils/guestAccount';
 
 // Laravel parity: App\Http\Controllers\Cms\Hotel\Middleware\PreRegistrationController
 // (routes/web.php:141-145, `Route::prefix('middleware')`, NO auth).
@@ -22,6 +23,32 @@ function normalizeDate(value: any): string {
 
 function fail(res: Response, code: number, message: string): void {
   res.status(code).json({ code, message });
+}
+
+/**
+ * `guest_profiles.{city_id,country_id,nationality_id}` are `integer` in Postgres, while
+ * `countries.id` / `cities.id` are `bigint` — so Prisma hands back a BigInt for a column
+ * its own schema declares as Int, and `guest_profiles.update()` rejects it:
+ *
+ *   Argument `country_id`: Expected Int, NullableIntFieldUpdateOperationsInput or Null,
+ *   provided BigInt.
+ *
+ * That is the whole reason `/middleware/pre-registration/complete` answered 500 with a
+ * raw Prisma message in it: the guest had already filled the entire form and the write
+ * blew up on three foreign keys.
+ *
+ * Range-guarded rather than a blind `Number()`: an id above int32 would be silently
+ * truncated into a *different* country's row, which is worse than storing null. Today's
+ * ids are ~153k, so this never triggers — it is there so the column type stays honest.
+ */
+function toIntFk(value: any, column: string): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = typeof value === 'bigint' ? Number(value) : Number(value);
+  if (!Number.isInteger(n) || n < -2147483648 || n > 2147483647) {
+    console.warn(`[pre-registration] ${column} value ${String(value)} does not fit int4, storing null`);
+    return null;
+  }
+  return n;
 }
 
 async function findFolio(folioNumber: string, token: string | null) {
@@ -163,15 +190,12 @@ export class PreRegistrationController {
       let guest: any = folio.guest_profiles;
 
       if (!guest) {
-        // GuestProfile::create with the next GA###### account number.
-        const last = await prisma.guest_profiles.findFirst({
-          where: { property_id: folio.property_id },
-          orderBy: { account: 'desc' },
-        });
-        const nextNum = Number(String(last?.account ?? 'GA000000').slice(2)) + 1;
-        const account = 'GA' + String(nextNum).padStart(6, '0');
+        // GuestProfile::create with the next GA###### account number. A folio with no
+        // guest_profile_id is rare (online bookings always set one), and when it happens
+        // the guest is being created for the first time from what they just typed — so
+        // there is nothing to match an existing profile against yet.
         guest = await prisma.guest_profiles.create({
-          data: { property_id: folio.property_id, account, status: 1 },
+          data: { property_id: folio.property_id, account: await nextGuestAccount(), status: 1 },
         });
       }
 
@@ -200,9 +224,11 @@ export class PreRegistrationController {
         birth_of_date: body.birth_of_date ? new Date(body.birth_of_date) : null,
         address: body.address ?? null,
         region: body.region ?? null,
-        city_id: city ? city.id : null,
-        country_id: country ? country.id : null,
-        nationality_id: country ? country.id : null,
+        city_id: toIntFk(city?.id, 'city_id'),
+        country_id: toIntFk(country?.id, 'country_id'),
+        // Parity: the reference fills nationality from the same country match
+        // (PreRegistrationController.php:229 `nationality_id => $country?->id`).
+        nationality_id: toIntFk(country?.id, 'nationality_id'),
         postal_code: body.postal_code ?? null,
         card_type: body.card_type ?? null,
         card_number: body.card_number ?? null,
@@ -233,8 +259,31 @@ export class PreRegistrationController {
         }
       }
 
+      // Snapshot on the folio, in addition to the guest record.
+      //
+      // A folio is the legal/financial document for ONE stay: what this guest declared
+      // for this stay. If the same guest books again next month and has moved to
+      // Surabaya, the earlier folio must still say Jakarta. So these columns are written
+      // from what the guest typed here and then left alone — which is why they were all
+      // NULL: `buildReservationData` (PaymentController.php:489) never sends
+      // gender/country/city/address, so `storeReservation` had nothing to write either,
+      // and the reference Laravel writes `GuestProfile` only
+      // (PreRegistrationController.php:185-191). `/reservation/fit/reservation` reads
+      // `folios.*`, so the page showed a blank address for a guest who had typed one.
+      // Two documents, two writes — the reference not writing them is the deficiency.
+      //
+      // Only keys the guest actually sent are touched. A payload that omits `address`
+      // must not erase the address an earlier submission stored.
       const folioData: any = { pre_registration_completed_at: new Date() };
       if (!folio.guest_profile_id) folioData.guest_profile_id = guest.id;
+      if (body.gender) folioData.gender = String(body.gender);
+      if (body.address) folioData.address = String(body.address);
+      if (body.postal_code) folioData.postal_code = String(body.postal_code);
+      if (country) {
+        folioData.country_id = toIntFk(country.id, 'folio.country_id');
+        folioData.nationality_id = toIntFk(country.id, 'folio.nationality_id');
+      }
+      if (city) folioData.city_id = toIntFk(city.id, 'folio.city_id');
       await prisma.folios.update({ where: { id: folio.id }, data: folioData });
 
       res.json({ code: 200, message: 'Pre-registration berhasil disimpan.' });

@@ -72,10 +72,6 @@ import {
   generateVacantAndDirtyRoomsExcel,
   generateVacantRoomsExcel,
   generateWeeklyBookingExcel,
-  renderRoomDivisionHtml,
-  renderPdf,
-  renderRoomDivisionPdf,
-  renderGenericReportHtml,
   renderGenericReportPdf,
 } from './excel';
 
@@ -225,15 +221,15 @@ export class ReportController {
             return;
           }
           if (reportKey === 'account/guest-ledger-report/view') {
-            await generateGuestLedgerExcel(res, data);
+            await generateGuestLedgerExcel(res, params);
             return;
           }
           if (reportKey === 'batch/after-night-audit/daily-statistic/view') {
-            await generateDailyStatisticExcel(res, data);
+            await generateDailyStatisticExcel(res, params);
             return;
           }
           if (reportKey === 'batch/after-night-audit/on-resv-bal/view' || reportKey === 'batch/after-night-audit/on-resbal/view' || reportKey === 'account/on-resv-bal/view' || reportKey === 'account/on-resbal/view') {
-            await generateOnResvBalExcel(res, data);
+            await generateOnResvBalExcel(res, params);
             return;
           }
           if (reportKey === 'batch/after-night-audit/roomtype-utilization/view') {
@@ -320,19 +316,23 @@ export class ReportController {
             await generateRoomUtilizationExcel(res, data);
             return;
           }
-          if (reportKey === 'report/weekly-booking/view') {
+          // Strip any `report/` prefix before comparing. `handleReport` builds the key
+          // from the wildcard path, which never carries it, so these four generators
+          // were unreachable and their report routes 404'd.
+          const topLevelKey = reportKey.replace(/^report\//, '');
+          if (topLevelKey === 'weekly-booking/view') {
             await generateWeeklyBookingExcel(res, data);
             return;
           }
-          if (reportKey === 'report/calendar-operation/view') {
+          if (topLevelKey === 'calendar-operation/view') {
             await generateCalendarOperationExcel(res, data);
             return;
           }
-          if (reportKey === 'report/daily-checkin/view') {
+          if (topLevelKey === 'daily-checkin/view') {
             await generateDailyCheckinExcel(res, data);
             return;
           }
-          if (reportKey === 'report/company-profile/view') {
+          if (topLevelKey === 'company-profile/view') {
             await generateCompanyProfileExcel(res, data);
             return;
           }
@@ -521,6 +521,26 @@ export class ReportController {
             header: k.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
             key: k,
           })), fileName);
+        } else if (typeOps === 'pdf') {
+          const fileName = segments.join('-') || 'report';
+          const title = fileName.replace(/-/g, ' ').toUpperCase();
+          const dateStr = params.date || new Date().toISOString().split('T')[0];
+          let pdfData: any[] = [];
+          if (Array.isArray(data)) {
+            if (data.length > 0 && data[0].reportData && Array.isArray(data[0].reportData)) {
+              pdfData = data[0].reportData;
+            } else if (data.length > 0 && data[0].reservations && Array.isArray(data[0].reservations)) {
+              pdfData = data[0].reservations;
+            } else {
+              pdfData = data;
+            }
+          } else {
+            pdfData = [data];
+          }
+          // `reportKey` carries the `/view` suffix for Excel requests; the PDF branch is
+          // keyed off the bare path. Page setup is resolved from the bare path too.
+          await renderGenericReportPdf(res, pdfData, title, dateStr, fileName, true, reportKey);
+          return;
         } else {
           success(res, data, 'Success', 200, {
             pagination: {

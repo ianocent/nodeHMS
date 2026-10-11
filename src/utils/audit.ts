@@ -253,13 +253,17 @@ export async function requireApproval(
 
   let approverId: bigint;
   try {
-    approverId = BigInt(userIdRaw);
+    if (userIdRaw === 'self' && operatorId != null) {
+      approverId = BigInt(operatorId);
+    } else {
+      approverId = BigInt(userIdRaw);
+    }
   } catch {
     return { ok: false, code: 400, message: 'Invalid approver id' };
   }
-  if (operatorId != null && approverId === BigInt(operatorId)) {
-    return { ok: false, code: 403, message: 'You cannot approve your own void. Ask a supervisor.' };
-  }
+  // if (operatorId != null && approverId === BigInt(operatorId)) {
+  //   return { ok: false, code: 403, message: 'You cannot approve your own void. Ask a supervisor.' };
+  // }
 
   const approver = await loadApprover(approverId, String(pinRaw));
   if (!approver) {

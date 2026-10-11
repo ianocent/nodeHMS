@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import ExcelJS from 'exceljs';
 import { success, error, badRequest, notFound } from '../../utils/response';
+import { getReportPdfSetup } from './pageSetup';
 import {
   // @ts-ignore
   prisma, bigintToNumber, isNumeric, formatDate, formatDateDMY, formatDateDMYShort, formatDateMYShort,
@@ -1474,45 +1475,7 @@ export async function generateCashDetailedExcel(res: Response, data: any, filena
 
 // ── Cash Summary ──
 // Laravel parity: CashSummaryController + cash-summary.blade.php ("Payment Type Summary Report")
-
-export async function getCashSummary(params: any): Promise<any> {
-  const pid = params.propertyId;
-  const date = params.date || params.startDate || formatDate(new Date());
-
-  const rows = await prisma.transactions.groupBy({
-    where: {
-      property_id: pid,
-      deleted_at: null,
-      date: { gte: new Date(`${date}T00:00:00Z`), lte: new Date(`${date}T23:59:59Z`) },
-    },
-    by: ['type_payment_id'],
-    _sum: { total: true },
-  });
-  const ids: bigint[] = rows.map((r: any) => r.type_payment_id).filter(Boolean);
-  const tps = ids.length
-    ? await prisma.type_payments.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })
-    : [];
-  const nameById = new Map(tps.map((t: any) => [t.id, t.name]));
-
-  const cashSummaryData = rows.map((r: any) => {
-    const name = nameById.get(r.type_payment_id) || 'Unknown Payment Type';
-    return {
-      group: String(name).toUpperCase(),
-      transactions: [{ description: name, charge: Number(r._sum?.total ?? 0) }],
-      totalGroup: Number(r._sum?.total ?? 0),
-    };
-  });
-  const grandTotal = cashSummaryData.reduce((s: number, g: any) => s + g.totalGroup, 0);
-
-  return {
-    reportTitle: 'Payment Type Summary Report',
-    startDate: date,
-    endDate: date,
-    business_date: date,
-    cashSummaryData,
-    grandTotal,
-  };
-}
+// Data comes from `getCashSummary` in handlers.ts; only the Excel writer lives here.
 
 export async function generateCashSummaryExcel(res: Response, data: any): Promise<void> {
   const workbook = new ExcelJS.Workbook();
@@ -1712,8 +1675,8 @@ ${rows}
 }
 
 export async function renderPdf(
-  html: string,
-  opts: { header?: string; footer?: string; landscape?: boolean } = {}
+    html: string,
+    opts: { header?: string; footer?: string; landscape?: boolean; margin?: { top: string; bottom: string; left: string; right: string } } = {}
 ): Promise<Buffer> {
   let puppeteer: any;
   try {
@@ -1744,7 +1707,10 @@ export async function renderPdf(
       printBackground: true,
       landscape: opts.landscape !== false,
       displayHeaderFooter: true,
-      margin: { top: '45mm', bottom: '35mm', left: '10mm', right: '10mm' },
+      // Per-report margins come from the Laravel `setOptions()` calls (see `pageSetup.ts`).
+      // The old fixed 45mm/35mm reserved room for a header/footer that most reports never
+      // used, which pushed the first table rows off the top of the page.
+      margin: opts.margin ?? { top: '20mm', bottom: '20mm', left: '10mm', right: '10mm' },
       headerTemplate: opts.header || '<div></div>',
       footerTemplate: opts.footer || '<div></div>',
     });
@@ -1761,10 +1727,12 @@ export async function renderRoomDivisionPdf(res: Response, reportData: any[], pa
   const now = new Date();
   const nowStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
 
-  const header = `<div style="font-family: Arial, sans-serif; font-size: 10px; width: 100%; text-align: center; padding: 0 10mm;"><div style="font-size: 14px; font-weight: bold;">Room Division Report</div><div style="font-size: 12px;">For Business Date: ${startDate}</div></div>`;
-  const footer = `<div style="font-family: Arial, sans-serif; font-size: 9px; width: 100%; padding: 0 10mm;"><strong>Account/Transaction Report</strong><br><strong>Printed On:</strong> ${nowStr}</div>`;
+    const header = `<div style="font-family: Arial, sans-serif; font-size: 10px; width: 100%; text-align: center; padding: 0 10mm;"><div style="font-size: 14px; font-weight: bold;">Room Division Report</div><div style="font-size: 12px;">For Business Date: ${startDate}</div></div>`;
+    // RoomDivisionController reuses the shared account partial, so the
+    // "Account/Transaction Report" label is correct here.
+    const footer = `<div style="font-family: Arial, sans-serif; font-size: 9px; width: 100%; padding: 0 10mm;"><strong>Account/Transaction Report</strong><br><strong>Printed On:</strong> ${nowStr}</div>`;
 
-  const pdf = await renderPdf(renderRoomDivisionHtml(reportData, dateDMY, startDate, endDate), { header, footer, landscape: true });
+    const pdf = await renderPdf(renderRoomDivisionHtml(reportData, dateDMY, startDate, endDate), { header, footer, landscape: true });
 
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="room-division${startDate}.pdf"`);
@@ -1786,12 +1754,42 @@ export function renderGenericReportHtml(data: any[], title: string, dateStr: str
 <body><h2>${title}</h2><p>Date: ${dateStr}</p><table><thead><tr>${headerRow}</tr></thead><tbody>${rows}</tbody></table><p style="margin-top:20px;text-align:right;font-size:8px;">Printed: ${nowStr}</p></body></html>`;
 }
 
-export async function renderGenericReportPdf(res: Response, data: any[], title: string, dateStr: string, fileName: string, landscape = false): Promise<void> {
-  const now = new Date();
-  const nowStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-  const header = `<div style="font-family:Arial,sans-serif;font-size:10px;width:100%;text-align:center;padding:0 10mm;"><div style="font-size:14px;font-weight:bold;">${title}</div><div style="font-size:12px;">Date: ${dateStr}</div></div>`;
-  const footer = `<div style="font-family:Arial,sans-serif;font-size:9px;width:100%;padding:0 10mm;"><strong>Account/Transaction Report</strong><br><strong>Printed On:</strong> ${nowStr}</div>`;
-  const pdf = await renderPdf(renderGenericReportHtml(data, title, dateStr), { header, footer, landscape });
+export async function renderGenericReportPdf(
+    res: Response,
+    data: any[],
+    title: string,
+    dateStr: string,
+    fileName: string,
+    landscape = false,
+    reportKey = ''
+): Promise<void> {
+    const now = new Date();
+    const nowStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    const header = `<div style="font-family:Arial,sans-serif;font-size:10px;width:100%;text-align:center;padding:0 10mm;"><div style="font-size:14px;font-weight:bold;">${title}</div><div style="font-size:12px;">Date: ${dateStr}</div></div>`;
+    // Page setup and footer label come from the base reference controllers — see
+    // `pageSetup.ts`. The footer used to read "Account/Transaction Report" on every
+    // report: that string lives in `pdf/batch/account/partials/footer.blade.php` and the
+    // Laravel controllers reuse that one partial across Account (13), AfterNightAudit (12)
+    // and BeforeNightAudit (8), but FrontOffice only in 2 of 12 and Housekeeping /
+    // SalesMarketing in none — those get a label derived from the report key instead.
+    const setup = getReportPdfSetup(reportKey);
+    const footerLabel = setup.accountFooter
+        ? 'Account/Transaction Report'
+        : reportKey
+            ? reportKey.split('/').filter(Boolean).pop()!.replace(/-/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())
+            : 'Report';
+    const footer = `<div style="font-family:Arial,sans-serif;font-size:9px;width:100%;padding:0 10mm;"><strong>${footerLabel}</strong><br><strong>Printed On:</strong> ${nowStr}</div>`;
+    const pdf = await renderPdf(renderGenericReportHtml(data, title, dateStr), {
+        header,
+        footer,
+        landscape: setup.orientation === 'landscape',
+        margin: {
+            top: `${setup.margin.top}mm`,
+            bottom: `${setup.margin.bottom}mm`,
+            left: `${setup.margin.left}mm`,
+            right: `${setup.margin.right}mm`,
+        },
+    });
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}.pdf"`);
   res.send(pdf);
@@ -3484,35 +3482,247 @@ export async function generateTransactionReportExcel(res: Response, data: any): 
 }
 
 // ── Guest Ledger Report Excel ──
-export async function generateGuestLedgerExcel(res: Response, data: any): Promise<void> {
-  const rows = Array.isArray(data) ? data : [data];
+export async function generateGuestLedgerExcel(res: Response, params: any): Promise<void> {
+  const propertyId = params.propertyId;
+  const businessDate = (new Date()).toISOString().split('T')[0];
+  const startDateStr = params.start_date || params.startDate || businessDate;
+  const endDateStr = params.end_date || params.endDate || businessDate;
+  
+  const startDate = `${startDateStr} 00:00:00`;
+  const endDate = `${endDateStr} 23:59:59`;
+
+  const detailSql = `
+    SELECT *
+    FROM (
+        SELECT
+            CONCAT(f.first_name, ' ', COALESCE(f.last_name,'')) AS name,
+            COALESCE((SELECT r.room_name FROM reservations r 
+            WHERE r.folio_id = f.id ORDER BY r.id DESC LIMIT 1), '-') AS room_name,
+            f.folio_number,
+            f.check_in_date AS arrival,
+            f.check_out_date AS departure,
+            'Opening Balance' AS description,
+            SUM(CASE WHEN t.date < $1::timestamp 
+                THEN CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END 
+                ELSE 0 END) AS prev_balance,
+            0 AS debit,
+            0 AS credit,
+            0 AS sort_order
+        FROM transactions t
+        JOIN folios f ON t.folio_id = f.id
+        WHERE t.property_id = $2
+        GROUP BY f.id, f.first_name, f.last_name, f.folio_number, f.check_in_date, f.check_out_date
+
+        UNION ALL
+
+        SELECT
+            CONCAT(f.first_name, ' ', COALESCE(f.last_name,'')) AS name,
+            COALESCE((SELECT r.room_name FROM reservations r 
+            WHERE r.folio_id = f.id ORDER BY r.id DESC LIMIT 1), '-') AS room_name,
+            f.folio_number,
+            f.check_in_date AS arrival,
+            f.check_out_date AS departure,
+            t.code_name AS description,
+            0 AS prev_balance,
+
+            CASE WHEN SUM(CASE WHEN t.date BETWEEN $3::timestamp AND $4::timestamp 
+            THEN CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END 
+            ELSE 0 END) > 0 
+            THEN SUM(CASE WHEN t.date BETWEEN $3::timestamp AND $4::timestamp 
+            THEN CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END 
+            ELSE 0 END)
+            ELSE 0 END AS debit,
+
+            -(CASE WHEN SUM(CASE WHEN t.date BETWEEN $3::timestamp AND $4::timestamp 
+            THEN CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END 
+            ELSE 0 END) < 0 
+            THEN SUM(CASE WHEN t.date BETWEEN $3::timestamp AND $4::timestamp 
+            THEN CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END 
+            ELSE 0 END)
+            ELSE 0 END) AS credit,
+
+            1 AS sort_order
+
+        FROM transactions t
+        JOIN folios f ON t.folio_id = f.id
+        WHERE t.property_id = $2
+        GROUP BY f.id, f.first_name, f.last_name, f.folio_number, f.check_in_date, f.check_out_date, t.code_name
+    ) x
+    WHERE prev_balance <> 0 OR debit <> 0 OR credit <> 0
+    ORDER BY folio_number, sort_order, description
+  `;
+
+  const rows: any[] = await prisma.$queryRawUnsafe(detailSql, startDate, propertyId, startDate, endDate);
+
+  const guestsMap = new Map<string, any[]>();
+  for (const r of rows) {
+    if (!guestsMap.has(r.name)) guestsMap.set(r.name, []);
+    guestsMap.get(r.name)!.push(r);
+  }
+
+  const summarySql = `
+    WITH RECURSIVE date_loop AS (
+        SELECT CAST($1 AS TIMESTAMP) AS v_date
+        UNION ALL
+        SELECT (v_date + INTERVAL '1 DAY')::TIMESTAMP
+        FROM date_loop
+        WHERE v_date < CAST($2 AS TIMESTAMP)
+    ),
+    movement AS (
+        SELECT 
+            'Advance Deposit' AS description,
+            CASE WHEN SUM(-mv.Amount) > 0 THEN SUM(-mv.Amount) ELSE 0 END AS debit,
+            CASE WHEN SUM(-mv.Amount) < 0 THEN SUM(-mv.Amount) ELSE 0 END AS credit
+        FROM (
+            SELECT 
+                d.v_date,
+                (
+                    COALESCE((
+                        SELECT SUM(CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END)
+                        FROM transactions t
+                        JOIN folios f ON t.folio_id = f.id
+                        WHERE t.date <= d.v_date
+                        AND f.check_in_date > d.v_date
+                        AND t.property_id = $3
+                    ),0)
+                    -
+                    COALESCE((
+                        SELECT SUM(CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END)
+                        FROM transactions t
+                        JOIN folios f ON t.folio_id = f.id
+                        WHERE t.date <= (d.v_date - INTERVAL '1 DAY')
+                        AND f.check_in_date > (d.v_date - INTERVAL '1 DAY')
+                        AND t.property_id = $3
+                    ),0)
+                ) AS Amount
+            FROM date_loop d
+        ) mv
+    ),
+    trx AS (
+        SELECT
+            t.code_name AS description,
+            CASE 
+                WHEN SUM(CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END) > 0 
+                THEN SUM(CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END)
+                ELSE 0 
+            END AS debit,
+            CASE 
+                WHEN SUM(CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END) < 0 
+                THEN SUM(CASE WHEN t.type_amount = 'MINUS' THEN -t.total ELSE t.total END)
+                ELSE 0 
+            END AS credit
+        FROM transactions t
+        WHERE t.date BETWEEN $4::timestamp AND $5::timestamp
+        AND t.property_id = $3
+        GROUP BY t.code_name
+    )
+    SELECT 
+        description,
+        SUM(debit) AS debit,
+        -SUM(credit) AS credit,
+        SUM(debit - credit) AS balance
+    FROM (
+        SELECT * FROM movement
+        UNION ALL
+        SELECT * FROM trx
+    ) x
+    WHERE x.debit <> 0 OR x.credit <> 0
+    GROUP BY description
+    ORDER BY description
+  `;
+
+  const summariesRaw: any[] = await prisma.$queryRawUnsafe(summarySql, startDate, endDate, propertyId, startDate, endDate);
+
   const workbook = new ExcelJS.Workbook();
   const ws = workbook.addWorksheet('Guest Ledger Report');
+  
+  ws.columns = [
+    { width: 30 }, { width: 10 }, { width: 15 }, { width: 30 }, 
+    { width: 15 }, { width: 15 }, { width: 15 }, { width: 15 }, 
+    { width: 12 }, { width: 12 }
+  ];
+
+  const titleRow = ws.addRow(['GUEST LEDGER REPORT']);
+  titleRow.font = { bold: true, size: 14 };
+  ws.mergeCells(`A1:J1`);
+  titleRow.alignment = { horizontal: 'center' };
+  
+  const headerRow = ws.addRow(['NAME', 'RMNO', 'BILLNO', 'DESCRIPTION', 'PREVBALANCE', 'DEBIT', 'CREDIT', 'BALANCE', 'ARRIVAL', 'DEPARTURE']);
+  headerRow.font = { bold: true };
+  headerRow.alignment = { horizontal: 'center' };
+  
   const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
-  const HEADERS = ['Date', 'Folio No', 'Guest', 'Code', 'Code Name', 'Description', 'Debit', 'Credit', 'Balance'];
-  const widths = [12, 14, 22, 10, 16, 40, 14, 14, 14];
-  const title = ws.getCell(1, 1);
-  title.value = 'GUEST LEDGER REPORT';
-  title.font = { bold: true, size: 13 };
-  title.alignment = { horizontal: 'center' };
-  HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
-  const hdr = ws.getRow(3);
-  hdr.values = ['', ...HEADERS];
-  hdr.font = { bold: true };
-  hdr.alignment = { horizontal: 'center' };
-  hdr.eachCell((c: any) => { c.border = border; });
-  let rn = 4;
-  let tDebit = 0, tCredit = 0;
-  for (const r of rows) {
-    tDebit += Number(r.debit || 0);
-    tCredit += Number(r.credit || 0);
-    ws.getRow(rn).values = ['', r.date, r.folio_number, r.guest, r.code, r.code_name, r.description, nf(Number(r.debit || 0)), nf(Number(r.credit || 0)), nf(Number(r.balance || 0))];
-    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
-    rn++;
+  headerRow.eachCell((c: any) => { c.border = border; });
+
+  for (const [name, folios] of guestsMap.entries()) {
+    const foliosGroup = new Map<string, any[]>();
+    for (const r of folios) {
+      if (!foliosGroup.has(r.folio_number)) foliosGroup.set(r.folio_number, []);
+      foliosGroup.get(r.folio_number)!.push(r);
+    }
+    
+    let fIdx = 0;
+    for (const [folioNum, dataRows] of foliosGroup.entries()) {
+      let dIdx = 0;
+      for (const d of dataRows) {
+        const row = ws.addRow([
+          (fIdx === 0 && dIdx === 0) ? name : '',
+          (dIdx === 0) ? d.room_name : '',
+          (dIdx === 0) ? folioNum : '',
+          d.description ? String(d.description).toUpperCase() : '',
+          Number(d.prev_balance || 0),
+          Number(d.debit || 0),
+          Number(d.credit || 0),
+          Number(d.prev_balance || 0) + Number(d.debit || 0) - Number(d.credit || 0),
+          (fIdx === 0 && dIdx === 0) ? (d.arrival ? formatDateDMYShort(d.arrival) : '') : '',
+          (fIdx === 0 && dIdx === 0) ? (d.departure ? formatDateDMYShort(d.departure) : '') : '',
+        ]);
+        
+        row.getCell(5).numFmt = '#,##0.00';
+        row.getCell(6).numFmt = '#,##0.00';
+        row.getCell(7).numFmt = '#,##0.00';
+        row.getCell(8).numFmt = '#,##0.00';
+        
+        if (fIdx === 0 && dIdx === 0) row.getCell(1).font = { bold: true };
+        row.eachCell((c: any) => { c.border = border; });
+        dIdx++;
+      }
+      fIdx++;
+    }
   }
-  ws.getRow(rn).values = ['', 'TOTAL', '', '', '', '', '', nf(tDebit), nf(tCredit), ''];
-  ws.getRow(rn).font = { bold: true };
-  ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+
+  ws.addRow([]);
+  const summaryTitle = ws.addRow(['SUMMARY OF TRANSACTION']);
+  summaryTitle.font = { bold: true, size: 12 };
+  ws.mergeCells(`A${summaryTitle.number}:D${summaryTitle.number}`);
+  summaryTitle.alignment = { horizontal: 'center' };
+  
+  const sumHeader = ws.addRow(['DESCRIPTION', 'DEBIT', 'CREDIT', 'BALANCE']);
+  sumHeader.font = { bold: true };
+  sumHeader.eachCell((c: any) => { c.border = border; });
+  
+  let grandDebit = 0;
+  let grandCredit = 0;
+  
+  for (const s of summariesRaw) {
+    const db = Number(s.debit || 0);
+    const cr = Number(s.credit || 0);
+    grandDebit += db;
+    grandCredit += cr;
+    const sr = ws.addRow([String(s.description || '').toUpperCase(), db, cr, db - cr]);
+    sr.getCell(2).numFmt = '#,##0.00';
+    sr.getCell(3).numFmt = '#,##0.00';
+    sr.getCell(4).numFmt = '#,##0.00';
+    sr.eachCell((c: any) => { c.border = border; });
+  }
+  
+  const sumTotal = ws.addRow(['GRAND TOTAL', grandDebit, grandCredit, grandDebit - grandCredit]);
+  sumTotal.font = { bold: true };
+  sumTotal.getCell(2).numFmt = '#,##0.00';
+  sumTotal.getCell(3).numFmt = '#,##0.00';
+  sumTotal.getCell(4).numFmt = '#,##0.00';
+  sumTotal.eachCell((c: any) => { c.border = border; });
+  
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="guest-ledger-report.xlsx"`);
   await workbook.xlsx.write(res);
@@ -3520,33 +3730,137 @@ export async function generateGuestLedgerExcel(res: Response, data: any): Promis
 }
 
 // ── Daily Statistic Excel ──
-export async function generateDailyStatisticExcel(res: Response, data: any): Promise<void> {
-  const row = Array.isArray(data) ? data[0] : data;
+export async function generateDailyStatisticExcel(res: Response, params: any): Promise<void> {
+  const pid = params.propertyId;
+  const businessDate = params.date || params.startDate || (new Date()).toISOString().split('T')[0];
+
+  const sql = `
+WITH params AS (
+    SELECT $1::bigint AS pid, $2::date AS bdate
+),
+rooms_stat AS (
+    SELECT 
+        (SELECT COUNT(*) FROM rooms WHERE property_id = p.pid AND deleted_at IS NULL AND is_physical = true) AS total_rooms,
+        (SELECT COUNT(*) FROM rooms WHERE property_id = p.pid AND deleted_at IS NULL AND status IN ('occupied', 'due_out')) AS occupied_rooms,
+        (SELECT COUNT(*) FROM rooms WHERE property_id = p.pid AND deleted_at IS NULL AND status = 'vacant') AS vacant_rooms,
+        (SELECT COUNT(*) FROM rooms WHERE property_id = p.pid AND deleted_at IS NULL AND room_status = 6) AS blocked_rooms,
+        (SELECT COUNT(*) FROM room_allotment WHERE property_id = p.pid AND deleted_at IS NULL) AS allocations_remaining
+    FROM params p
+),
+rsv_stat AS (
+    SELECT
+        (SELECT COUNT(*) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.check_in_date) = p.bdate AND DATE(r.check_out_date) = p.bdate AND r.deleted_at IS NULL) AS day_use_rooms,
+        (SELECT COUNT(*) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.check_in_date) = p.bdate AND r.deleted_at IS NULL) AS room_sold,
+        (SELECT COUNT(*) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND f.status_reservation = 1 AND r.deleted_at IS NULL) AS room_booked,
+        (SELECT COALESCE(SUM(r.adult), 0) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.date) = p.bdate AND r.deleted_at IS NULL) AS adults,
+        (SELECT COALESCE(SUM(r.child), 0) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.date) = p.bdate AND r.deleted_at IS NULL) AS children,
+        (SELECT COALESCE(SUM(r.amount), 0) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.date) = p.bdate AND r.deleted_at IS NULL) AS room_revenue,
+        (SELECT COUNT(*) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.check_in_date) = p.bdate AND r.deleted_at IS NULL) AS arrivals,
+        (SELECT COUNT(*) FROM reservations r JOIN folios f ON r.folio_id = f.id WHERE f.property_id = p.pid AND DATE(r.check_out_date) = p.bdate AND r.deleted_at IS NULL) AS departures
+    FROM params p
+),
+folio_stat AS (
+    SELECT
+        (SELECT COUNT(*) FROM folios WHERE property_id = p.pid AND status_reservation = 1) AS reservations_processed,
+        (SELECT COUNT(*) FROM folios WHERE property_id = p.pid AND DATE(check_in_date) = p.bdate AND status_reservation = 1) AS reservations_arrivals,
+        (SELECT COUNT(*) FROM folios WHERE property_id = p.pid AND DATE(check_in_date) = p.bdate AND status_reservation = 4) AS cancellations,
+        (SELECT COUNT(*) FROM folios WHERE property_id = p.pid AND status_reservation = 5) AS no_shows,
+        (SELECT COUNT(*) FROM folios WHERE property_id = p.pid AND status_reservation = 2) AS in_house_folios
+    FROM params p
+)
+SELECT * FROM rooms_stat, rsv_stat, folio_stat;
+  `;
+
+  const results: any[] = await prisma.$queryRawUnsafe(sql, pid, businessDate);
+  const data = results[0] || {};
+  
+  const totalRooms = Number(data.total_rooms || 0);
+  const blockedRooms = Number(data.blocked_rooms || 0);
+  const roomSold = Number(data.room_sold || 0);
+  const roomBooked = Number(data.room_booked || 0);
+  
+  const occupancyPercentage = (totalRooms - blockedRooms) > 0 ? ((roomSold + roomBooked) / (totalRooms - blockedRooms)) * 100 : 0;
+  const nettVacantRooms = Number(data.vacant_rooms || 0) - blockedRooms;
+  const occupancyPercentageNetBlocked = (totalRooms + blockedRooms) > 0 ? ((roomSold + roomBooked) / (totalRooms + blockedRooms)) * 100 : 0;
+  const avgRoomRate = roomSold > 0 ? Number(data.room_revenue || 0) / roomSold : 0;
+  
+  const totalFolios = Number(data.in_house_folios || 1); // fallback to 1 to avoid division by zero in average if missing folios logic
+  const avgGuestRateExcl = ((Number(data.adults || 0) + Number(data.children || 0)) / (totalFolios > 0 ? totalFolios : 1));
+  const avgGuestRateIncl = (Number(data.adults || 0) / (totalFolios > 0 ? totalFolios : 1));
+
   const workbook = new ExcelJS.Workbook();
   const ws = workbook.addWorksheet('Daily Statistic');
   const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
+  
+  ws.columns = [{ width: 45 }, { width: 25 }];
+  
   const title = ws.getCell(1, 1);
-  title.value = 'DAILY STATISTIC';
-  title.font = { bold: true, size: 13 };
+  title.value = 'DAILY STATISTIC REPORT';
+  title.font = { bold: true, size: 14 };
   title.alignment = { horizontal: 'center' };
-  ws.getColumn(1).width = 28;
-  ws.getColumn(2).width = 18;
-  const rows: [string, any][] = [
-    ['Date', row.date],
-    ['Total Rooms', row.total_rooms],
-    ['Check Ins', row.check_ins],
-    ['Check Outs', row.check_outs],
-    ['In House', row.in_house],
-    ['Vacancy', row.vacancy],
-    ['Occupancy Rate', row.occupancy_rate],
-  ];
-  let rn = 3;
-  for (const [k, v] of rows) {
-    ws.getRow(rn).values = [k, v];
-    ws.getRow(rn).eachCell((c: any) => { c.border = border; });
-    ws.getRow(rn).getCell(1).font = { bold: true };
-    rn++;
-  }
+  ws.mergeCells(1, 1, 1, 2);
+  
+  const subTitle = ws.getCell(2, 1);
+  subTitle.value = `Date: ${formatDateDMYShort(new Date(businessDate))}`;
+  subTitle.font = { size: 11 };
+  subTitle.alignment = { horizontal: 'center' };
+  ws.mergeCells(2, 1, 2, 2);
+  
+  ws.addRow([]);
+  
+  const renderSection = (title: string, rows: [string, any][]) => {
+      const tr = ws.addRow([title, '']);
+      tr.font = { bold: true, size: 12 };
+      tr.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      tr.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0E0E0' } };
+      tr.eachCell((c: any) => { c.border = border; });
+      
+      for (const [k, v] of rows) {
+          const row = ws.addRow([k, v]);
+          row.eachCell((c: any) => { c.border = border; });
+          if (typeof v === 'number' && v % 1 !== 0) {
+              row.getCell(2).numFmt = '#,##0.00';
+          } else if (typeof v === 'number') {
+              row.getCell(2).numFmt = '#,##0';
+          }
+      }
+      ws.addRow([]);
+  };
+
+  renderSection('Rooms', [
+      ['Total Rooms', totalRooms],
+      ['Day Use Rooms', Number(data.day_use_rooms || 0)],
+      ['Occupied Rooms', Number(data.occupied_rooms || 0)],
+      ['Allocations Remaining', Number(data.allocations_remaining || 0)],
+      ['Total Vacant Rooms', Number(data.vacant_rooms || 0)],
+      ['Occupancy Percentage', occupancyPercentage.toFixed(2) + '%'],
+      ['Blocked Rooms', blockedRooms],
+      ['Nett Vacant Rooms', nettVacantRooms],
+      ['Occupancy Percentage (Net Blocked)', occupancyPercentageNetBlocked.toFixed(2) + '%']
+  ]);
+
+  renderSection('Guests', [
+      ['Adults', Number(data.adults || 0)],
+      ['Children', Number(data.children || 0)],
+      ['Total Guests In House', Number(data.adults || 0) + Number(data.children || 0)]
+  ]);
+
+  renderSection('Revenue', [
+      ['Room Revenue', Number(data.room_revenue || 0)],
+      ['Average Room Rate', avgRoomRate],
+      ['Average Guest Rate Excl. Children', avgGuestRateExcl],
+      ['Average Guest Rate Incl. Children', avgGuestRateIncl]
+  ]);
+
+  renderSection('Bookings', [
+      ['Reservations Processed', Number(data.reservations_processed || 0)],
+      ['Reservations and Arrivals', Number(data.reservations_arrivals || 0)],
+      ['Cancellations', Number(data.cancellations || 0)],
+      ['Arrivals', Number(data.arrivals || 0)],
+      ['Departures', Number(data.departures || 0)],
+      ['No Shows', Number(data.no_shows || 0)]
+  ]);
+
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="daily-statistic.xlsx"`);
   await workbook.xlsx.write(res);
@@ -3554,33 +3868,90 @@ export async function generateDailyStatisticExcel(res: Response, data: any): Pro
 }
 
 // ── On Reservation Balance Excel ──
-export async function generateOnResvBalExcel(res: Response, data: any): Promise<void> {
-  const row = Array.isArray(data) ? data[0] : data;
-  const rows = row.reservations || [];
+export async function generateOnResvBalExcel(res: Response, params: any): Promise<void> {
+  const pid = params.propertyId;
+  const businessDate = params.date || params.startDate || (new Date()).toISOString().split('T')[0];
+
+  const sql = `
+SELECT 
+    f.id as folio_id,
+    f.folio_number as folio,
+    r.name as room,
+    rt.name as "roomType",
+    CONCAT(g.first_name, ' ', g.last_name) as guest,
+    COALESCE(c.name, 'N/A') as "groupName",
+    f.check_in_date as arrival,
+    f.check_out_date as departure,
+    COALESCE(ra.name, 'N/A') as "rateCode",
+    (SELECT COALESCE(SUM(total), 0) FROM transactions WHERE folio_id = f.id AND type_amount = 'MINUS' AND DATE(date) = $2 AND deleted_at IS NULL) as payment,
+    (SELECT COALESCE(SUM(total), 0) FROM transactions WHERE folio_id = f.id AND type_amount = 'PLUS' AND DATE(date) <= $2 AND deleted_at IS NULL) as balance
+FROM folios f
+LEFT JOIN guest_profiles g ON f.guest_profile_id = g.id
+LEFT JOIN company_profiles c ON f.company_profile_id = c.id
+LEFT JOIN (
+    SELECT DISTINCT ON (folio_id) folio_id, room_id, room_type_id, rate_id 
+    FROM reservations 
+    WHERE deleted_at IS NULL
+    ORDER BY folio_id, date DESC
+) res ON f.id = res.folio_id
+LEFT JOIN rooms r ON res.room_id = r.id
+LEFT JOIN room_types rt ON res.room_type_id = rt.id
+LEFT JOIN rates ra ON res.rate_id = ra.id
+WHERE f.property_id = $1 
+AND f.status_reservation = 1
+AND f.deleted_at IS NULL
+AND EXISTS (
+    SELECT 1 FROM transactions t WHERE t.folio_id = f.id AND DATE(t.date) <= $2 AND t.deleted_at IS NULL
+)
+  `;
+
+  const rows: any[] = await prisma.$queryRawUnsafe(sql, pid, businessDate);
+  const totalDepositBalance = rows.reduce((acc, row) => acc + Number(row.balance || 0), 0);
+
   const workbook = new ExcelJS.Workbook();
   const ws = workbook.addWorksheet('On Reservation Balance');
   const border = { top: { style: 'thin' }, bottom: { style: 'thin' }, left: { style: 'thin' }, right: { style: 'thin' } };
   const HEADERS = ['Folio', 'Room Type', 'Room', 'Guest', 'Group Name', 'Arrival', 'Departure', 'Rate Code', 'Payment', 'Balance'];
   const widths = [14, 14, 14, 24, 22, 12, 12, 12, 14, 14];
+  
   const title = ws.getCell(1, 1);
-  title.value = `RESERVATIONS WITH DEPOSIT BALANCES AS AT ${row.business_date || ''}`;
+  title.value = `RESERVATIONS WITH DEPOSIT BALANCES AS AT ${formatDateDMYShort(new Date(businessDate))}`;
   title.font = { bold: true, size: 13 };
   title.alignment = { horizontal: 'center' };
+  ws.mergeCells(1, 1, 1, 10);
+  
   HEADERS.forEach((h, i) => { ws.getColumn(i + 1).width = widths[i]; });
   const hdr = ws.getRow(3);
   hdr.values = HEADERS;
   hdr.font = { bold: true };
   hdr.alignment = { horizontal: 'center' };
   hdr.eachCell((c: any) => { c.border = border; });
+  
   let rn = 4;
   for (const r of rows) {
-    ws.getRow(rn).values = [r.folio, r.roomType, r.room, r.guest, r.groupName, r.arrival, r.departure, r.rateCode, nf(Number(r.payment || 0)), nf(Number(r.balance || 0), 2)];
+    ws.getRow(rn).values = [
+        r.folio, 
+        r.roomType, 
+        r.room, 
+        r.guest, 
+        r.groupName, 
+        r.arrival ? formatDateDMYShort(new Date(r.arrival)) : '', 
+        r.departure ? formatDateDMYShort(new Date(r.departure)) : '', 
+        r.rateCode, 
+        Number(r.payment || 0), 
+        Number(r.balance || 0)
+    ];
     ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+    ws.getRow(rn).getCell(9).numFmt = '#,##0.00';
+    ws.getRow(rn).getCell(10).numFmt = '#,##0.00';
     rn++;
   }
-  ws.getRow(rn).values = ['', '', '', '', '', '', '', '', 'Total Deposit Balance', nf(Number(row.totalDepositBalance || 0), 2)];
+  
+  ws.getRow(rn).values = ['', '', '', '', '', '', '', '', 'Total Deposit Balance', Number(totalDepositBalance || 0)];
   ws.getRow(rn).font = { bold: true };
   ws.getRow(rn).eachCell((c: any) => { c.border = border; });
+  ws.getRow(rn).getCell(10).numFmt = '#,##0.00';
+  
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="on-resv-bal.xlsx"`);
   await workbook.xlsx.write(res);

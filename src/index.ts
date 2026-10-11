@@ -9,6 +9,7 @@ import cors from 'cors';
 import path from 'path';
 import { requestLogger } from './middleware/logger.middleware';
 import { requestParser } from './middleware/requestParser.middleware';
+import { storageFallback } from './middleware/storageFallback.middleware';
 import { errorHandler } from './middleware/errorHandler.middleware';
 import { success, notFound } from './utils/response';
 import { storageRoot } from './utils/storage';
@@ -38,6 +39,7 @@ import pgAdminRoutes from './routes/pg-admin.routes';
 import { bookingRoutes } from './routes/booking.routes';
 import { middlewareRoutes } from './routes/middleware.routes';
 import { posRoutes } from './routes/pos.routes';
+import pdfRoutes from './routes/pdf.routes';
 import { initQueue } from './config/queue';
 
 const app: Express = express();
@@ -71,6 +73,12 @@ app.use('/storage', (req: Request, _res: Response, next: () => void) => {
   next();
 });
 app.use('/storage', express.static(storageRoot()));
+// Missing images are answered with generated artwork derived from the path (folder ->
+// palette/motif, filename -> caption) instead of a 404. Every image column in the HMS
+// database still points at pre-migration filenames that exist neither here nor on the
+// production host, and the booking engine renders them straight into the guest portal.
+// Real uploads always win because express.static runs first.
+app.use('/storage', storageFallback);
 
 // 2c. Theme static files — SVG icons, images (/theme/cms/images/...)
 app.use('/theme', express.static(path.join(process.cwd(), 'theme')));
@@ -208,6 +216,10 @@ mountLegacyCmsAlias(contentRoutes);
 app.use('/api', firebaseRoutes);
 app.use('/cms', firebaseRoutes);
 mountLegacyCmsAlias(firebaseRoutes);
+
+// PDF Generation
+app.use('/api/pdf', pdfRoutes);
+app.use('/cms/pdf', pdfRoutes);
 
 // pg-admin — database UI (dev only, protect with PG_ADMIN_TOKEN in prod)
 app.use('/pg-admin', pgAdminRoutes);

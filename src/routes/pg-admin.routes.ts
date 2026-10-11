@@ -7,18 +7,61 @@ import * as path from 'path';
 
 const router = Router();
 
+function parseCookieHeader(header: unknown): Record<string, string> {
+  if (typeof header !== 'string') return {};
+  return header.split(';').reduce((acc, part) => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return acc;
+    const key = part.slice(0, idx).trim();
+    const value = decodeURIComponent(part.slice(idx + 1).trim());
+    if (key) acc[key] = value;
+    return acc;
+  }, {} as Record<string, string>);
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+async function assertPublicTable(table: string): Promise<boolean> {
+  // @ts-ignore
+  const exists = await pool.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_tables
+       WHERE schemaname = 'public' AND tablename = $1
+     ) AS ok`,
+    [table],
+  );
+  return Boolean(exists.rows[0]?.ok);
+}
 
 // Simple auth middleware - only allow in development or with secret token
 const pgAdminAuth = (req: Request, res: Response, next: Function) => {
-  const token = (Array.isArray(req.query.token) ? req.query.token[0] : req.query.token) 
+  const queryToken = (Array.isArray(req.query.token) ? req.query.token[0] : req.query.token)
     || req.headers['x-pg-admin-token'];
+  const cookieToken = parseCookieHeader(req.headers.cookie)['pg_admin_token'];
+  const token = queryToken || cookieToken;
   const allowedToken = process.env.PG_ADMIN_TOKEN || 'dev-secret-change-me';
+
+  if (queryToken === allowedToken) {
+    res.cookie('pg_admin_token', allowedToken, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+  }
   
   if (process.env.NODE_ENV === 'production' && token !== allowedToken) {
     return res.status(403).send(`
       <html><body style="font-family: monospace; padding: 2rem;">
         <h1>403 Forbidden</h1>
-        <p>Set PG_ADMIN_TOKEN env var and pass ?token=xxx or header X-Pg-Admin-Token</p>
+        <p>Set PG_ADMIN_TOKEN env var and pass ?token=xxx or header X-Pg-Admin-Token once. The token is stored in an httpOnly cookie so Adminer-like navigation keeps working.</p>
         <p>Example: <code>localhost:3001/pg-admin?token=your-token</code></p>
       </body></html>
     `);
@@ -27,6 +70,11 @@ const pgAdminAuth = (req: Request, res: Response, next: Function) => {
 };
 
 router.use(pgAdminAuth);
+
+router.get('/logout', (_req: Request, res: Response) => {
+  res.clearCookie('pg_admin_token');
+  res.redirect('/pg-admin');
+});
 
 // HTML UI
 const htmlUI = (title: string, content: string, extraHead = '') => `
@@ -115,20 +163,51 @@ router.get('/', async (req: Request, res: Response) => {
       size: r.size,
       comment: r.comment || ''
     }));
+
+    // @ts-ignore
+    const dbInfo = await pool.query(`
+      SELECT current_database() AS database,
+             current_user AS user,
+             version() AS version,
+             now() AS now
+    `);
+    const info = dbInfo.rows[0];
     
+    const q = ((Array.isArray(req.query.q) ? req.query.q[0] : req.query.q) as string || '').trim().toLowerCase();
+    const visibleTables = q ? tables.filter((t: any) => t.name.toLowerCase().includes(q)) : tables;
+
     res.send(htmlUI('Tables', `
       <div class="card">
-        <div class="card-header">📋 Tables (${tables.length})</div>
+        <div class="card-header">🗄️ Connection</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Database</th><th>User</th><th>Server time</th><th>Version</th></tr></thead>
+            <tbody><tr>
+              <td><strong>${escapeHtml(info.database)}</strong></td>
+              <td>${escapeHtml(info.user)}</td>
+              <td>${escapeHtml(info.now)}</td>
+              <td><code>${escapeHtml(String(info.version).split(' on ')[0])}</code></td>
+            </tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">📋 Tables (${visibleTables.length}${q ? ` / ${tables.length}` : ''})</div>
+        <form method="GET" style="padding: 1rem; display: flex; gap: 1rem; flex-wrap: wrap;">
+          <input type="text" name="q" placeholder="Filter tables..." value="${escapeHtml(q)}" style="flex: 1; min-width: 200px;">
+          <button type="submit" class="btn btn-primary">Filter</button>
+          <a href="/pg-admin" class="btn btn-secondary">Clear</a>
+        </form>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Table</th><th>Schema</th><th>Size</th><th>Comment</th><th class="actions">Actions</th></tr></thead>
             <tbody>
-              ${tables.map((t: any) => `
+              ${visibleTables.map((t: any) => `
                 <tr>
-                  <td><strong>${t.name}</strong></td>
-                  <td>${t.schema}</td>
-                  <td>${t.size}</td>
-                  <td>${t.comment}</td>
+                  <td><strong>${escapeHtml(t.name)}</strong></td>
+                  <td>${escapeHtml(t.schema)}</td>
+                  <td>${escapeHtml(t.size)}</td>
+                  <td>${escapeHtml(t.comment)}</td>
                   <td class="actions">
                     <a href="/pg-admin/table/${encodeURIComponent(t.name)}" class="btn btn-primary">Browse</a>
                     <a href="/pg-admin/structure/${encodeURIComponent(t.name)}" class="btn btn-secondary">Structure</a>
@@ -141,14 +220,18 @@ router.get('/', async (req: Request, res: Response) => {
       </div>
     `));
   } catch (err: any) {
-    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${err.message}</div>`));
+    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${escapeHtml(err.message)}</div>`));
   }
 });
 
 // Table structure
 router.get('/structure/:table', async (req: Request, res: Response) => {
-  const table = req.params.table;
+  const table = (Array.isArray(req.params.table) ? req.params.table[0] : req.params.table) as string;
   try {
+    if (!(await assertPublicTable(table))) {
+      res.status(404).send(htmlUI('Not Found', `<div class="alert alert-error">Table not found: ${escapeHtml(table)}</div>`));
+      return;
+    }
     // @ts-ignore
     const cols = await pool.query(`
       SELECT 
@@ -174,7 +257,7 @@ router.get('/structure/:table', async (req: Request, res: Response) => {
       WHERE conrelid = $1::regclass AND contype = 'f'
     `, [table]);
     
-    res.send(htmlUI(`Structure: ${table}`, `
+    res.send(htmlUI(`Structure: ${escapeHtml(table)}`, `
       <div class="card">
         <div class="card-header">📐 Columns</div>
         <div class="table-wrap">
@@ -225,7 +308,7 @@ router.get('/structure/:table', async (req: Request, res: Response) => {
       </div>
     `));
   } catch (err: any) {
-    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${err.message}</div>`));
+    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${escapeHtml(err.message)}</div>`));
   }
 });
 
@@ -241,6 +324,10 @@ router.get('/table/:table', async (req: Request, res: Response) => {
   const whereClause = search ? `WHERE ${search}` : '';
   
   try {
+    if (!(await assertPublicTable(table))) {
+      res.status(404).send(htmlUI('Not Found', `<div class="alert alert-error">Table not found: ${escapeHtml(table)}</div>`));
+      return;
+    }
     // Get total count
     // @ts-ignore
     const countResult = await pool.query(`SELECT COUNT(*) FROM "${table}" ${whereClause}`);
@@ -264,16 +351,16 @@ router.get('/table/:table', async (req: Request, res: Response) => {
       [limit, offset]
     );
     
-    res.send(htmlUI(`Browse: ${table}`, `
+    res.send(htmlUI(`Browse: ${escapeHtml(table)}`, `
       <div class="card">
         <div class="card-header">
-          📄 ${table} 
+          📄 ${escapeHtml(table)} 
           <span style="font-weight: normal; margin-left: 1rem;">
             Showing ${offset + 1}–${Math.min(offset + limit, total)} of ${total} rows
           </span>
         </div>
         <form method="GET" style="padding: 1rem; display: flex; gap: 1rem; flex-wrap: wrap;">
-          <input type="text" name="search" placeholder="WHERE clause (e.g. id > 100)" value="${search}" style="flex: 1; min-width: 200px;">
+          <input type="text" name="search" placeholder="WHERE clause (e.g. id > 100)" value="${escapeHtml(search)}" style="flex: 1; min-width: 200px;">
           <button type="submit" class="btn btn-primary">Filter</button>
           <a href="/pg-admin/table/${encodeURIComponent(table)}" class="btn btn-secondary">Clear</a>
         </form>
@@ -291,8 +378,8 @@ router.get('/table/:table', async (req: Request, res: Response) => {
                     const val = row[c];
                     if (val === null) return '<td class="null">NULL</td>';
                     if (typeof val === 'boolean') return `<td class="bool">${val ? '✓' : '✗'}</td>`;
-                    if (typeof val === 'object') return `<td><pre style="margin:0; font-size:0.75rem;">${JSON.stringify(val)}</pre></td>`;
-                    return `<td>${String(val).replace(/</g, '<').replace(/>/g, '>')}</td>`;
+                    if (typeof val === 'object') return `<td><pre style="margin:0; font-size:0.75rem;">${escapeHtml(JSON.stringify(val))}</pre></td>`;
+                    return `<td>${escapeHtml(String(val))}</td>`;
                   }).join('')}
                 </tr>
               `).join('')}
@@ -312,7 +399,7 @@ router.get('/table/:table', async (req: Request, res: Response) => {
       </div>
     `));
   } catch (err: any) {
-    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${err.message}</div>`));
+    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${escapeHtml(err.message)}</div>`));
   }
 });
 
@@ -323,7 +410,7 @@ router.get('/query', (req: Request, res: Response) => {
     <div class="card">
       <div class="card-header">🔍 SQL Query</div>
       <form method="POST" action="/pg-admin/query/execute" style="padding: 1rem;">
-        <textarea name="sql" class="sql-editor">${sql.replace(/</g, '<').replace(/>/g, '>')}</textarea>
+        <textarea name="sql" class="sql-editor">${escapeHtml(sql)}</textarea>
         <div style="margin-top: 0.5rem; display: flex; gap: 1rem; align-items: center;">
           <button type="submit" class="btn btn-primary">Execute (Ctrl+Enter)</button>
           <label><input type="checkbox" name="explain" ${req.query.explain ? 'checked' : ''}> EXPLAIN ANALYZE</label>
@@ -357,7 +444,7 @@ router.post('/query/execute', async (req: Request, res: Response) => {
   for (const stmt of statements) {
     const start = Date.now();
     try {
-      const execSql = explain ? `EXPLAIN ANALYZE ${stmt}` : stmt;
+      const execSql = explain ? `EXPLAIN ANALYZE escapeHtml(stmt)` : stmt;
       // @ts-ignore
       const result = await pool.query(execSql);
       const duration = Date.now() - start;
@@ -383,8 +470,8 @@ router.post('/query/execute', async (req: Request, res: Response) => {
                       const val = row[c];
                       if (val === null) return '<td class="null">NULL</td>';
                       if (typeof val === 'boolean') return `<td class="bool">${val ? '✓' : '✗'}</td>`;
-                      if (typeof val === 'object') return `<td><pre style="margin:0; font-size:0.7rem;">${JSON.stringify(val)}</pre></td>`;
-                      return `<td>${String(val).replace(/</g, '<').replace(/>/g, '>')}</td>`;
+                      if (typeof val === 'object') return `<td><pre style="margin:0; font-size:0.7rem;">${escapeHtml(JSON.stringify(val))}</pre></td>`;
+                      return `<td>${escapeHtml(String(val))}</td>`;
                     }).join('')}</tr>
                   `).join('')}
                 </tbody>
@@ -397,15 +484,15 @@ router.post('/query/execute', async (req: Request, res: Response) => {
         output += `
           <div class="alert alert-success">
             ✓ Query OK — ${result.rowCount} row(s) affected (${duration}ms)
-            <br><code>${stmt}</code>
+            <br><code>escapeHtml(stmt)</code>
           </div>
         `;
       }
     } catch (err: any) {
       output += `
         <div class="alert alert-error">
-          ✗ Error: ${err.message}
-          <br><code>${stmt}</code>
+          ✗ Error: ${escapeHtml(err.message)}
+          <br><code>escapeHtml(stmt)</code>
         </div>
       `;
       break;
@@ -462,7 +549,7 @@ router.get('/schema', async (req: Request, res: Response) => {
               // @ts-ignore
               ${tables.rows.map((t: any) => `
                 <tr>
-                  <td><a href="/pg-admin/table/${encodeURIComponent(t.tablename)}">${t.tablename}</a></td>
+                  <td><a href="/pg-admin/table/${encodeURIComponent(t.tablename)}">${escapeHtml(t.tablename)}</a></td>
                   <td>${t.col_count}</td>
                   <td>${t.size}</td>
                 </tr>
@@ -490,7 +577,7 @@ router.get('/schema', async (req: Request, res: Response) => {
       </div>
     `));
   } catch (err: any) {
-    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${err.message}</div>`));
+    res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${escapeHtml(err.message)}</div>`));
   }
 });
 
@@ -546,7 +633,7 @@ router.get('/logs', async (req: Request, res: Response) => {
           <a href="/pg-admin/logs/files" class="btn btn-secondary">📁 All Files</a>
         </div>
       </div>
-      <pre style="margin: 0; padding: 1rem; background: #1e1e1e; color: #d4d4d4; font-size: 0.75rem; line-height: 1.5; overflow-x: auto; max-height: 70vh; white-space: pre-wrap;">${error ? `<span style="color: #f44336;">${error}</span>` : content.replace(/</g, '<').replace(/>/g, '>')}</pre>
+      <pre style="margin: 0; padding: 1rem; background: #1e1e1e; color: #d4d4d4; font-size: 0.75rem; line-height: 1.5; overflow-x: auto; max-height: 70vh; white-space: pre-wrap;">${error ? `<span style="color: #f44336;">${error}</span>` : escapeHtml(content)}</pre>
       ${error ? '' : `<div class="result-count">Showing last ${lines} lines of ${file} (${logFiles.length} log files available)</div>`}
     </div>
   `));
@@ -572,7 +659,7 @@ router.get('/logs/files', async (req: Request, res: Response) => {
     }
     files.sort((a, b) => b.mtime.localeCompare(a.mtime));
   } catch (err: any) {
-    return res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${err.message}</div>`));
+    return res.status(500).send(htmlUI('Error', `<div class="alert alert-error">${escapeHtml(err.message)}</div>`));
   }
   
   res.send(htmlUI('Log Files', `

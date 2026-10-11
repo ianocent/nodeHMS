@@ -5,6 +5,8 @@ import { prisma } from '../../config/prisma';
 // Confirmation emails/PDF generation are not ported (no mail infra in node yet).
 import { calculateCodePost } from '../../utils/cmsConfig';
 import { sendBookingConfirmationEmails } from '../../services/mail.service';
+import { issuePreRegistrationLink } from '../../services/preRegistrationLink.service';
+import { notifyPaymentConfirmed } from '../../services/guestEvents.service';
 
 
 export async function processSyncCheckStatusBookingEngine(_job: any) {
@@ -49,16 +51,64 @@ export async function processSyncCheckStatusBookingEngine(_job: any) {
 
       if (status === 'success') {
         await handleSuccessfulPayment(folio, decoded);
+
         // Laravel sendConfirmationEmails (:349-421) — guest + hotel confirmation.
         // SMTP dibaca dari env (lihat services/mail.service.ts); skip aman bila kosong.
+        //
+        // Issue the guest's pre-registration link first: the mail is the only place the
+        // token ever reaches them, and the token has to exist before the mail renders.
+        let preRegistrationUrl: string | null = null;
+        try {
+          const link = await issuePreRegistrationLink(folio as any);
+          preRegistrationUrl = link?.url ?? null;
+          if (!link) {
+            console.warn(
+              `[SyncCheckStatusBookingEngine] folio ${folio.folio_number ?? folio.id}: no pre-registration link issued`
+            );
+          }
+        } catch (linkErr: any) {
+          // Never let the link failure cost the guest their confirmation mail.
+          console.error('[SyncCheckStatusBookingEngine] pre-registration link failed:', linkErr?.message);
+        }
+
+        let propertyName = 'Hotel';
         try {
           const property: any = await prisma.properties.findUnique({
             where: { id: folio.property_id },
             select: { name: true },
           });
-          await sendBookingConfirmationEmails(folio, property?.name ?? 'Hotel');
+          propertyName = property?.name ?? 'Hotel';
+          await sendBookingConfirmationEmails(
+            folio,
+            propertyName,
+            undefined,
+            preRegistrationUrl ?? undefined
+          );
         } catch (mailErr: any) {
           console.error('[SyncCheckStatusBookingEngine] confirmation email failed:', mailErr?.message);
+        }
+
+        // Push it to the guest's open tabs. Last, because everything above is a
+        // durable side effect that must happen whether or not anyone is listening —
+        // `delivered: 0` is the normal case for a guest who has navigated away, and
+        // their next poll finds the same folio.
+        try {
+          const delivered = await notifyPaymentConfirmed({
+            email: folio.email,
+            folioNumber: folio.folio_number,
+            propertyName,
+            checkInDate: folio.check_in_date,
+            checkOutDate: folio.check_out_date,
+            preRegistrationUrl,
+          });
+          if (delivered > 0) {
+            console.log(
+              `[SyncCheckStatusBookingEngine] folio ${folio.folio_number ?? folio.id}: pushed to ${delivered} open tab(s)`
+            );
+          }
+        } catch (eventErr: any) {
+          // Never let the notification bus cost the guest their payment booking or mail.
+          console.error('[SyncCheckStatusBookingEngine] guest notification failed:', eventErr?.message);
         }
       } else if (status === 'expired') {
         // Expired: clear pending flag + cancel the reservation.
@@ -82,7 +132,19 @@ export async function processSyncCheckStatusBookingEngine(_job: any) {
   return 'success';
 }
 
-async function handleSuccessfulPayment(folio: any, checkStatus: any) {
+/**
+ * Book a paid booking-engine payment onto its folio.
+ *
+ * Exported because reconcileBookingEnginePayments.ts calls it for folios this job never
+ * looked at (see that file for why the pending flag is not enough).
+ *
+ * Throws rather than returning early when the ledger cannot be written. An early return
+ * here used to commit the folio update on its own — the folio got flagged paid with no
+ * transaction against it, which is the exact failure reconciliation exists to catch, so
+ * it must not be reachable from here. Rolling the folio update back keeps the pair
+ * together: either both land or the folio stays flagged pending for the next run.
+ */
+export async function handleSuccessfulPayment(folio: any, checkStatus: any) {
   await prisma.$transaction(async (tx: any) => {
     // Laravel writes flag=2 (success); node keeps boolean pending flag + numeric
     // state in folios.data.be_status.
@@ -102,18 +164,45 @@ async function handleSuccessfulPayment(folio: any, checkStatus: any) {
     let paymentType: any = null;
     const channel = checkStatus?.data?.payment_channel;
     if (channel) {
+      // Two queries, not an include: `payment_matrices` has no declared relation to
+      // `type_payments` in schema.prisma (only the `payment_type_id` column), so
+      // `include: { type_payments: true }` throws
+      //   Unknown field `type_payments` for include statement on model `payment_matrices`
+      // The moment Xendit reports a channel — which is exactly the moment a payment
+      // succeeds — so this line made the whole success path unreachable and the
+      // transaction never committed.
       const matrix = await tx.payment_matrices.findFirst({
         where: { property_id: BigInt(propertyId), payment_xendit_type: String(channel), deleted_at: null },
-        include: { type_payments: true },
+        select: { payment_type_id: true },
       });
-      paymentType = matrix?.type_payments ?? null;
+      if (matrix?.payment_type_id) {
+        paymentType = await tx.type_payments.findFirst({
+          where: { id: BigInt(matrix.payment_type_id), deleted_at: null },
+        });
+      }
     }
     if (!paymentType || !paymentType.code_post_id) {
+      // `mode: 'insensitive'` because the only ledger account on property 999 is named
+      // "CITY LEDGER" — Prisma's `contains` is case-sensitive, so `contains: 'ledger'`
+      // matched nothing and this fallback silently never ran. A channel with no
+      // PaymentMatrix row (GCASH, OVO, anything new Xendit adds) depends entirely on it.
       paymentType = await tx.type_payments.findFirst({
-        where: { property_id: BigInt(propertyId), name: { contains: 'ledger' }, status: 1, deleted_at: null },
+        where: {
+          property_id: BigInt(propertyId),
+          name: { contains: 'ledger', mode: 'insensitive' },
+          status: 1,
+          deleted_at: null,
+        },
       });
     }
-    if (!paymentType || !paymentType.code_post_id) return;
+    if (!paymentType || !paymentType.code_post_id) {
+      // No ledger account to post to: refuse loudly instead of flagging the folio paid
+      // and writing nothing. See the note above handleSuccessfulPayment.
+      throw new Error(
+        `folio ${folio.folio_number ?? folio.id}: no payment type with a code_post for property ` +
+          `${folio.property_id} (channel "${channel ?? 'unknown'}") — payment not booked`,
+      );
+    }
 
     // Amounts: folio total_amount + add-ons from folio.data.addOnBO.
     const addOnBO: any[] = Array.isArray(dataObj?.addOnBO) ? dataObj.addOnBO : [];
@@ -149,7 +238,7 @@ async function handleSuccessfulPayment(folio: any, checkStatus: any) {
 
     // Transaction date = next business date (LogAudit latest date + 1 day).
     const logAudit = await tx.log_audits.findFirst({
-      where: { property_id: BigInt(propertyId) },
+      where: { property_id: propertyId },
       orderBy: { date: 'desc' },
     });
     const txnDate = logAudit?.date ? new Date(new Date(logAudit.date).getTime() + 86400000) : new Date();
@@ -159,7 +248,6 @@ async function handleSuccessfulPayment(folio: any, checkStatus: any) {
       data: {
         type: 'payment',
         folio_id: folio.id,
-        folio_no: folio.folio_number ?? null,
         date: txnDate,
         code: String(codePost?.id ?? ''),
         type_payment_id: BigInt(paymentType.id),

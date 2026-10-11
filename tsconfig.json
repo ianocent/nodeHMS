@@ -29,5 +29,9 @@
   "exclude": [
     "node_modules",
     "dist"
-  ]
+  ],
+  "//": "ts-node only type-checks the files it actually requires, so the `declare global { namespace Express { interface Request { user?: AuthUser } } }` augmentation that lives in src/middleware/auth.middleware.ts was invisible to it. src/utils/audit.ts then failed with TS2339 'Property user does not exist on type Request' — even though `tsc` builds the whole include set and is clean. `files: true` makes ts-node load include/files up front, which is what the compiler does anyway.",
+  "ts-node": {
+    "files": true
+  }
 }
