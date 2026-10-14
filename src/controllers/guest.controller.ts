@@ -503,7 +503,7 @@ export class GuestController {
         });
       }
 
-      const fullGuest = await this.getGuestWithRelations(guest.id);
+      const fullGuest = await GuestController.getGuestWithRelations(guest.id);
       // Quick-create from a reservation only fills title/first/last, so hand the
       // caller exactly what check-in will still ask for. The popup shows this
       // as "incomplete" plus a link to the full profile form.
@@ -542,7 +542,7 @@ export class GuestController {
         return;
       }
       const id = BigInt(idParam);
-      const guest = await this.getGuestWithRelations(id);
+      const guest = await GuestController.getGuestWithRelations(id);
 
       if (!guest || guest.deleted_at) {
         notFound(res, 'Guest not found');
@@ -566,7 +566,7 @@ export class GuestController {
       const id = BigInt(idParam);
       const tp = req.user?.lastProperty ?? 0;
       const [guest, titles, statusGuest, blackList, types, countries, mandatory] = await Promise.all([
-        this.getGuestWithRelations(id),
+        GuestController.getGuestWithRelations(id),
         prisma.types.findMany({ where: { group: 'guest-title', status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
         prisma.types.findMany({ where: { group: 'guest-status', status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
         prisma.types.findMany({ where: { group: 'guest-status', name: { contains: 'blacklist', mode: 'insensitive' }, status: 1, deleted_at: null, property_id: tp }, select: { id: true, name: true } }),
@@ -932,7 +932,7 @@ export class GuestController {
         if (statusId) await replaceGroupType(statusId);
       });
 
-      const updated = await this.getGuestWithRelations(id);
+      const updated = await GuestController.getGuestWithRelations(id);
       success(res, {
         ...GuestController.formatGuest(updated),
         ...GuestController.relationOptions(updated),

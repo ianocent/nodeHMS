@@ -36,6 +36,7 @@ import extraRoutes from './routes/extra.routes';
 import contentRoutes from './routes/content.routes';
 import { firebaseRoutes } from './controllers/firebase.controller';
 import pgAdminRoutes from './routes/pg-admin.routes';
+import initialSetupRoutes from './routes/initial-setup.routes';
 import { bookingRoutes } from './routes/booking.routes';
 import { middlewareRoutes } from './routes/middleware.routes';
 import { posRoutes } from './routes/pos.routes';
@@ -57,9 +58,28 @@ app.use(cors({
 }));
 
 // 2. Body parsing — json + urlencoded + text/plain (for AES-encrypted payloads)
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.text({ limit: '10mb', type: 'text/plain' }));
+//
+// The 10mb ceiling was sized for ordinary CRUD and blew up the moment a form
+// carried a picture. Every image field in this app travels as a
+// `data:image/<ext>;base64,...` string inside an AES-256-CBC body, and
+// GetEncrypt() emits HEX — two characters per byte. So a 1 MB upload became:
+//   1.00 MB binary
+// -> 1.37 MB base64 data-URI
+// -> 1.37 MB ciphertext
+// -> 2.75 MB of hex on the wire      (+ hex for the JSON escaping around it)
+// Forms that post several pictures at once (room image + facility + banner)
+// tripled that again, and nginx answered 413 before the request ever reached
+// Express. Bump the limit so the API is not the bottleneck any more.
+//
+// NOTE: the reverse proxy is the other half of this fix — nginx still caps the
+// body at `client_max_body_size` (1 MB by default) and will 413 first. It needs
+//     client_max_body_size 50m;
+// inside both the `server {}` block for hms-apinode.anyaman.id and any
+// `location /` that proxies to it. See docs/413-payload-limit.md.
+const BODY_LIMIT = process.env.MAX_BODY_SIZE || '50mb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
+app.use(express.text({ limit: BODY_LIMIT, type: 'text/plain' }));
 
 // 2b. Static files — Laravel storage/app/public parity (/storage/{path}).
 // Must resolve to the SAME root the upload helpers write into, otherwise
@@ -220,6 +240,10 @@ mountLegacyCmsAlias(firebaseRoutes);
 // PDF Generation
 app.use('/api/pdf', pdfRoutes);
 app.use('/cms/pdf', pdfRoutes);
+
+// Initial Setup — onboarding a newly joined property (menuId 1200)
+app.use('/api', initialSetupRoutes);
+app.use('/cms', initialSetupRoutes);
 
 // pg-admin — database UI (dev only, protect with PG_ADMIN_TOKEN in prod)
 app.use('/pg-admin', pgAdminRoutes);

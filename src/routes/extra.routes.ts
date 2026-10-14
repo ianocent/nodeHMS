@@ -1,18 +1,18 @@
+import { Request, Response, Router } from 'express';
 import { prisma } from '../config/prisma';
-﻿import { Request, Response, Router } from 'express';
 import { ApprovalMatrixController } from '../controllers/approval-matrix.controller';
 import { AuthController } from '../controllers/auth.controller';
 import { GenericController } from '../controllers/generic.controller';
-import { SystemController } from '../controllers/system.controller';
 import { RoomController } from '../controllers/room.controller';
 import { StaahController } from '../controllers/staah.controller';
+import { SystemController } from '../controllers/system.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { getPermissionFlags, requirePermission } from '../middleware/permission.middleware';
 import { moneyFormat } from '../utils/cmsConfig';
-import { TABLES } from '../utils/tableMeta';
 import { STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 import { encrypt } from '../utils/encryption';
 import { badRequest, error, notFound, success } from '../utils/response';
+import { TABLES } from '../utils/tableMeta';
 
 function bigintToNumber(val: any): any {
     if (val instanceof Date) {
@@ -144,6 +144,53 @@ router.post('/message', authMiddleware, async (req, res) => {
     error(res, 'Failed to create', 500);
   }
 });
+// Toggle the MSG flag straight from the folio table.
+// The MSG column is only an indicator in Laravel (`message_bool` =
+// "has at least one open message"), but the icon has to be clickable for
+// front desk to leave a note without leaving the screen. Flipping it opens the
+// newest open message, or creates one when the folio has none, so the list
+// column and the Message tab always agree.
+router.post('/message/toggle', authMiddleware, async (req, res) => {
+  try {
+    const body: any = req.body ?? {};
+    const folioIdRaw = body.folio_id ?? req.query.folio_id ?? req.query.data;
+    if (!folioIdRaw) { badRequest(res, 'The folio id field is required.'); return; }
+    const folioId = BigInt(String(folioIdRaw));
+
+    const open = await prisma.messages.findFirst({
+      where: { folio_id: folioId, is_open: true, deleted_at: null },
+      orderBy: { date: 'desc' },
+    });
+
+    const propertyId = req.user?.lastProperty ?? null;
+    if (open) {
+      await prisma.messages.update({
+        where: { id: open.id },
+        data: { is_open: false, closed_by: req.user?.id ? BigInt(req.user.id) : null, updated_at: new Date() },
+      });
+      return success(res, { folio_id: Number(folioId), message_bool: false, message_id: Number(open.id), created: false }, 'Message closed');
+    }
+
+    const record = await prisma.messages.create({
+      data: {
+        property_id: propertyId ?? 0n,
+        folio_id: folioId,
+        message: String(body.message ?? body.from_name ?? 'Message'),
+        from_name: String(body.from_name ?? req.user?.name ?? 'Front Desk'),
+        is_open: true,
+        date: new Date(),
+        status: 1,
+        created_at: new Date(),
+        updated_at: new Date(),
+        created_by: req.user?.id ? BigInt(req.user.id) : null,
+      },
+    });
+    success(res, { folio_id: Number(folioId), message_bool: true, message_id: Number(record.id), created: true }, 'Message added');
+  } catch (err: any) {
+    console.error('Message toggle error:', err);
+    error(res, 'Failed to toggle message', 500);
+  }
+});
 router.get('/message/create', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.createForm(req, res); });
 router.get('/message/:id/update', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.editForm(req, res); });
 router.get('/message/:id/edit', authMiddleware, (req, res) => { req.params.model = 'messages'; generic.editForm(req, res); });
@@ -180,9 +227,7 @@ router.put('/allotment/room/:id', authMiddleware, (req, res) => { req.params.mod
 router.delete('/allotment/room/:id', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.destroy(req, res); });
 router.get('/allotment-room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.list(req, res); });
 
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// Phase 4.9 â€” Remaining Modules
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Phase 4.9 Remaining Modules
 
 //  Allotment 
 router.get('/allotment', authMiddleware, requirePermission(80, 'view'), (req, res) => { req.params.model = 'allotment'; generic.list(req, res); });
@@ -485,9 +530,11 @@ router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async 
     const statusLabel = (code: number) => STATUS_RESERVATION_MAP[code] ?? String(code);
 
     // Helper: lastReservation (is_posting 0, date asc first)
+    // Laravel Folio::lastReservation() = reservation()->where(is_posting,0)->orderBy(date,asc)->first(),
+    // falling back to reservation()->orderBy(date,desc)->first() (the LATEST). resvs arrive date-asc.
     const lastReservation = (resvs: any[]) => {
       const postingZero = resvs.filter(r => r.is_posting === 0);
-      return postingZero.length ? postingZero[0] : (resvs.length ? resvs[0] : null);
+      return postingZero.length ? postingZero[0] : (resvs.length ? resvs[resvs.length - 1] : null);
     };
 
     // Default parent GIT
@@ -501,52 +548,80 @@ router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async 
         },
       });
 
-      let data: any[] = [];
-      const targetStatus = type === 'check_in' ? 3 : (type === 'check_out' || type === 'un_check_in' ? 0 : 3);
-      const filteredChildren = childFolios.filter(c => c.status_reservation === targetStatus);
+        let data: any[] = [];
+        // Laravel AssignRoomController::defaultParent() filters children by type:
+        //   check_in               → status_reservation = reservation (3)
+        //   check_out / un_check_in→ status_reservation = check_in (0)
+        //   all                    → status_reservation != cancel_reservation (2)
+        //   move_reservation / un_check_out → no status filter (every child)
+        let filteredChildren = childFolios;
+        if (type === 'check_in') {
+          filteredChildren = childFolios.filter(c => c.status_reservation === 3);
+        } else if (type === 'check_out' || type === 'un_check_in') {
+          filteredChildren = childFolios.filter(c => c.status_reservation === 0);
+        } else if (type === 'all') {
+          filteredChildren = childFolios.filter(c => c.status_reservation !== 2);
+        }
 
-      for (const child of filteredChildren) {
-        const lr = lastReservation(child.reservations);
-        if (!lr) continue;
-        data.push({
-          id: Number(child.id),
-          guest: `${child.guest_profiles?.first_name ?? ''} ${child.guest_profiles?.last_name ?? ''}`.trim(),
-          guest_profile_id: child.guest_profile_id ? Number(child.guest_profile_id) : null,
-          status: statusLabel(child.status_reservation ?? 3),
-          folio_number: child.folio_number,
-          room_type_id: lr.room_type_id ? Number(lr.room_type_id) : null,
-          room_type: lr.room_types?.name ?? '',
-          room_id: lr.room_id ? Number(lr.room_id) : null,
-          room: lr.rooms?.name ?? '',
-          rate_id: lr.rate_id ? Number(lr.rate_id) : null,
-          rate: lr.rates?.name ?? lr.rates?.code ?? '',
-          company_id: child.company_profile_id ? Number(child.company_profile_id) : null,
-          company: child.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? '',
-          check_in_date: child.check_in_date ? child.check_in_date.toISOString().slice(0, 10) : '',
-          check_out_date: child.check_out_date ? child.check_out_date.toISOString().slice(0, 10) : '',
-          adult: lr.adult ?? 0,
-          child: lr.child ?? 0,
-          remark: lr.remark ?? '',
-        });
-      }
+        for (const child of filteredChildren) {
+          const lr = lastReservation(child.reservations);
+          if (!lr) continue;
+          data.push({
+            id: Number(child.id),
+            guest: `${child.guest_profiles?.first_name ?? ''} ${child.guest_profiles?.last_name ?? ''}`.trim(),
+            guest_profile_id: child.guest_profile_id ? Number(child.guest_profile_id) : null,
+            status: statusLabel(child.status_reservation ?? 3),
+            folio_number: child.folio_number,
+            room_type_id: lr.room_type_id ? Number(lr.room_type_id) : null,
+            room_type: lr.room_types?.name ?? '',
+            room_id: lr.room_id ? Number(lr.room_id) : null,
+            room: lr.rooms?.name ?? '',
+            rate_id: lr.rate_id ? Number(lr.rate_id) : null,
+            rate: lr.rates?.name ?? lr.rates?.code ?? '',
+            company_id: child.company_profile_id ? Number(child.company_profile_id) : null,
+            company: child.company_profiles_folios_company_profile_idTocompany_profiles?.name ?? '',
+            check_in_date: child.check_in_date ? child.check_in_date.toISOString().slice(0, 10) : '',
+            check_out_date: child.check_out_date ? child.check_out_date.toISOString().slice(0, 10) : '',
+            adult: lr.adult ?? 0,
+            child: lr.child ?? 0,
+            remark: lr.remark ?? '',
+          });
+        }
 
-      const table = [
-        { label: 'Folio Number', key: 'folio_number', type: 'none', is_search: false },
-        { label: 'Check In Date', key: 'check_in_date', type: 'none', is_search: false },
-        { label: 'Check Out Date', key: 'check_out_date', type: 'none', is_search: false },
-        { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
-        { label: 'Room', key: 'room', type: 'none', is_search: false },
-        { label: 'Rate', key: 'rate', type: 'none', is_search: false },
-      ];
+        // type=all carries an extra Status column and renders the dates as date fields.
+        const isAll = type === 'all';
+        const table = [
+          { label: 'Folio Number', key: 'folio_number', type: 'none', is_search: false },
+          ...(isAll ? [{ label: 'Status', key: 'status', type: 'none', is_search: false }] : []),
+          { label: 'Check In Date', key: 'check_in_date', type: isAll ? 'date' : 'none', is_search: false },
+          { label: 'Check Out Date', key: 'check_out_date', type: isAll ? 'date' : 'none', is_search: false },
+          { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+          { label: 'Room', key: 'room', type: 'none', is_search: false },
+          { label: 'Rate', key: 'rate', type: 'none', is_search: false },
+        ];
 
       const page = Number(req.query.page || 1);
       const limit = 999;
-      return success(res, {
-        data,
-        code: 200,
-        message: 'Success',
+      // Laravel AssignRoomController::defaultParent() (AssignRoomController.php:442):
+      //     return response()->json([
+      //         'data' => $data,          // <- the ARRAY, at the top level
+      //         'code' => 200, 'message' => 'Success',
+      //         'table' => $table, 'pagging' => ..., 'permission' => ...,
+      //     ]);
+      //
+      // This branch used to hand `success()` a pre-built envelope, so the
+      // response carried `data: { data, code, message, table, pagging,
+      // permission }` — `data.data` was an OBJECT, not an array. Every consumer
+      // that reads `response.data.map(...)` then threw:
+      //   - MoveRsv.GetDataDetail() -> TypeError swallowed by its try/catch,
+      //     `dataform` never set, so the Master Folio Room tab rendered an EMPTY
+      //     sub-folio table even though the API had the rows;
+      //   - MoveRsv.GetDataTable()   -> same throw, paging never populated.
+      // Pass the array as the payload and let success() place table / paging /
+      // permission at the top level, which is the Laravel shape.
+      return success(res, data, 'Success', 200, {
         table,
-        pagging: { current_page: page, last_page: Math.ceil(data.length / limit), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
+        pagination: { current_page: page, last_page: Math.max(1, Math.ceil(data.length / limit)), per_page: limit, total: data.length, from: (page - 1) * limit + 1, to: Math.min(page * limit, data.length) },
         permission: { view: true, edit: true },
       });
     }

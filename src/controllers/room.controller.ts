@@ -19,7 +19,7 @@ import { badRequest, error, notFound, success, validationError } from '../utils/
 import { uniqueExtendError } from '../utils/uniqueExtend';
 import { applySearchField, dataSearch } from '../utils/search';
 import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
-import { TABLES, laravelPaging, listPermission } from '../utils/tableMeta';
+import { TABLES, laravelPaging, listPermission, STATUS_OPTIONS } from '../utils/tableMeta';
 import { syncRoomType } from '../services/bookingEngineContent.service';
 import { AuthController } from './auth.controller';
 
@@ -91,34 +91,43 @@ export class RoomController {
       const reservation = req.query.reservation as string;
       const propertyId = req.user?.lastProperty;
 
-      const where: any = { deleted_at: null };
+      const where: any = { deleted_at: null, is_physical: true };
       if (propertyId) where.property_id = propertyId;
       applyStatusScope(where, req, 'room_types');
       if (search) {
         where.name = { contains: search, mode: 'insensitive' };
       }
 
-      let table: any[];
-      if (reservation !== undefined) {
-        table = [
-          { label: 'Room Type', key: 'name', type: 'none', is_search: true },
-          { label: 'Rate', key: 'rate', type: 'none', is_search: false },
-          { label: 'Room Count', key: 'room_count', type: 'none', is_search: false },
-          { label: 'Specification', key: 'specification', type: 'none', is_search: false },
-          { label: 'Description', key: 'description', type: 'none', is_search: false },
-          { label: 'Action', key: 'action', type: 'action', is_search: false },
-        ];
-      } else {
-        table = [
-          { label: 'No', key: 'no', type: 'none', is_search: false },
-          { label: 'Room Type', key: 'name', type: 'none', is_search: true },
-          { label: 'Sort', key: 'sort', type: 'none', is_search: false },
-          { label: 'Rate', key: 'rate', type: 'none', is_search: false },
-          { label: 'Room Count', key: 'room_count', type: 'none', is_search: false },
-          { label: 'Status', key: 'status', type: 'badge', is_search: false },
-          { label: 'Action', key: 'action', type: 'action', is_search: false },
-        ];
-      }
+      // Laravel RoomType::formatTable() parity. The `No` column is deliberately
+      // bound to `sort` (a real numeric column) instead of the synthetic `no` -
+      // GlobalResources::toArray() then money-formats it.
+      const groupings = await prisma.types.findMany({
+        where: { group: 'room-type-grouping', status: 1, deleted_at: null },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      });
+      const baseTable: any[] = [
+        { label: 'No', key: 'sort', type: 'number', is_search: false },
+        { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
+        { label: 'Room Type', key: 'name', type: 'text', is_search: true },
+        { label: 'Rate', key: 'rate', type: 'number', is_search: true },
+        { label: 'Description', key: 'description', type: 'text', is_search: true },
+        { label: 'Specification', key: 'specification', type: 'text', is_search: true },
+        {
+          label: 'Room Type Grouping',
+          key: 'room_type_grouping',
+          type: 'select',
+          options: groupings.map((g: any) => ({ value: Number(g.id), label: g.name })),
+          is_search: true,
+        },
+      ];
+
+      // Laravel: when `reservation` is present the table drops no/status only -
+      // it keeps every other column. It does NOT swap in a bespoke layout.
+      const table: any[] =
+        reservation !== undefined
+          ? baseTable.filter((c) => c.key !== 'no' && c.key !== 'status')
+          : baseTable;
 
       applySearchField(where, req, table, 'room_types');
 
@@ -138,11 +147,29 @@ export class RoomController {
         prisma.room_types.count({ where }),
       ]);
 
-      const formatted = roomTypes.map((rt: any) => ({
+      // room_type_grouping lives in the Type pivot (App\Models\RoomType), exactly
+      // like Room::formatData() reads its floor/building tags.
+      const rtIds = roomTypes.map((rt: any) => rt.id);
+      const rtTags = rtIds.length
+        ? await prisma.model_has_types.findMany({
+            where: { model_id: { in: rtIds as any }, model_type: 'App\\Models\\RoomType' },
+            include: { types: { select: { id: true, name: true, group: true } } },
+          })
+        : [];
+      const groupingByRoomType = new Map<string, { value: number; label: string }>();
+      for (const link of rtTags as any[]) {
+        if (link.types?.group === 'room-type-grouping') {
+          groupingByRoomType.set(String(link.model_id), { value: Number(link.types.id), label: link.types.name });
+        }
+      }
+
+      const formatted = roomTypes.map((rt: any, i: number) => ({
         ...bigintToNumber(rt),
+        no: (page - 1) * limit + i + 1,
         room_count: rt.rooms?.length || 0,
+        room_type_grouping: groupingByRoomType.get(String(rt.id)) ?? [],
         rooms: undefined,
-        status: rt.status ?? 0, // raw 0/1 → success() converts to boolean for checkbox
+        status: rt.status ?? 0, // raw 0/1 -> success() converts to boolean for checkbox
       }));
 
       const permFlags = getPermissionFlags(req.user, MENU_ID);
@@ -717,7 +744,9 @@ export class RoomController {
       const propertyId = req.user?.lastProperty;
 
       const trash = req.query.trash === '1' || req.query.trash === 'true';
-      const where: any = { deleted_at: trash ? { not: null } : null };
+      // Laravel Room::boot() adds a global `hide_virtual` scope: is_physical = 1.
+      // Without it the grid lists virtual rooms that base reference never shows.
+      const where: any = { deleted_at: trash ? { not: null } : null, is_physical: true };
       if (propertyId) where.property_id = propertyId;
       applyStatusScope(where, req, 'rooms');
       if (search) {
@@ -731,35 +760,34 @@ export class RoomController {
         orderBy = safeOrderBy('rooms', sort, { sort: 'asc' });
       }
 
-      const table = group === 'room'
-        ? [
-            { label: 'Room Name', key: 'name', type: 'none', is_search: true },
-            { label: 'Room Type', key: 'room_type_name', type: 'none', is_search: false },
-            { label: 'Max Pax', key: 'max_pax', type: 'none', is_search: false },
-            { label: 'Total Bed', key: 'total_bed', type: 'none', is_search: false },
-            { label: 'Action', key: 'action', type: 'action', is_search: false },
-          ]
-        : [
-            // Laravel Room::formatTable() parity (room-setup)
-            { label: 'No', key: 'no', type: 'none', is_search: false },
-            { label: 'Status', key: 'status', type: 'checkbox', options: [{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }], is_search: true },
-            { label: 'Status Room', key: 'room_status_color', type: 'text', is_search: true },
-            { label: 'Maid Status', key: 'room_clean_status_color', type: 'text', is_search: true },
-            { label: 'Unit', key: 'name_html', type: 'text', is_html: true, is_search: true },
-            { label: 'Type', key: 'room_type_id', type: 'select', is_search: true },
-            { label: 'Max Pax', key: 'max_pax', type: 'text', is_search: true },
-            { label: 'Bed', key: 'total_bed', type: 'text', is_search: true },
-            { label: 'TV', key: 'with_tv', type: 'checkbox', is_search: true },
-            { label: 'Shower', key: 'with_shower', type: 'checkbox', is_search: true },
-            { label: 'Floor', key: 'floor', type: 'select', is_search: true },
-            { label: 'Building', key: 'building', type: 'select', is_search: true },
-            { label: 'Cleaning Time', key: 'cleaning_time', type: 'text', is_search: true },
-            { label: 'Linen Days', key: 'linen_days', type: 'text', is_search: true },
-            { label: 'Phone Ext', key: 'phone_ext', type: 'text', is_search: true },
-            { label: 'Interconnecting Room', key: 'room_id', type: 'select', is_search: true },
-            { label: 'Room Configuration', key: 'room_configuration', type: 'select_multiple', is_search: true },
-            { label: 'Description', key: 'description', type: 'text', is_search: true },
-          ];
+      const fullTable: any[] = [
+        // Laravel Room::formatTable() parity (room-setup)
+        { label: 'No', key: 'no', type: 'none', is_search: false },
+        { label: 'Status', key: 'status', type: 'checkbox', options: STATUS_OPTIONS, is_search: true },
+        { label: 'Status Room', key: 'room_status_color', type: 'text', is_search: true },
+        { label: 'Maid Status', key: 'room_clean_status_color', type: 'text', is_search: true },
+        { label: 'Unit', key: 'name_html', type: 'text', is_html: true, is_search: true },
+        { label: 'Type', key: 'room_type_id', type: 'select', is_search: true },
+        { label: 'Max Pax', key: 'max_pax', type: 'text', is_search: true },
+        { label: 'Bed', key: 'total_bed', type: 'text', is_search: true },
+        { label: 'TV', key: 'with_tv', type: 'checkbox', is_search: true },
+        { label: 'Shower', key: 'with_shower', type: 'checkbox', is_search: true },
+        { label: 'Floor', key: 'floor', type: 'select', is_search: true },
+        { label: 'Building', key: 'building', type: 'select', is_search: true },
+        { label: 'Cleaning Time', key: 'cleaning_time', type: 'text', is_search: true },
+        { label: 'Linen Days', key: 'linen_days', type: 'text', is_search: true },
+        { label: 'Phone Ext', key: 'phone_ext', type: 'text', is_search: true },
+        { label: 'Interconnecting Room', key: 'room_id', type: 'select', is_search: true },
+        { label: 'Room Configuration', key: 'room_configuration', type: 'select_multiple', is_search: true },
+        { label: 'Description', key: 'description', type: 'text', is_search: true },
+      ];
+
+      // Laravel RoomController@index: `group == 'room'` only drops the two colour
+      // columns from the same formatTable() - it does NOT swap in a bespoke layout.
+      const table: any[] =
+        group === 'room'
+          ? fullTable.filter((c) => c.key !== 'room_clean_status_color' && c.key !== 'room_status_color')
+          : fullTable;
 
       applySearchField(where, req, table, 'rooms');
 

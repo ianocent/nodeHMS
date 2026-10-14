@@ -152,7 +152,7 @@ async function assertRoomType(roomTypeId: bigint, propertyId: bigint): Promise<b
  * the facility presets and the icon names the portal can draw.
  *
  * Module-level on purpose. It used to be `private static async roomTypeMaster()`
- * called as `this.roomTypeMaster(req)`, which is undefined here: Express invokes
+ * called as `ContentRoomController.roomTypeMaster(req)`, which is undefined here: Express invokes
  * the handler as a bare function, so `this` is undefined in the compiled ES module
  * and every `/create` answered 500 "Failed to load room image" — the form could
  * never load, so the whole screen was unusable.

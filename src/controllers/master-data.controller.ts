@@ -1,7 +1,7 @@
 import { prisma } from '../config/prisma';
 ﻿import { Request, Response } from 'express';
 import { success, error, badRequest, notFound } from '../utils/response';
-import { TABLES, STATUS_OPTIONS, laravelPaging, listPermission } from '../utils/tableMeta';
+import { TABLES, STATUS_OPTIONS, laravelPaging, listPermission, NO_COL, STATUS_COL } from '../utils/tableMeta';
 import { moneyFormat, calculateCodePost } from '../utils/cmsConfig';
 import { dataSearch, applySearchField } from '../utils/search';
 import { activeWhere, applyStatusScope, currentPropertyId } from '../utils/querySafety';
@@ -339,7 +339,7 @@ export class MasterDataController {
       if (!result) { notFound(res, 'Code post not found'); return; }
       const r = bigintToNumber(result);
       const gl = r.code_gl_id != null ? await prisma.code_gls.findUnique({ where: { id: BigInt(r.code_gl_id) }, select: { id: true, name: true } }) : null;
-      const master = await this.codePostMaster();
+      const master = await MasterDataController.codePostMaster();
       success(res, formatCodePostData({ ...r, code_gls: gl }), 'Success', 200, { master });
     } catch (err: any) {
       console.error('CodePost show error:', err);
@@ -357,7 +357,7 @@ export class MasterDataController {
       if (!result) { notFound(res, 'Code post not found'); return; }
       const r = bigintToNumber(result);
       const gl = r.code_gl_id != null ? await prisma.code_gls.findUnique({ where: { id: BigInt(r.code_gl_id) }, select: { id: true, name: true } }) : null;
-      const master = await this.codePostMaster();
+      const master = await MasterDataController.codePostMaster();
       success(res, formatCodePostData({ ...r, code_gls: gl }), 'Success', 200, { master });
     } catch (err: any) {
       console.error('CodePost edit error:', err);
@@ -437,7 +437,7 @@ export class MasterDataController {
 
   static async codePostCreateForm(req: Request, res: Response): Promise<void> {
     try {
-      const master = await this.codePostMaster();
+      const master = await MasterDataController.codePostMaster();
       success(res, { status: 1 }, 'Success', 200, { master });
     } catch (err: any) {
       console.error('CodePost create form error:', err);
@@ -677,7 +677,7 @@ export class MasterDataController {
       });
       if (!result) { notFound(res, 'Code item not found'); return; }
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const master = await this.codeItemMaster(pid);
+      const master = await MasterDataController.codeItemMaster(pid);
       success(res, formatCodeItemData(bigintToNumber(result)), 'Success', 200, { master });
     } catch (err: any) {
       console.error('CodeItem show error:', err);
@@ -694,7 +694,7 @@ export class MasterDataController {
       });
       if (!result) { notFound(res, 'Code item not found'); return; }
       const pid = BigInt(req.user?.lastProperty ?? 0);
-      const master = await this.codeItemMaster(pid);
+      const master = await MasterDataController.codeItemMaster(pid);
       success(res, formatCodeItemData(bigintToNumber(result)), 'Success', 200, { master });
     } catch (err: any) {
       console.error('CodeItem edit error:', err);
@@ -1171,7 +1171,17 @@ export class MasterDataController {
         prisma.countries.findMany({ where, orderBy: { name: 'asc' }, skip: (page - 1) * limit, take: limit }),
         prisma.countries.count({ where }),
       ]);
-      success(res, bigintToNumber(data), 'Success', 200, {
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({ ...r, no: (page - 1) * limit + i + 1 }));
+      // Laravel Country::formatTable() parity - without `table` the grid has no
+      // columns to render and the screen comes up empty.
+      const table = [
+        NO_COL(),
+        STATUS_COL(),
+        { label: 'Country', key: 'name', type: 'text', is_search: true },
+      ];
+      success(res, rows, 'Success', 200, {
+        table,
+        search_data: dataSearch(req, table) as any,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });
     } catch (err: any) { error(res, 'Failed', 500); }
@@ -1194,11 +1204,36 @@ export class MasterDataController {
       const where: any = {};
       applyStatusScope(where, req, 'cities');
       if (search) where.name = { contains: search, mode: 'insensitive' };
-      const [data, total] = await Promise.all([
+      const [data, total, countries] = await Promise.all([
         prisma.cities.findMany({ where, orderBy: { name: 'asc' }, skip: (page - 1) * limit, take: limit, include: { countries: { select: { id: true, name: true } } } }),
         prisma.cities.count({ where }),
+        prisma.countries.findMany({ where: { status: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
       ]);
-      success(res, bigintToNumber(data), 'Success', 200, { pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) } });
+      const rows = bigintToNumber(data).map((r: any, i: number) => ({
+        ...r,
+        no: (page - 1) * limit + i + 1,
+        // Laravel City::formatData() - the grid renders the label, not the raw id
+        country_id: r.country_id != null ? { value: Number(r.country_id), label: r.countries?.name ?? '' } : [],
+      }));
+      // Laravel City::formatTable() parity - the country column is a select whose
+      // options are every country, exactly like the reference screen.
+      const table = [
+        NO_COL(),
+        STATUS_COL(),
+        { label: 'City', key: 'name', type: 'text', is_search: true },
+        {
+          label: 'Country',
+          key: 'country_id',
+          type: 'select',
+          options: countries.map((c: any) => ({ label: c.name, value: Number(c.id) })),
+          is_search: true,
+        },
+      ];
+      success(res, rows, 'Success', 200, {
+        table,
+        search_data: dataSearch(req, table) as any,
+        pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
+      });
     } catch (err: any) { error(res, 'Failed', 500); }
   }
   static async cityShow(req: Request, res: Response): Promise<void> { try { const id = idParam(req.params.id); const d = await prisma.cities.findUnique({ where: { id }, include: { countries: { select: { id: true, name: true } } } }); if (!d) { notFound(res); return; } success(res, bigintToNumber(d), 'Success'); } catch (err: any) { error(res, 'Failed', 500); } }

@@ -2113,7 +2113,9 @@ prisma.types.findMany({
   static async rateRateIndex(req: Request, res: Response): Promise<void> {
     try {
       req.params.rateId = String(req.query.rate_id ?? req.query.id ?? '');
-      await this.rateGrid(req, res);
+      // Not `this.rateGrid(...)`: routes hold a bare reference to
+      // RateController.rateRateIndex, so Express calls it with `this === undefined`.
+      await RateController.rateGrid(req, res);
     } catch (err: any) {
       error(res, 'Failed to fetch rate rate grid', 500);
     }
@@ -2261,7 +2263,7 @@ prisma.types.findMany({
   }
 
   static async rateRateUpdate(req: Request, res: Response): Promise<void> {
-    await this.rateGridStore(req, res);
+    await RateController.rateGridStore(req, res);
   }
 
   static async dayUseList(req: Request, res: Response): Promise<void> {
@@ -2906,10 +2908,15 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
           property_id: items[0].property_id,
           room_type_id: roomTypeId,
           date: new Date(dateStr),
-          one_adult: this.getValueRate(sum('one_adult'), link?.amount, link?.type),
-          two_adult: this.getValueRate(sum('two_adult'), link?.amount, link?.type),
-          extra_adult: this.getValueRate(sum('extra_adult'), link?.offsetExtraAdult, link?.type),
-          extra_child: this.getValueRate(sum('extra_child'), link?.offsetExtraChild, link?.type),
+          // Route handlers are registered as bare `RateController.rateLinkApply`
+          // references, so Express invokes this with `this === undefined`.
+          // `this.getValueRate(...)` threw a TypeError here, the catch turned it
+          // into a 500, and the linked prices were never written back to
+          // rate_rates - which is why saving a Rate Link appeared to do nothing.
+          one_adult: RateController.getValueRate(sum('one_adult'), link?.amount, link?.type),
+          two_adult: RateController.getValueRate(sum('two_adult'), link?.amount, link?.type),
+          extra_adult: RateController.getValueRate(sum('extra_adult'), link?.offsetExtraAdult, link?.type),
+          extra_child: RateController.getValueRate(sum('extra_child'), link?.offsetExtraChild, link?.type),
           min_night: sum('min_night'),
           max_night: sum('max_night'),
           stop_arrival: min('stop_arrival'),

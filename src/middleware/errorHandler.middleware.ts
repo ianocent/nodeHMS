@@ -36,6 +36,25 @@ export function errorHandler(
     return;
   }
 
+  // Body-parser rejects before any route runs. `entity.too.large` is the
+  // image-upload case: the payload carries a base64 data-URI inside a hex
+  // AES envelope, so it is roughly 3x the size of the picture the user picked.
+  // Say what to do instead of echoing body-parser's raw message.
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    error(
+      res,
+      'Upload is too large. The image travels as base64 inside an encrypted body, ' +
+        'so it counts for about 3x its real size — please use a smaller image ' +
+        '(under 2 MB).',
+      413,
+    );
+    return;
+  }
+  if (err.type === 'entity.parse.failed') {
+    error(res, 'Malformed request body', 400);
+    return;
+  }
+
   // Known HTTP errors
   const status = err.status || err.statusCode || 500;
   const message = err.message || 'Internal server error';

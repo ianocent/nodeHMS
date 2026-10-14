@@ -93,15 +93,25 @@ export function success(
 ): Response {
   // List rows: `status` raw int 0/1 -> boolean so TableView renders ✓/✗ icons.
   // (checkbox column; see table-edit/index.tsx render boolean -> checklist/cross)
-  if (Array.isArray(data) && meta?.table?.some((c: any) => c.key === 'status')) {
+  // Laravel casts every `checkbox` column to bool inside the model's formatData()
+  // (Yields::formatData() -> 'is_general' => (bool) $this->is_general). Only
+  // `status` used to be normalized here, so every other 0/1 flag leaked into the
+  // grid and rendered as a number instead of a tick/cross. Normalize whatever the
+  // table declares as a checkbox; cells shaped {value,label} pass through.
+  const flagCols = (meta?.table ?? []).filter((c: any) => c?.type === 'checkbox').map((c: any) => c.key);
+  if (Array.isArray(data) && flagCols.length) {
     data = data.map((row: any) => {
-      if (row && typeof row === 'object' && row.status !== undefined && (row.status === 0 || row.status === 1)) {
-        return {
-          ...row,
-          status: !!row.status,
-        };
+      if (!row || typeof row !== 'object') return row;
+      let touched = false;
+      const next: any = { ...row };
+      for (const key of flagCols) {
+        const v = row[key];
+        if (v === true || v === false || v === 0 || v === 1 || v === '0' || v === '1') {
+          next[key] = v === true || v === 1 || v === '1';
+          touched = true;
+        }
       }
-      return row;
+      return touched ? next : row;
     });
   }
   const pagging = meta?.pagination ? buildPagging(meta.pagination) : undefined;

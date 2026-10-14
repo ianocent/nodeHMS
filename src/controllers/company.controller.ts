@@ -610,7 +610,9 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       }
       const d = await prisma.companies.create({
         data: {
-          name, email, ip, contract_expired: contract_expired || null, join_date: join_date || null,
+          name, email, ip,
+          contract_expired: contract_expired ? new Date(contract_expired) : null,
+          join_date: join_date ? new Date(join_date) : null,
           npwp, no_tlp, pic_name,
           status: status === true || status === 'true' || status === 1 || status?.value === 1 ? 1 : 0,
           created_at: new Date(), updated_at: new Date(), created_by: req.user?.id,
@@ -635,8 +637,8 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       if (name !== undefined) data.name = name;
       if (email !== undefined) data.email = email;
       if (ip !== undefined) data.ip = ip;
-      if (contract_expired !== undefined) data.contract_expired = contract_expired || null;
-      if (join_date !== undefined) data.join_date = join_date || null;
+      if (contract_expired !== undefined) data.contract_expired = contract_expired ? new Date(contract_expired) : null;
+      if (join_date !== undefined) data.join_date = join_date ? new Date(join_date) : null;
       if (npwp !== undefined) data.npwp = npwp;
       if (no_tlp !== undefined) data.no_tlp = no_tlp;
       if (pic_name !== undefined) data.pic_name = pic_name;

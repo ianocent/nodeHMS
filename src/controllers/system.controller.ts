@@ -2523,9 +2523,23 @@ export class SystemController {
       const guests = guestIds.length > 0
         ? await getPrisma().guest_profiles.findMany({ where: { id: { in: guestIds } }, select: { id: true, account: true, first_name: true, last_name: true } })
         : [];
-      // @ts-ignore
+// @ts-ignore
       const guestMap = new Map(guests.map((g) => [g.id, g]));
 
+      // Folio::formatDataFrontDesk() -> message_bool =
+      //   $this->message()->where('is_open', 1)->count() > 0
+      // @ts-ignore
+      const pageFolioIds: bigint[] = data.map((f: any) => f.id);
+      // @ts-ignore
+      const openMessageFolios: any[] = pageFolioIds.length
+        // @ts-ignore
+        ? await getPrisma().messages.groupBy({
+            by: ['folio_id'],
+            where: { folio_id: { in: pageFolioIds }, is_open: true, deleted_at: null },
+            _count: { _all: true },
+          }).catch(() => [])
+        : [];
+const messageBoolByFolio = new Set(openMessageFolios.map((r: any) => String(r.folio_id)));
       // balances per folio (Laravel getBalance: ledger sum by type_amount)
       // @ts-ignore
       const folioIds = data.map((f) => f.id);
@@ -2573,7 +2587,7 @@ export class SystemController {
           name: folio.folio_number,
           res_date: folio.res_date ? fmtD(folio.res_date) : '',
           type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
-          message_bool: false,
+          message_bool: messageBoolByFolio.has(String(folio.id)),
           ign: !!folio.is_incognito,
           remark_bool: !!folio.remark,
           is_do_not_disturb: !!folio.is_do_not_disturb,

@@ -36,7 +36,7 @@ export function crudPermission(user: any, menuId: bigint): { add: boolean; edit:
   return { add: !!crud?.add, edit: !!crud?.edit, delete: !!crud?.delete };
 }
 
-const STATUS_COL = (): any => ({
+export const STATUS_COL = (): any => ({
   label: 'Status',
   key: 'status',
   type: 'checkbox',
@@ -44,7 +44,7 @@ const STATUS_COL = (): any => ({
   is_search: true,
 });
 
-const NO_COL = (): any => ({ label: 'No', key: 'no', type: 'none', is_search: false });
+export const NO_COL = (): any => ({ label: 'No', key: 'no', type: 'none', is_search: false });
 
 export const TABLES: Record<string, any[]> = {
   room: [

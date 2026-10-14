@@ -130,6 +130,18 @@ function resolveFolioId(req: Request): bigint | null {
   }
 }
 
+// Laravel validates against `$request->all()`, which merges the query string
+// into the body. The transaction action popups post their payload encrypted and
+// pass the folio on the URL - `/cms/transaction/{void,transfer,consolidate,split,
+// refund}?folio_id=<id>` - so reading `req.body` alone rejected every one of
+// them with "The folio id field is required." even though the id was right
+// there in the query string.
+function requestValue(req: Request, key: string): any {
+  const fromBody = (req.body as any)?.[key];
+  if (fromBody !== undefined && fromBody !== null && fromBody !== '') return fromBody;
+  return (req.query as any)?.[key];
+}
+
 // ── Folio settlement gate ────────────────────────────────────────────────
 // Single source of truth for "may this folio check out?". The previous check
 // was `[0, 1, -1].includes(Math.ceil(balance))`, which is a float comparison
@@ -803,14 +815,21 @@ const MENU_ID = 63;
 const TABLE_COLUMNS = [
   { key: 'res_date', label: 'Res Date', type: 'date', is_search: false },
   { key: 'type_reservation', label: 'Type', is_search: false },
-  { key: 'message_bool', label: 'MSG', type: 'boolean', is_search: false },
-  { key: 'ign', label: 'IGN', type: 'boolean', is_search: false },
+{ key: 'message_bool', label: 'MSG', type: 'boolean', action: 'message', is_search: false },
+      { key: 'ign', label: 'IGN', type: 'boolean', action: 'ign', is_search: false },
   { key: 'is_do_not_disturb', label: 'DND', type: 'boolean', is_search: false },
   // Shortened to match MSG / IGN / DND. It already sits next to them; the full
   // word made this flag group noticeably wider than the rest of the header.
   { key: 'remark_bool', label: 'RMK', type: 'boolean', is_search: false },
   { key: 'status_reservation_color', label: 'Status', is_html: true, is_search: false },
-  { key: 'folio_number', label: 'Folio', is_link: true, uri: '/reservation/fit/reservation', is_search: true, max_width: '130px' },
+  // 180px, not 130px. A GIT sub-folio number is the parent number plus "/NNN" —
+// `G100226090048/002` is 17 characters, which the 130px cap clipped to
+// `G100226090048/...` and hid the sub-folio index, which is the only part that
+// distinguishes one room in the block from another. At the `text-xs` grid font
+// 17 chars need roughly 125px of glyphs plus the 16px cell padding, so 130px was
+// always going to clip. TableView renders `max_width` as `max-width` +
+// `truncate` and now also exposes the full value as a hover tooltip.
+{ key: 'folio_number', label: 'Folio', is_link: true, uri: '/reservation/fit/reservation', is_search: true, max_width: '180px' },
   // Free-text columns: a long guest/company name otherwise stretched the
   // `table-auto` + `whitespace-nowrap` grid and pushed every later column
   // off-screen. Capped here and truncated client-side via TableView.
@@ -1516,7 +1535,7 @@ const [folios, total] = await Promise.all([
 
       const folioIds = folios.map((f: any) => f.id);
       const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? 0n);
-      const [batchTransactions, batchGuests, gitChildren] = await Promise.all([
+      const [batchTransactions, batchGuests, gitChildren, openMessageFolios] = await Promise.all([
         prisma.transactions.findMany({ where: { folio_id: { in: folioIds }, deleted_at: null }, select: { folio_id: true, type_amount: true, total: true, model_type: true } }),
         prisma.guest_profiles.findMany({
           where: { id: { in: folios.filter((f: any) => !((f.first_name || '').trim()) && f.guest_profile_id).map((f: any) => f.guest_profile_id) } },
@@ -1526,7 +1545,20 @@ const [folios, total] = await Promise.all([
           where: { parent: { in: folioIds }, deleted_at: null, status_reservation: { not: 2 } },
           select: { id: true, parent: true, status_reservation: true, transactions: { where: { model_type: 'App\\Models\\CompanyProfile' }, select: { type_amount: true, total: true } } },
         }),
+        // Folio::formatDataFrontDesk() -> message_bool =
+        //   $this->message()->where('is_open', 1)->count() > 0
+        // One grouped query for the whole page instead of a count per row.
+        folioIds.length
+          ? prisma.messages.groupBy({
+              by: ['folio_id'],
+              where: { folio_id: { in: folioIds }, is_open: true, deleted_at: null },
+              _count: { _all: true },
+            }).catch(() => [])
+          : [],
       ]);
+      const messageBoolByFolio = new Set(
+        (openMessageFolios as any[]).map((r) => String(r.folio_id)),
+      );
       const txnByFolio = new Map<string, { type_amount: string | null; total: any; model_type: string | null }[]>();
       for (const t of batchTransactions) {
         const key = String(t.folio_id);
@@ -1625,8 +1657,10 @@ const [folios, total] = await Promise.all([
           name: f.folio_number,
           res_date: f.res_date,
           type_reservation: f.type_reservation?.toUpperCase(),
-          message_bool: false,
-          ign: false,
+          message_bool: messageBoolByFolio.has(String(f.id)),
+          // Folio::isIncognito() -> `$this->is_incognito == 1`. It was pinned to
+          // false, so the IGN icon never lit up even for incognito folios.
+          ign: !!f.is_incognito,
           remark_bool: !!(f.remark || f.posting_instruction || f.check_out_instruction || f.check_in_instruction),
           is_do_not_disturb: !!f.is_do_not_disturb,
           status_reservation_color: statusReservationColor(f),
@@ -2681,7 +2715,8 @@ const [folios, total] = await Promise.all([
   // body: { idx: number[], folio_id } — move charges to another folio via void/new replicate pair.
   static async transactionTransfer(req: Request, res: Response): Promise<void> {
     try {
-      const { idx, folio_id } = req.body;
+      const { idx } = req.body;
+      const folio_id = requestValue(req, 'folio_id');
       if (!Array.isArray(idx) || idx.length === 0) { badRequest(res, 'The idx field is required.'); return; }
       if (!folio_id) { badRequest(res, 'The folio id field is required.'); return; }
 
@@ -2917,7 +2952,8 @@ const [folios, total] = await Promise.all([
   // body: { idx: number[], folio_id, code, remark? } — merge charges into one 'consolidate' transaction.
   static async transactionConsolidate(req: Request, res: Response): Promise<void> {
     try {
-      const { idx, folio_id, code, remark } = req.body;
+      const { idx, code, remark } = req.body;
+      const folio_id = requestValue(req, 'folio_id');
       if (!Array.isArray(idx) || idx.length === 0) { badRequest(res, 'The idx field is required.'); return; }
       if (!folio_id) { badRequest(res, 'The folio id field is required.'); return; }
       if (!code) { badRequest(res, 'The code field is required.'); return; }
@@ -3024,7 +3060,8 @@ const [folios, total] = await Promise.all([
   // body: { idx: number[], folio_id, amount, code, remark? } — split last selected transaction into two.
   static async transactionSplit(req: Request, res: Response): Promise<void> {
     try {
-      const { idx, folio_id, amount, code, remark } = req.body;
+      const { idx, amount, code, remark } = req.body;
+      const folio_id = requestValue(req, 'folio_id');
       if (!Array.isArray(idx) || idx.length === 0) { badRequest(res, 'The idx field is required.'); return; }
       if (!folio_id) { badRequest(res, 'The folio id field is required.'); return; }
       if (amount === undefined || amount === null || Number(amount) < 0) { badRequest(res, 'The amount must be at least 0'); return; }

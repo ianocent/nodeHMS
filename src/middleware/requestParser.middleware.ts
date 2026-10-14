@@ -127,13 +127,31 @@ function decryptAES(ciphered: string): string {
     throw new Error('Invalid AES format: expected iv_hex:ciphertext_hex');
   }
 
-  const iv = Buffer.from(parts[0], 'hex');
-  const ciphertext = Buffer.from(parts[1], 'hex');
+  const ivPart = parts[0];
+  const bodyPart = parts.slice(1).join(':');
+  const iv = Buffer.from(ivPart, isHex(ivPart) ? 'hex' : 'base64');
+  const ciphertext = Buffer.from(bodyPart, isHex(bodyPart) ? 'hex' : 'base64');
 
   const decipher = crypto.createDecipheriv(AES_METHOD, getAesPassword(), iv);
   decipher.setAutoPadding(true);
   const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return decrypted.toString('utf8');
+}
+
+/**
+ * A hex-encoded AES payload is two characters per byte. A 1 MB image is already
+ * 1.37 MB once base64-encoded by the browser, and the hex envelope doubled that
+ * to ~2.75 MB on the wire before any transport encoding — which is what pushed
+ * image uploads over the body limit. The browser now sends base64 here instead,
+ * halving the envelope.
+ *
+ * The Laravel reference and the booking engine still send hex, so both have to
+ * keep working. Hex is detected strictly (only [0-9a-f], even length, long
+ * enough to be a real ciphertext) and wins on a tie, so existing callers are
+ * byte-for-byte unaffected.
+ */
+function isHex(value: string): boolean {
+  return value.length >= 32 && value.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(value);
 }
 
 function encryptAES(message: string): string {

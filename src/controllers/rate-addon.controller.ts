@@ -962,6 +962,15 @@ export class RateAddonController {
         select: { id: true, name: true },
       });
       const codePostOptions = codePosts.map((c: any) => ({ value: Number(c.id), label: c.name }));
+      const codePostName = new Map(codePosts.map((c: any) => [Number(c.id), c.name]));
+
+      // Laravel Rate::formatData() parity: `code_post_id` is {value,label}.
+      // The row used to keep the raw bigint, so the select column rendered the
+      // numeric id instead of the postcode name.
+      for (const r of formatted) {
+        const cid = r.code_post_id != null ? Number(r.code_post_id) : null;
+        r.code_post_id = cid != null ? { value: cid, label: codePostName.get(cid) ?? '' } : null;
+      }
 
       const table = [
         { label: 'Code', key: 'code', type: 'none', is_search: true },
