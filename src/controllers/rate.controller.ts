@@ -6,6 +6,7 @@ import { syncRateConfigDelete, syncRateConfigUpsert } from '../services/bookingE
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
 import { applySearchField, dataSearch } from '../utils/search';
 import { activeWhere, applyStatusScope, safeOrderBy } from '../utils/querySafety';
+import { moneyFormat } from '../utils/cmsConfig';
 
 
 const STATUS_ACTIVE = 1;
@@ -1017,7 +1018,9 @@ prisma.types.findMany({
             for (const field of GRID_FIELDS) {
               const colKey = `${Number(rt.id)}_${field}`;
               const match = defaultRateRates.find((rr: any) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id);
-              row[colKey] = match ? (gridFieldType(field) === 'checkbox' ? !!Number((match as any)[field] ?? 0) : Number((match as any)[field] ?? 0)) : 0;
+              row[colKey] = match
+                ? (gridFieldType(field) === 'checkbox' ? !!Number((match as any)[field] ?? 0) : moneyFormat(Number((match as any)[field] ?? 0)))
+                : '-';
               if (match) row.id = Number(match.id);
             }
           }
@@ -1102,10 +1105,8 @@ prisma.types.findMany({
               (rr) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id
             );
             row[colKey] = match
-              ? (gridFieldType(field) === 'checkbox'
-                  ? !!Number((match as any)[field] ?? 0)
-                  : Number((match as any)[field] ?? 0))
-              : '-';
+                ? (gridFieldType(field) === 'checkbox' ? !!Number((match as any)[field] ?? 0) : moneyFormat(Number((match as any)[field] ?? 0)))
+                : '-';
             if (match) row.id = Number(match.id);
           }
         }
@@ -1800,10 +1801,8 @@ prisma.types.findMany({
               (rr) => formatDate(rr.date) === dateStr && rr.room_type_id === rt.id
             );
             row[colKey] = match
-              ? (gridFieldType(field) === 'checkbox'
-                  ? !!Number((match as any)[field] ?? 0)
-                  : Number((match as any)[field] ?? 0))
-              : '-';
+                ? (gridFieldType(field) === 'checkbox' ? !!Number((match as any)[field] ?? 0) : moneyFormat(Number((match as any)[field] ?? 0)))
+                : '-';
             if (match) row.id = Number(match.id);
           }
         }
@@ -2774,14 +2773,17 @@ private static async getRateLinkRows(
       rows.push({
         id: Number(rtId),
         room_type: rr.room_types?.name || null,
-        amount: link?.amount ?? 0,
+        // Laravel RateRelationController::link/applyLink formats every money
+        // column with moneyFormat(:141-149 / :502-510). Raw numbers rendered as
+        // bare digits with no thousand separator and no decimals in the grid.
+        amount: link?.amount ? moneyFormat(Number(link.amount)) : 0,
         type: link?.type
           ? { value: link.type, label: link.type === 'percentage' ? 'Percentage' : 'Amount' }
           : { value: 'percentage', label: 'Percentage' },
-        offsetAdult1: link?.offsetAdult1 ?? 0,
-        offsetAdult2: link?.offsetAdult2 ?? 0,
-        offsetExtraAdult: link?.offsetExtraAdult ?? 0,
-        offsetExtraChild: link?.offsetExtraChild ?? 0,
+        offsetAdult1: link?.offsetAdult1 ? moneyFormat(Number(link.offsetAdult1)) : 0,
+        offsetAdult2: link?.offsetAdult2 ? moneyFormat(Number(link.offsetAdult2)) : 0,
+        offsetExtraAdult: link?.offsetExtraAdult ? moneyFormat(Number(link.offsetExtraAdult)) : 0,
+        offsetExtraChild: link?.offsetExtraChild ? moneyFormat(Number(link.offsetExtraChild)) : 0,
         // Drives the "Applied to" multi-select so saved room types are shown again
         // instead of an always-empty box that implied the rule had been lost.
         applied_to: statusFilter || !link

@@ -1519,9 +1519,12 @@ success(res, formatted, 'Success', 200, {
           folioCompanyName ||
           null,
         company_idx: r.company_profile_id ? Number(r.company_profile_id) : folioCompanyId,
-        rate_price: Number(r.amount || 0),
-        total_extra_bed: Number(r.total_extra_bed || 0),
-        total: Number(r.total || 0),
+        // Laravel Reservation::formatData (:865-867) formats these three money
+        // columns with moneyFormat; raw numbers rendered without thousand
+        // separators/decimals in the FIT Room grid.
+        rate_price: moneyFormat(Number(r.amount || 0)),
+        total_extra_bed: moneyFormat(Number(r.total_extra_bed || 0)),
+        total: moneyFormat(Number(r.total || 0)),
         check_in_date: r.check_in_date,
         check_out_date: r.check_out_date,
         room_type_id: {

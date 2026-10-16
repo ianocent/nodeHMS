@@ -4,7 +4,7 @@ import { success, error, badRequest, notFound } from '../utils/response';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch, applySearchField } from '../utils/search';
 import { safeOrderBy } from '../utils/querySafety';
-import { getStatusLabel } from '../utils/cmsConfig';
+import { getStatusLabel, moneyFormat } from '../utils/cmsConfig';
 
 
 const MENU_ID_BAR = 87;
@@ -578,7 +578,9 @@ const [codePosts, businessDate] = await Promise.all([
       const data = roomTypes.map((rt: any) => ({
         id: Number(rt.id),
         name: rt.name,
-        min_rate: Number(rt.min_rate),
+        // Laravel BarController.php:429 formats min_rate with moneyFormat, so the
+        // grid shows thousand separators + decimals instead of a raw number.
+        min_rate: moneyFormat(rt.min_rate),
       }));
 
       const table = [

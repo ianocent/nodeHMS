@@ -10,7 +10,10 @@ describe('system balance parity', () => {
       'payment'
     );
 
-    expect(payload.data[0]).toMatchObject({ id: 7, name: 'Cash', debit: 10, credit: 0 });
+    // Detail rows are money-formatted for display (Laravel moneyFormat = en-US),
+    // so the drill-down no longer shows `247933.8843` beside a formatted Total.
+    expect(payload.data[0]).toMatchObject({ id: 7, name: 'Cash', debit: '10.00', credit: '0.00' });
+    expect(payload.data[1]).toMatchObject({ id: 8, name: 'Visa', debit: '0.00', credit: '25.00' });
     expect(payload.data[payload.data.length - 1]).toMatchObject({ id: 0, name: '<b>Total</b>', is_total: true });
     expect(payload.table).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'name' }),

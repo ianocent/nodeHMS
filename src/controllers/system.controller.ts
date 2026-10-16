@@ -298,9 +298,13 @@ export async function rebuildSystemBalanceRows(dateObj: Date, prevObj: Date, pro
     { date: dateObj, property_id: propertyBig, type: 'ledger', name: 'Guest Ledger Previous Day', debit: yesterdayMovementTotal > 0 ? 0 : yesterdayMovementTotal, credit: yesterdayMovementTotal > 0 ? yesterdayMovementTotal : 0 },
   ];
   if (ledgerRows.length > 0) await prisma.system_balances.createMany({ data: ledgerRows });
+}
 
-  // Back-office push (journal_lines + daily_summary + ThirdPartyLog + room_statistics)
-  // — Laravel SystemBalance::storeBalance tail (:440-491). Never throws.
+// storeBalance = rebuild + back-office push (night audit path)
+export async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
+  await rebuildSystemBalanceRows(dateObj, prevObj, propertyId);
+  // Back-office push mirrors Laravel SystemBalance::storeBalance tail (:440-491).
+  // Kept OUT of rebuild so restoreSystemBalance does not push (parity).
   try {
     await pushBackOfficeSummary(dateObj, propertyId);
   } catch (e: any) {
@@ -308,10 +312,6 @@ export async function rebuildSystemBalanceRows(dateObj: Date, prevObj: Date, pro
   }
 }
 
-// storeBalance = rebuild + push (night audit path)
-export async function storeSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
-  await rebuildSystemBalanceRows(dateObj, prevObj, propertyId);
-}
 
 // Laravel SystemBalance::restoreBalance (:898-1290) parity — delete + rebuild WITHOUT back-office push.
 export async function restoreSystemBalance(dateObj: Date, prevObj: Date, propertyId: number): Promise<void> {
@@ -415,7 +415,12 @@ async function buildBackOfficePayload(dateObj: Date, propertyId: number) {
     adult: lastResByFolio.get(Number(t.folio_id))?.adult ?? null,
     child: lastResByFolio.get(Number(t.folio_id))?.child ?? null,
     guest: guestByProfile.get(Number(t.folios?.guest_profile_id)) ?? '',
-    amount: Math.round(Math.abs(signedAmount(t)) * 100) / 100,
+    // Laravel SystemBalance::getBalance (:773 / :810) writes
+    // `round($items->type_amount == 'PLUS' ? $items->amount : $items->amount, 2)`
+    // - both ternary branches are identical, so the SIGN is kept and a MINUS
+    // transaction stays negative. Math.abs() here silently flipped every debit
+    // line positive, so back office saw the wrong direction on those rows.
+    amount: Math.round(Number(t.amount) * 100) / 100,
     entrytype: t.type_amount === 'PLUS' ? 'C' : 'D',
     debtorid: debtor?.uuid ?? null,
     debtor_acccode: debtor?.account ?? null,
@@ -809,7 +814,17 @@ export function formatSystemBalanceData(rows: any[], type: string, limit?: numbe
   const perPage = capped ? (limit as number) : Math.max(1, totalData);
   const lastPage = Math.max(1, Math.ceil(totalData / perPage));
   const current = Math.min(Math.max(1, page ?? 1), lastPage);
-  const visible = capped ? mapped.slice((current - 1) * perPage, current * perPage) : mapped;
+  const visibleRows = capped ? mapped.slice((current - 1) * perPage, current * perPage) : mapped;
+
+  // Detail rows went out raw, so the drill-down (Dashboard "View more" /
+  // System Balance) showed `247933.8843` next to a formatted Total row. Totals
+  // above are summed from the numeric values, so formatting the display copy
+  // here cannot change any amount.
+  const visible = visibleRows.map((row: any) => ({
+    ...row,
+    debit: moneyFormat(row.debit),
+    credit: moneyFormat(row.credit),
+  }));
 
   return {
     data: [...visible, total],

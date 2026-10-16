@@ -3,6 +3,8 @@ import { Request, Response } from 'express';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { badRequest, error, notFound, success } from '../utils/response';
 import { applySearchField, dataSearch } from '../utils/search';
+// Laravel Global::moneyFormat() parity: number_format(v, 2, ',', '.')
+import { moneyFormat } from '../utils/cmsConfig';
 
 const ACCOUNTING_STATUSES = [
   { value: 1, label: 'Processed' },
@@ -15,14 +17,7 @@ function getAccountingStatusLabel(statusId: number | null | undefined): { value:
   return { value: statusId ?? 0, label: s?.label ?? 'Unknown' };
 }
 
-// Laravel Global::moneyFormat() parity: number_format(v, 2, ',', '.')
-function moneyFormat(v: number): string {
-  const n = Number(v) || 0;
-  const sign = n < 0 ? '-' : '';
-  const abs = Math.abs(n);
-  const [int, dec] = abs.toFixed(2).split('.');
-  return `${sign}${int.replace(/\B(?=(\d{3})+(?!\d))/g, '.')},${dec}`;
-}
+
 
 // Laravel AccountingController per-type menuId (invoice 1039 .. refund 1044)
 const ACCOUNTING_MENU: Record<string, number> = {

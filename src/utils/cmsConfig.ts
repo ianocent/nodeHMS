@@ -142,13 +142,21 @@ export const DASHBOARDS: OptionItem[] = [
   { value: 'guest_requests', label: 'Guest Requests' },
 ];
 
+/**
+ * Laravel `moneyFormat()` = `number_format($value, 2, ',', '.')`
+ * (app/Helpers/Global.php:251-254) -> en-US grouping: 970000 -> "970,000.00".
+ *
+ * The node port shipped a de-DE variant ("970.000,00"), so every money column
+ * differed from the base reference - and the back-office `daily_summary` payload
+ * built from these values did too. Keep this in sync with Global.php.
+ */
 export function moneyFormat(value: number | string | null | undefined): string {
   const num = Number(value ?? 0);
-  if (Number.isNaN(num)) return '0,00';
+  if (Number.isNaN(num)) return '0.00';
   const fixed = num.toFixed(2);
   const [intPart, decPart] = fixed.split('.');
-  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-  return grouped + ',' + decPart;
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return grouped + '.' + decPart;
 }
 
 export interface CodePostCalcResult {

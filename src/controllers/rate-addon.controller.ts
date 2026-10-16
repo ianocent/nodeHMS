@@ -68,7 +68,7 @@ function barInclusiveTable(codeItems: any[] = []) {
         value: Number(c.id),
         label: c.name,
         description: c.description ?? '',
-        cost: c.cost != null ? String(c.cost) : ''
+        cost: c.cost != null ? moneyFormat(Number(c.cost)) : ''
       })),
       is_search: false,
       is_related: true,
@@ -140,7 +140,9 @@ export class RateAddonController {
         id: Number(i.id),
         property_id: Number(i.property_id),
         rate_id: Number(i.rate_id),
-        cost: Number(i.cost)
+        // Laravel RateInclusive::formatData() (:108) formats cost with
+        // moneyFormat, so the grid showed a raw number here.
+        cost: moneyFormat(Number(i.cost))
       }));
 
       // PHP RateInclusive::formatTable() parity
@@ -619,7 +621,8 @@ export class RateAddonController {
         frequency: { value: e.frequency, label: e.frequency },
         description: e.description,
         cost_on: { value: e.cost_on, label: e.cost_on },
-        cost: Number(e.cost),
+        // Laravel RateExtraBedInclusive::formatData() (:72) formats cost.
+        cost: moneyFormat(Number(e.cost)),
         created_at: e.created_at,
         status: Number(e.status ?? 0),
         sort: e.sort
@@ -867,7 +870,7 @@ export class RateAddonController {
         id: Number(r.rate_inclusives.id),
         property_id: Number(r.rate_inclusives.property_id),
         rate_id: Number(r.rate_inclusives.rate_id),
-        cost: Number(r.rate_inclusives.cost)
+        cost: moneyFormat(Number(r.rate_inclusives.cost))
       }));
 
       const table = [
