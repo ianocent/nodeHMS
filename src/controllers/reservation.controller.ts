@@ -141,6 +141,17 @@ function reservationBn(val: any): any {
   if (val instanceof Date) return val.toISOString();
   if (typeof val === 'bigint') return Number(val);
   if (Array.isArray(val)) return val.map(reservationBn);
+  // Prisma.Decimal columns (amount / total / service_charge / pb1 / tax3 and the
+  // extra-bed set) used to fall through to the generic object branch and come out
+  // as the Decimal.js internals: `{"s":1,"e":5,"d":[650000]}`. The Room grid then
+  // posted that object back as `total`, Number() of it is NaN, and every save of
+  // a night carried NaN into prisma.update() - which aborts the whole write with
+  // PrismaClientValidationError. This is why changing the Rate Code only failed
+  // "sometimes": it broke whenever the grid value was posted back without the
+  // price being re-fetched first. Mirrors normalizeJson()/bigintToNumber().
+  if (val && typeof val === 'object' && typeof (val as any).toNumber === 'function') {
+    return Number((val as any).toNumber());
+  }
   if (val && typeof val === 'object') { const o: any = {}; for (const [k, v] of Object.entries(val)) o[k] = reservationBn(v); return o; }
   return val;
 }
@@ -150,6 +161,27 @@ function fmtDateOnly(d: any): string | null {
   if (!d) return null;
   if (d instanceof Date) return d.toISOString().substring(0, 10);
   return String(d).substring(0, 10);
+}
+
+/**
+ * Money coming from the grids is a formatted string ("537.190,08" de-DE) or a
+ * plain number. `Number()` alone turns both of those into NaN, and a single NaN
+ * reaching prisma.update() aborts the ENTIRE save with a PrismaClientValidationError
+ * that reads like an unrelated "Unknown argument" error. Always returns a finite number.
+ */
+function toFiniteMoney(v: any, fallback: number): number {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : fallback;
+  if (v && typeof v === 'object') {
+    if (typeof v.toNumber === 'function') { const n = Number(v.toNumber()); return Number.isFinite(n) ? n : fallback; }
+    return fallback; // a stray serialised object is not a price
+  }
+  let s = String(v ?? '').trim();
+  if (s === '' || s === '-' || s.toLowerCase() === 'nan') return fallback;
+  // de-DE: "1.234.567,50"  ->  1234567.5   |   en-US: "1,234,567.50" -> 1234567.5
+  if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) s = s.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, '');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function dataSearchLocal(req: Request, table: any[]): Record<string, any> {
@@ -330,15 +362,41 @@ async function companyMarketSegments(companyId: bigint): Promise<Record<string, 
   return out;
 }
 
+// Laravel updateRoomParentGIT :3160-3183 reads the segments off the MASTER FOLIO's
+// own types pivot (`$folio->type->where('group', 'market-segment-1')`) and merges
+// them onto the request, then :3211 runs syncTypes() on every new p-block. Not the
+// company's pivot - the folio's.
+async function folioMarketSegments(folioId: bigint, client: any = prisma): Promise<Record<string, bigint>> {
+  const links = await client.model_has_types.findMany({
+    where: {
+      model_type: { contains: 'Folio' },
+      model_id: folioId,
+      types: { group: { in: ['market-segment-1', 'market-segment-2', 'market-segment-3', 'market-segment-4', 'source'] } },
+    },
+    include: { types: { select: { id: true, group: true } } },
+  });
+  const out: Record<string, bigint> = {};
+  for (const l of links) {
+    const g = l.types?.group;
+    if (!g) continue;
+    const key = g === 'source' ? 'source' : g.replace(/-/g, '_');
+    if (!(key in out)) out[key] = BigInt(l.type_id);
+  }
+  return out;
+}
+
 // Body values win (the FE pre-fills them from the company); the pivot is the
 // fallback so an empty/missing field still resolves to the company's segment.
-async function resolveMarketSegments(body: any, companyId: bigint | null): Promise<Record<string, bigint | null>> {
+// `preferCompany`: company was just changed, so the posted segments are the OLD
+// company's carried-over values - the new company's own segments must win.
+async function resolveMarketSegments(body: any, companyId: bigint | null, preferCompany = false): Promise<Record<string, bigint | null>> {
   const fromCompany: Record<string, bigint> = companyId
     ? await companyMarketSegments(companyId).catch((): Record<string, bigint> => ({}))
     : {};
   const pick = (key: string): bigint | null => {
     const raw = body?.[key];
     const v = raw && typeof raw === 'object' ? (raw as any).value : raw;
+    if (preferCompany && fromCompany[key] != null) return fromCompany[key];
     if (v === undefined || v === null || v === '' || String(v) === '0') {
       return fromCompany[key] ?? null;
     }
@@ -368,6 +426,9 @@ async function syncTypesPivot(
   modelType: 'App\\Models\\Folio' | 'App\\Models\\Reservation',
   modelId: bigint,
   segments: Record<string, bigint | null>,
+  // Optional transaction client so callers that already hold one keep the pivot
+  // writes inside the same atomic block instead of escaping on a second connection.
+  client: any = prisma,
 ): Promise<void> {
   for (const [key, typeId] of Object.entries(segments)) {
     if (!typeId) continue;
@@ -376,26 +437,30 @@ async function syncTypesPivot(
     // the detail form reads source off this pivot, so omitting it left the
     // field permanently blank after a create.
     const group = key.replace(/_/g, '-');
-    const existing = await prisma.model_has_types.findFirst({
+    const existing = await client.model_has_types.findFirst({
       where: { model_type: modelType, model_id: modelId, types: { group } },
     });
     if (existing) {
       if (BigInt(existing.type_id) !== typeId) {
-        await prisma.model_has_types.updateMany({
+        await client.model_has_types.updateMany({
           where: { type_id: existing.type_id, model_type: modelType, model_id: modelId },
           data: { type_id: typeId },
         });
       }
     } else {
-      await prisma.model_has_types.create({
+      await client.model_has_types.create({
         data: { type_id: typeId, model_type: modelType, model_id: modelId },
       });
     }
   }
 }
 
-async function syncReservationTypes(reservationId: bigint, segments: Record<string, bigint | null>): Promise<void> {
-  return syncTypesPivot('App\\Models\\Reservation', reservationId, segments);
+async function syncReservationTypes(
+  reservationId: bigint,
+  segments: Record<string, bigint | null>,
+  client: any = prisma,
+): Promise<void> {
+  return syncTypesPivot('App\\Models\\Reservation', reservationId, segments, client);
 }
 
 function rateTableColumns(codePostOptions: any[], withStatus: boolean): any[] {
@@ -566,18 +631,18 @@ async function getRevenueCharge(rows: any[]): Promise<any> {
 
 // Laravel Folio ledger rebuild parity (Folio.php:2690-2734).
 // Rebuild folio ledgers from CodeBilling x CompanyProfileBillingSetup.
-export async function rebuildFolioLedgers(folioId: bigint, propertyId: bigint, companyProfileId: bigint | null, guestProfileId: bigint | null): Promise<void> {
-  const codeBillings = await prisma.code_billings.findMany({
+export async function rebuildFolioLedgers(folioId: bigint, propertyId: bigint, companyProfileId: bigint | null, guestProfileId: bigint | null, client: any = prisma): Promise<void> {
+  const codeBillings = await client.code_billings.findMany({
     where: { deleted_at: null, status: STATUS_ACTIVE },
   });
   const setups = companyProfileId
-    ? await prisma.company_profile_billing_setups.findMany({
+    ? await client.company_profile_billing_setups.findMany({
         where: { deleted_at: null, company_profile_id: companyProfileId },
       })
     : [];
-  const setupByBilling = new Map<number, any>(setups.map((s) => [Number(s.code_billing_id), s]));
+  const setupByBilling = new Map<number, any>(setups.map((s: any) => [Number(s.code_billing_id), s]));
 
-  await prisma.ledgers.deleteMany({ where: { folio_id: Number(folioId) } });
+  await client.ledgers.deleteMany({ where: { folio_id: Number(folioId) } });
 
   let sort = 0;
   for (const cb of codeBillings) {
@@ -599,7 +664,7 @@ export async function rebuildFolioLedgers(folioId: bigint, propertyId: bigint, c
       profileableType = 'App\\Models\\GuestProfile';
       profileableId = guestProfileId ? Number(guestProfileId) : null;
     }
-    await prisma.ledgers.create({
+    await client.ledgers.create({
       data: {
         property_id: Number(propertyId),
         folio_id: Number(folioId),
@@ -1554,7 +1619,7 @@ success(res, formatted, 'Success', 200, {
         }
       }
 
-      const { rate_id, room_type_id, room_id, remark_room, total, market_segment_1, market_segment_2, market_segment_3, market_segment_4, apply_mode } = req.body;
+      const { rate_id, room_type_id, room_id, total, apply_mode } = req.body;
 
       // Laravel :299-308 — rate_id required on the generic path
       if (rate_id === undefined || rate_id === null || rate_id === '') {
@@ -1648,64 +1713,99 @@ success(res, formatted, 'Success', 200, {
         return;
       }
 
-      // ── Pricing recalc builder (Laravel :388-492) ──
+      // ── Prefetch everything the night loop needs, once ───────────────────
+      // buildItemUpdateData used to re-query the rate, both code posts, the
+      // property tax flag, the night count, the promo list and the name mirrors
+      // for EVERY night it touched. A 30-night "This Night and Following Nights"
+      // save fired ~450 sequential round-trips, which is what surfaced to the user
+      // as "Error saat save this night and the following nights".
+      const recalcAmounts = req.body.is_calculate === true || req.body.is_calculate === undefined;
+      const rateRow = await prisma.rates.findUnique({ where: { id: BigInt(rate_id) } });
+      const codePost = rateRow?.code_post_id
+        ? await prisma.code_posts.findUnique({ where: { id: BigInt(rateRow.code_post_id) } })
+        : null;
+      const codePostExtraBed = rateRow?.code_post_extra_bed_id
+        ? await prisma.code_posts.findUnique({ where: { id: BigInt(rateRow.code_post_extra_bed_id) } })
+        : null;
+      // Laravel CodePost::calculate: property.is_tax=1 => inclusive (input is gross)
+      const propRow: any = await prisma.properties.findUnique({ where: { id: folioRow.property_id }, select: { is_tax: true } });
+      const isTaxInc = Number(propRow?.is_tax) === 1 || propRow?.is_tax === true;
+
+      const pricing: Record<string, any> = {};
+      if (recalcAmounts && codePost) {
+        const flags = {
+          tax: codePost.tax ?? false,
+          tax_percentage: codePost.tax_percentage ? Number(codePost.tax_percentage) : 0,
+          local_tax: codePost.local_tax ?? false,
+          local_tax_percentage: codePost.local_tax_percentage ? Number(codePost.local_tax_percentage) : 0,
+          service_charge: codePost.service_charge ?? false,
+          service_charge_percentage: codePost.service_charge_percentage ? Number(codePost.service_charge_percentage) : 0,
+          service_charge_include_local_tax: codePost.service_charge_include_local_tax ?? false,
+          tax_include_local_tax: codePost.tax_include_local_tax ?? false,
+        };
+        const nights = await prisma.reservations.count({ where: { folio_id: folioRow.id, deleted_at: null } });
+        const promos: PromoLike[] = folioRow.promo_code
+          // @ts-ignore
+          ? await findPromosForNight(prisma, BigInt(rate_id), dayStart, nights, String(folioRow.promo_code))
+          : [];
+        // `total` must never reach Number() unguarded. It arrives from the Room grid
+        // and has been seen as a de-DE formatted string, as a plain number, and (before
+        // the reservationBn Decimal fix) as a serialised Decimal object. Number() of
+        // the latter two edge cases is NaN, NaN propagated through calculateCodePost
+        // into every money column, and Prisma rejected the whole update.
+        const baseAmount = toFiniteMoney(total, toFiniteMoney(existing.total, 0));
+        const amountNet = applyPromoDiscounts(baseAmount, promos);
+        const calc = calculateCodePost(flags as any, amountNet, isTaxInc);
+        Object.assign(pricing, {
+          amount: toFiniteMoney(calc.amount, baseAmount),
+          service_charge: toFiniteMoney(calc.service, 0),
+          pb1: toFiniteMoney(calc.pb1, 0),
+          tax3: toFiniteMoney(calc.tax3, 0),
+          total: toFiniteMoney(calc.total, baseAmount),
+        });
+        if (codePostExtraBed) {
+          const extraBedBase = toFiniteMoney(req.body.total_extra_bed, 0);
+          const calcExtra = calculateCodePost(flags as any, extraBedBase, isTaxInc);
+          Object.assign(pricing, {
+            amount_extra_bed: toFiniteMoney(calcExtra.amount, extraBedBase),
+            service_charge_extra_bed: toFiniteMoney(calcExtra.service, 0),
+            pb1_extra_bed: toFiniteMoney(calcExtra.pb1, 0),
+            tax3_extra_bed: toFiniteMoney(calcExtra.tax3, 0),
+            total_extra_bed: toFiniteMoney(calcExtra.total, extraBedBase),
+          });
+        }
+      } else if (recalcAmounts) {
+        // Laravel :388-390 sets data.total = floatval(request.total) before the code-post
+        // branch, so a rate without a code post still saves the price shown on the grid.
+        pricing.total = toFiniteMoney(total, toFiniteMoney(existing.total, 0));
+        const extraBedPosted = req.body.total_extra_bed;
+        if (extraBedPosted !== undefined && extraBedPosted !== null && extraBedPosted !== '') {
+          pricing.total_extra_bed = toFiniteMoney(extraBedPosted, toFiniteMoney((existing as any).total_extra_bed, 0));
+        }
+      }
+
+      // Company as it will land on every touched night.
+      const nextCompanyId = req.body.company_profile_id !== undefined
+        ? (req.body.company_profile_id ? BigInt(req.body.company_profile_id) : null)
+        : (reservation.company_profile_id ?? null);
+
+      // Reservation::boot() updating hook re-mirrors the *_name columns on every
+      // save, so a changed company / room type / room shows its new label in the
+      // FIT Room grid instead of the stale (often NULL) one.
       const buildItemUpdateData = async (target: any = reservation): Promise<any> => {
         const d: any = {
           updated_by: userId,
           updated_at: new Date(),
           room_type_id: newRoomTypeId ?? reservation.room_type_id,
-          company_profile_id: req.body.company_profile_id !== undefined ? (req.body.company_profile_id ? BigInt(req.body.company_profile_id) : null) : (target.company_profile_id ?? reservation.company_profile_id),
+          company_profile_id: req.body.company_profile_id !== undefined ? nextCompanyId : (target.company_profile_id ?? reservation.company_profile_id),
           // `checkRoomId ?? null` wiped the room on every sibling night whenever
           // the form omitted room_id (e.g. editing only Company). Keep the row's
           // own room when the request does not carry one - Laravel never reaches
           // that branch because its grid always posts room_id.
           room_id: req.body.room_id !== undefined ? checkRoomId : target.room_id ?? null,
           rate_id: BigInt(rate_id),
+          ...pricing,
         };
-        const recalcAmounts = req.body.is_calculate === true || req.body.is_calculate === undefined;
-        if (!recalcAmounts) return await withReservationNames(d);
-
-        const rate = await prisma.rates.findUnique({ where: { id: BigInt(rate_id) } });
-        const codePost = rate?.code_post_id ? await prisma.code_posts.findUnique({ where: { id: BigInt(rate.code_post_id) } }) : null;
-        const codePostExtraBed = rate?.code_post_extra_bed_id ? await prisma.code_posts.findUnique({ where: { id: BigInt(rate.code_post_extra_bed_id) } }) : null;
-
-        if (codePost) {
-          const flags = {
-            tax: codePost.tax ?? false,
-            tax_percentage: codePost.tax_percentage ? Number(codePost.tax_percentage) : 0,
-            local_tax: codePost.local_tax ?? false,
-            local_tax_percentage: codePost.local_tax_percentage ? Number(codePost.local_tax_percentage) : 0,
-            service_charge: codePost.service_charge ?? false,
-            service_charge_percentage: codePost.service_charge_percentage ? Number(codePost.service_charge_percentage) : 0,
-            service_charge_include_local_tax: codePost.service_charge_include_local_tax ?? false,
-            tax_include_local_tax: codePost.tax_include_local_tax ?? false,
-          };
-          const nights = await prisma.reservations.count({ where: { folio_id: folioRow.id, deleted_at: null } });
-          const promos: PromoLike[] = folioRow.promo_code
-            // @ts-ignore
-            ? await findPromosForNight(prisma, BigInt(rate_id), dayStart, nights, String(folioRow.promo_code))
-            : [];
-          const amountNet = applyPromoDiscounts(Number(total), promos);
-          // Laravel CodePost::calculate: property.is_tax=1 => inclusive (input is gross)
-          const propRow: any = await prisma.properties.findUnique({ where: { id: folioRow.property_id }, select: { is_tax: true } });
-          const isTaxInc = Number(propRow?.is_tax) === 1 || propRow?.is_tax === true;
-          const calc = calculateCodePost(flags as any, amountNet, isTaxInc);
-          Object.assign(d, { amount: calc.amount, service_charge: calc.service, pb1: calc.pb1, tax3: calc.tax3, total: calc.total });
-
-          if (codePostExtraBed) {
-            const calcExtra = calculateCodePost(flags as any, Number(req.body.total_extra_bed ?? 0), isTaxInc);
-            Object.assign(d, {
-              amount_extra_bed: calcExtra.amount,
-              service_charge_extra_bed: calcExtra.service,
-              pb1_extra_bed: calcExtra.pb1,
-              tax3_extra_bed: calcExtra.tax3,
-              total_extra_bed: calcExtra.total,
-            });
-          }
-        }
-        // Reservation::boot() updating hook re-mirrors the *_name columns on every
-        // save, so a changed company / room type / room shows its new label in
-        // the FIT Room grid instead of the stale (often NULL) one.
         return await withReservationNames(d);
       };
 
@@ -1718,51 +1818,6 @@ success(res, formatted, 'Success', 200, {
             await prisma.rooms.updateMany({ where: { id: checkRoomId }, data: { room_status: 1, maid_status: 0, updated_at: new Date() } });
           }
         }
-      }
-
-      const updateData = await buildItemUpdateData();
-      await prisma.reservations.update({ where: { id }, data: updateData });
-
-      const typeMap: Record<string, any> = {
-        remark_room: remark_room,
-        market_segment_1: market_segment_1,
-        market_segment_2: market_segment_2,
-        market_segment_3: market_segment_3,
-        market_segment_4: market_segment_4,
-        // Laravel syncTypes() walks every group in config('cms.type.group'),
-        // which includes 'source' - without it the Source select on the Folio
-        // Room grid never persisted.
-        source: (req.body as any).source,
-      };
-      // Type ids per group, resolved once for the whole loop.
-      const allTypes = await prisma.types.findMany({ select: { id: true, group: true } });
-      const typeIdsByGroup = new Map<string, bigint[]>();
-      for (const t of allTypes) {
-        if (!t.group) continue;
-        const arr = typeIdsByGroup.get(t.group) || [];
-        arr.push(t.id);
-        typeIdsByGroup.set(t.group, arr);
-      }
-      for (const [group, typeId] of Object.entries(typeMap)) {
-        if (typeId === undefined || typeId === null || typeId === '') continue;
-        const typeIdBig = BigInt(typeId);
-        // Drop any existing pivot row for this group BEFORE inserting. The old
-        // findFirst() filtered on the `types` relation, so a row whose type was
-        // soft-deleted (or whose model_type still carries legacy leading tabs)
-        // was invisible to it - the create then hit model_has_types_pkey and
-        // the whole Room-tab save failed with a 400. Matching on the type id
-        // set instead of the relation sees every variant.
-        const groupTypeIds = typeIdsByGroup.get(group) || [];
-        await prisma.model_has_types.deleteMany({
-          where: {
-            model_id: id,
-            model_type: { contains: 'Reservation' },
-            type_id: { in: [...groupTypeIds, typeIdBig] },
-          },
-        });
-        await prisma.model_has_types.create({
-          data: { type_id: typeIdBig, model_type: 'App\\Models\\Reservation', model_id: id },
-        });
       }
 
       // ── Cascade to sibling nights (Laravel :514-667) with stopper semantics ──
@@ -1781,36 +1836,112 @@ success(res, formatted, 'Success', 200, {
           orderBy: { date: 'asc' },
         });
       }
-      const stopper: number[] = [];
+
+      // Resolve which nights the stopper rule lets us touch BEFORE writing, so a
+      // collision on night 7 no longer leaves nights 1-6 already committed.
+      const oldRoomSigOf = (row: any) => `${Number(row.room_type_id)}-${Number(row.room_id)}`;
+      const candidates: any[] = [];
       for (const sib of siblings) {
-        const sig = `${Number(sib.room_type_id)}-${Number(sib.room_id)}`;
-        if (sig !== oldRoomSig) stopper.push(1);
-        if (stopper.length > 0) continue;
+        if (oldRoomSigOf(sib) !== oldRoomSig) break; // stopper: stop at the first different room
+        candidates.push(sib);
+      }
 
-        const sibStart = new Date(new Date(sib.date).toISOString().slice(0, 10) + 'T00:00:00.000Z');
-        const sibEnd = new Date(sibStart.getTime() + 86400000);
-        if (checkRoomId != null) {
-          const [holds, wos, overlaps] = await Promise.all([
-            prisma.room_availabilities.count({ where: { deleted_at: null, room_id: Number(checkRoomId), date: { gte: sibStart, lt: sibEnd } } }),
-            prisma.work_orders.count({ where: { deleted_at: null, status: 1, room_id: checkRoomId, date: { lte: sibStart }, OR: [{ end_date: null }, { end_date: { gt: sibEnd } }] } }),
-            prisma.reservations.count({
-              where: {
-                date: { gte: sibStart, lt: sibEnd },
-                folio_id: { not: folioRow.id },
-                deleted_at: null,
-                folios: { is: { status_reservation: { in: [0, 3] } } },
-                OR: [{ room_id: checkRoomId }, { room_id_next: checkRoomId }],
-              },
-            }),
-          ]);
-          if (holds > 0 || wos > 0 || overlaps > 0) {
-            badRequest(res, 'Room Already Used');
-            return;
-          }
+      if (checkRoomId != null && candidates.length > 0) {
+        const from = candidates[0].date;
+        const lastNight = candidates[candidates.length - 1].date;
+        const rangeEnd = new Date(new Date(lastNight).toISOString().slice(0, 10) + 'T00:00:00.000Z');
+        rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 1);
+        // One range query instead of three per night: any hit inside the span
+        // blocks the whole cascade, exactly as Laravel's per-night
+        // AvailableRoom() would have.
+        const [holds, wos, overlaps] = await Promise.all([
+          prisma.room_availabilities.count({
+            where: { deleted_at: null, room_id: Number(checkRoomId), date: { gte: new Date(from), lt: rangeEnd } },
+          }),
+          prisma.work_orders.count({
+            where: { deleted_at: null, status: 1, room_id: checkRoomId, date: { lte: lastNight }, OR: [{ end_date: null }, { end_date: { gt: rangeEnd } }] },
+          }),
+          prisma.reservations.count({
+            where: {
+              date: { gte: new Date(from), lt: rangeEnd },
+              folio_id: { not: folioRow.id },
+              deleted_at: null,
+              folios: { is: { status_reservation: { in: [0, 3] } } },
+              OR: [{ room_id: checkRoomId }, { room_id_next: checkRoomId }],
+            },
+          }),
+        ]);
+        if (holds > 0 || wos > 0 || overlaps > 0) {
+          badRequest(res, 'Room Already Used');
+          return;
         }
+      }
 
-        const sibUpdate = await buildItemUpdateData(sib);
-        await prisma.reservations.update({ where: { id: sib.id }, data: sibUpdate });
+      // Laravel opens DB::beginTransaction() around this whole block (:326) and
+      // rolls back on the "Room Already Used" branches. Without it a partial
+      // cascade stayed committed and the next save re-applied on top of it.
+      const payloads: Array<{ id: bigint; data: any }> = [
+        { id, data: await buildItemUpdateData() },
+      ];
+      for (const sib of candidates) {
+        payloads.push({ id: sib.id, data: await buildItemUpdateData(sib) });
+      }
+
+      await prisma.$transaction(
+        payloads.map((p) => prisma.reservations.update({ where: { id: p.id }, data: p.data })),
+        { timeout: 60000, maxWait: 15000 },
+      );
+
+      // ── Market Segment / Source must follow the change onto every night ──────
+      // QA: "This Night and Following Nights" only moved the edited row, so the
+      // other nights kept the old segment and source. Laravel has the same gap;
+      // sync the pivot for every night we just wrote.
+      //
+      // resolveMarketSegments() also fills any segment the form left blank from
+      // the Company's own market-segment pivot, so changing Company updates the
+      // segment + source instead of only the company id.
+      const companyChanged = req.body.company_profile_id !== undefined
+        && String(nextCompanyId ?? '') !== String(reservation.company_profile_id ?? '');
+      const segmentValues = await resolveMarketSegments(req.body, nextCompanyId, companyChanged);
+      const rawRemark = (req.body as any).remark_room;
+      const remarkRaw = rawRemark && typeof rawRemark === 'object' ? (rawRemark as any).value : rawRemark;
+      let remarkTag: bigint | null = null;
+      if (remarkRaw !== undefined && remarkRaw !== null && remarkRaw !== '' && String(remarkRaw) !== '0') {
+        try { remarkTag = BigInt(remarkRaw); } catch { remarkTag = null; }
+      }
+      const typePayload: Record<string, bigint | null> = { ...segmentValues, remark_room: remarkTag };
+
+      const allTypes = await prisma.types.findMany({ select: { id: true, group: true } });
+      const typeIdsByGroup = new Map<string, bigint[]>();
+      for (const t of allTypes) {
+        if (!t.group) continue;
+        const arr = typeIdsByGroup.get(t.group) || [];
+        arr.push(t.id);
+        typeIdsByGroup.set(t.group, arr);
+      }
+
+      // Drop any existing pivot row for the group BEFORE inserting. The old
+      // findFirst() filtered on the `types` relation, so a row whose type was
+      // soft-deleted (or whose model_type still carries legacy leading tabs)
+      // was invisible to it - the create then hit model_has_types_pkey and the
+      // whole Room-tab save failed with a 400. Matching on the type id set
+      // instead of the relation sees every variant.
+      for (const p of payloads) {
+        for (const [key, typeId] of Object.entries(typePayload)) {
+          if (typeId === undefined || typeId === null) continue;
+          const group = key === 'source' ? 'source' : key.replace(/_/g, '-');
+          const groupTypeIds = typeIdsByGroup.get(group) || [];
+          await prisma.model_has_types.deleteMany({
+            where: {
+              model_id: p.id,
+              model_type: { contains: 'Reservation' },
+              type_id: { in: [...groupTypeIds, BigInt(typeId)] },
+            },
+          });
+          await prisma.model_has_types.create({
+            data: { type_id: BigInt(typeId), model_type: 'App\\Models\\Reservation', model_id: p.id },
+          });
+        }
       }
 
       // Availability push per unposted room type (= Laravel :674-687)
@@ -5254,7 +5385,12 @@ res_date: new Date(),
       if (isTransaction && parent && parent.deleted_at === null && parent.type_reservation?.toLowerCase() === 'git' && Number(parent.parent) === 0) {
         data.unshift({ value: Number(parent.id), label: parent.folio_number });
       }
-      success(res, { data }, 'Success');
+      // Laravel getSubFolio() returns `['data' => $data, 'code' => 200, ...]`, i.e.
+      // the ARRAY sits directly under the top-level `data` key. Passing `{ data }`
+      // nested it one level deeper, so the three GIT Master Folio tabs read
+      // `response.data` as `{data: [...]}`, `.length` came back undefined and the
+      // sub-folio selector never rendered (guest / additional-item / transaction).
+      success(res, data, 'Success');
     } catch (err: any) { console.error('Subfolio list error:', err); error(res, 'Failed to list subfolios', 500); }
   }
 
@@ -5842,7 +5978,14 @@ const filtered = data.filter((d: any) => d.available > 0);
       if (!folio) { notFound(res, 'Folio not found'); return; }
       const children = await prisma.folios.findMany({
         where: { parent: folioId, status_reservation: { not: STATUS_RESERVATION.cancel_reservation.id } },
-        include: { reservations: true },
+        // Laravel only ever reads the first night of each child
+        // (`$getChildFolio->reservation->first()`), so pulling every night of every
+        // child was pure overhead on a 20-room block.
+        include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' }, take: 1 } },
+        // Laravel picks the replication template with `childFolio()->orderBy('id','desc')->first()`.
+        // The findMany had no orderBy, so `children[children.length - 1]` below picked an
+        // arbitrary block and the new p-block inherited the wrong rate / adult / child.
+        orderBy: { id: 'asc' },
       });
       const arr: any[] = [];
       let rateId: bigint | null = null;
@@ -5862,7 +6005,12 @@ const filtered = data.filter((d: any) => d.available > 0);
         folio.property_id ? onlyAvailableRoomIds(folio.property_id, ci, co) : Promise.resolve(new Set<number>()),
       ]);
 
-      const whereRT: any = { deleted_at: null, status: 1 };
+      // Must resolve to the SAME room-type set the room-git grid posted, otherwise a
+      // row the user typed a Qty into is missing here and the delta below falls back
+      // to `0 - currentQty`, silently REMOVING blocks instead of adding them.
+      // roomGit (:5825) scopes by is_physical + property + rate; mirror it exactly.
+      const whereRT: any = { deleted_at: null, status: 1, is_physical: true };
+      if (req.user?.lastProperty) whereRT.property_id = BigInt(req.user.lastProperty);
       if (rateId) whereRT.rate_rates = { some: { rate_id: rateId } };
       const roomTypes = await prisma.room_types.findMany({ where: whereRT, include: { rooms: { select: { id: true } } } });
 
@@ -5901,11 +6049,22 @@ const filtered = data.filter((d: any) => d.available > 0);
       }
 
       const businessDate = (await import('../controllers/auth.controller')).AuthController.getBusinessDate(folio.property_id);
-      const numberIndexRaw = children.length > 0 ? Math.max(...children.map((c: any) => {
-        const last = String(c.folio_number ?? '').split('/').pop();
-        const n = parseInt(last ?? '0', 10);
-        return Number.isNaN(n) ? 0 : n;
-      })) + 1 : 1;
+      // Laravel derives the suffix from `$folio->childFolio()->get()` = ALL children,
+      // cancelled ones included (:3185). Deriving it from `children` (which filters
+      // cancelled out) let a removed block's number get handed out again.
+      const allChildNumbers = await prisma.folios.findMany({
+        where: { parent: folioId },
+        select: { folio_number: true },
+      });
+      const numberIndexRaw = allChildNumbers.length > 0
+        ? Math.max(
+            ...allChildNumbers.map((c: any) => {
+              const last = String(c.folio_number ?? '').split('/').pop();
+              const n = parseInt(last ?? '0', 10);
+              return Number.isNaN(n) ? 0 : n;
+            }),
+          ) + 1
+        : 1;
       let numberIndex = Number.isFinite(numberIndexRaw) ? numberIndexRaw : 1;
 
       // Pricing context for the replicated nights. A p-block created through
@@ -5925,116 +6084,181 @@ const filtered = data.filter((d: any) => d.available > 0);
       const codePostRows = codePostIds.length ? await prisma.code_posts.findMany({ where: { id: { in: codePostIds } } }) : [];
       const codePostById = new Map<number, any>(codePostRows.map((c) => [Number(c.id), c]));
 
-      for (const value of arrTemp) {
-        if (value.qty > 0) {
-          for (let i = 0; i < value.qty; i++) {
-            let sourceChild: any;
-            if (!value.folio_id || value.folio_id.length === 0) {
-              sourceChild = children[children.length - 1];
-            } else {
-              sourceChild = children.find((c: any) => value.folio_id.includes(Number(c.id)));
-            }
-            if (!sourceChild) continue;
-            const { id: _srcId, folio_number: _srcNum, created_at: _ca, updated_at: _ua, ...copyFields } = sourceChild;
-            let newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
-            let exists = await prisma.folios.findFirst({ where: { folio_number: newFolioNumber } });
-            while (exists) {
-              numberIndex++;
-              newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
-              exists = await prisma.folios.findFirst({ where: { folio_number: newFolioNumber } });
-            }
-            const bd = await businessDate;
-            const replicated = await prisma.folios.create({
-              data: {
-                ...copyFields,
-                parent: folioId,
-                folio_number: newFolioNumber,
-                type_reservation: folio.type_reservation,
-                check_in_date: folio.check_in_date && folio.check_in_date < new Date(bd) ? new Date(bd) : folio.check_in_date,
-                check_out_date: folio.check_out_date,
-                status_reservation: STATUS_RESERVATION.reservation.id,
-                created_at: new Date(),
-                updated_at: new Date(),
-              },
-            });
-            numberIndex++;
-            const sourceReservation = sourceChild.reservations?.[0];
-            if (sourceReservation) {
-              const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / (1000 * 60 * 60 * 24)));
-              for (let n = 0; n < nights; n++) {
-                const nightDate = new Date(ci);
-                nightDate.setDate(nightDate.getDate() + n);
-                const pricing = await priceNight({
-                  // @ts-ignore
-                  prisma,
-                  rateId: sourceReservation.rate_id,
-                  roomTypeId: BigInt(value.room_type_id),
-                  night: nightDate,
-                  getNight: nights,
-                  adult: Number(sourceReservation.adult || 1),
-                  child: Number(sourceReservation.child || 0),
-                  quantity: 1,
-                  isTax,
-                  rateCodePost: sourceReservation.rate_id
-                    ? codePostById.get(Number(rateRows.find((r) => Number(r.id) === Number(sourceReservation.rate_id))?.code_post_id ?? -1)) ?? null
-                    : null,
-                  promos: [],
-                });
-                await prisma.reservations.create({
-                  data: await withReservationNames({
-                    property_id: sourceReservation.property_id,
-                    folio_id: replicated.id,
-                    company_profile_id: sourceReservation.company_profile_id,
-                    rate_id: sourceReservation.rate_id,
-                    eta: sourceReservation.eta,
-                    etd: sourceReservation.etd,
-                    room_type_id: BigInt(value.room_type_id),
-                    room_id: null,
-                    check_in_date: new Date(ci),
-                    check_out_date: new Date(co),
-                    adult: sourceReservation.adult,
-                    child: sourceReservation.child,
-                    add_bed: sourceReservation.add_bed,
-                    date: nightDate,
-                    status_reservation: STATUS_RESERVATION.reservation.id,
-                    status: STATUS_ACTIVE,
-                    night: nights,
-                    amount: pricing.amount,
-                    amountt: pricing.amount,
-                    total: pricing.total,
-                    service_charge: pricing.service_charge,
-                    pb1: pricing.pb1,
-                    tax3: pricing.tax3,
-                    data: JSON.stringify({
-                      rate_price: pricing.rate_price,
-                      service: pricing.service_charge,
+      // Market Segment + Source carried down from the master folio.
+      // Laravel :3160-3183 merges these onto the request and then calls
+      // `$folioReplicate->syncTypes($request)` on every new p-block (:3211). Without
+      // it a room added to an existing block had no segment at all.
+      const masterSegments = await folioMarketSegments(folioId).catch(() => ({}) as Record<string, bigint>);
+
+      // Laravel wraps the whole block in DB::beginTransaction() (:3097) and rolls
+      // back on the "not available" branch. Node had no transaction at all, so a
+      // throw halfway through left orphaned p-blios with no nights behind them.
+      const bd = await businessDate;
+      const nights = Math.max(1, Math.ceil((new Date(co).getTime() - new Date(ci).getTime()) / (1000 * 60 * 60 * 24)));
+      const newFolioIds: bigint[] = [];
+
+      await prisma.$transaction(
+        async (tx) => {
+          for (const value of arrTemp) {
+            if (value.qty > 0) {
+              for (let i = 0; i < value.qty; i++) {
+                let sourceChild: any;
+                if (!value.folio_id || value.folio_id.length === 0) {
+                  // children is id-asc, so the last entry is the highest id -
+                  // Laravel's `childFolio()->orderBy('id','desc')->first()`.
+                  sourceChild = children[children.length - 1];
+                } else {
+                  sourceChild = children.find((c: any) => value.folio_id.includes(Number(c.id)));
+                }
+                if (!sourceChild) continue;
+                // `reservations` is a RELATION, not a column. The destructure below
+                // left it inside copyFields, so prisma.folios.create() got
+                //   Argument `reservations`: Invalid value provided. Expected
+                //   reservationsUncheckedCreateNestedManyWithoutFoliosInput
+                // -> PrismaClientValidationError -> caught -> 500. Every "Add Room"
+                // on a GIT master folio died here before writing a single row.
+                // Laravel's replicate() strips relations for exactly this reason.
+                const {
+                  id: _srcId,
+                  folio_number: _srcNum,
+                  created_at: _ca,
+                  updated_at: _ua,
+                  reservations: _srcRes,
+                  ...copyFields
+                } = sourceChild;
+
+                let newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
+                let exists = await tx.folios.findFirst({ where: { folio_number: newFolioNumber } });
+                while (exists) {
+                  numberIndex++;
+                  newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
+                  exists = await tx.folios.findFirst({ where: { folio_number: newFolioNumber } });
+                }
+
+                const checkInDate =
+                  folio.check_in_date && folio.check_in_date < new Date(bd) ? new Date(bd) : folio.check_in_date;
+                let replicated: any;
+                // folio_number is @unique; the findFirst loop above is check-then-insert,
+                // so a concurrent Add Room can still collide. Retry on P2002 like
+                // createFolioWithRetry does instead of failing the whole request.
+                for (let attempt = 0; attempt < 5; attempt++) {
+                  try {
+                    replicated = await tx.folios.create({
+                      data: {
+                        ...copyFields,
+                        parent: folioId,
+                        folio_number: newFolioNumber,
+                        type_reservation: folio.type_reservation,
+                        check_in_date: checkInDate,
+                        check_out_date: folio.check_out_date,
+                        status_reservation: STATUS_RESERVATION.reservation.id,
+                        created_at: new Date(),
+                        updated_at: new Date(),
+                      },
+                    });
+                    break;
+                  } catch (e: any) {
+                    if (e?.code !== 'P2002' || attempt === 4) throw e;
+                    numberIndex++;
+                    newFolioNumber = `${folio.folio_number}/${String(numberIndex).padStart(3, '0')}`;
+                  }
+                }
+                if (!replicated) continue;
+                numberIndex++;
+                newFolioIds.push(replicated.id);
+
+                const sourceReservation = sourceChild.reservations?.[0];
+                if (!sourceReservation) continue;
+
+                for (let n = 0; n < nights; n++) {
+                  const nightDate = new Date(ci);
+                  nightDate.setDate(nightDate.getDate() + n);
+                  const pricing = await priceNight({
+                    // @ts-ignore
+                    prisma: tx,
+                    rateId: sourceReservation.rate_id,
+                    roomTypeId: BigInt(value.room_type_id),
+                    night: nightDate,
+                    getNight: nights,
+                    adult: Number(sourceReservation.adult || 1),
+                    child: Number(sourceReservation.child || 0),
+                    quantity: 1,
+                    isTax,
+                    rateCodePost: sourceReservation.rate_id
+                      ? codePostById.get(Number(rateRows.find((r) => Number(r.id) === Number(sourceReservation.rate_id))?.code_post_id ?? -1)) ?? null
+                      : null,
+                    promos: [],
+                  });
+                  const created = await tx.reservations.create({
+                    data: await withReservationNames({
+                      property_id: sourceReservation.property_id,
+                      folio_id: replicated.id,
+                      company_profile_id: sourceReservation.company_profile_id,
+                      rate_id: sourceReservation.rate_id,
+                      eta: sourceReservation.eta,
+                      etd: sourceReservation.etd,
+                      room_type_id: BigInt(value.room_type_id),
+                      room_id: null,
+                      check_in_date: new Date(ci),
+                      check_out_date: new Date(co),
+                      adult: sourceReservation.adult,
+                      child: sourceReservation.child,
+                      add_bed: sourceReservation.add_bed,
+                      date: nightDate,
+                      status_reservation: STATUS_RESERVATION.reservation.id,
+                      status: STATUS_ACTIVE,
+                      night: nights,
+                      amount: pricing.amount,
+                      amountt: pricing.amount,
+                      total: pricing.total,
+                      service_charge: pricing.service_charge,
                       pb1: pricing.pb1,
                       tax3: pricing.tax3,
-                      total: pricing.total,
+                      data: JSON.stringify({
+                        rate_price: pricing.rate_price,
+                        service: pricing.service_charge,
+                        pb1: pricing.pb1,
+                        tax3: pricing.tax3,
+                        total: pricing.total,
+                      }),
+                      created_by: req.user?.id,
                     }),
-                    created_by: req.user?.id,
-                  }),
+                  });
+                  await syncReservationTypes(created.id, masterSegments, tx);
+                }
+                await syncTypesPivot('App\\Models\\Folio', replicated.id, masterSegments, tx);
+                // Laravel saveReservation (:3235) rebuilds the sub-folio ledgers; without
+                // them a room added to an existing block had nowhere to post charges.
+                await rebuildFolioLedgers(
+                  replicated.id,
+                  BigInt(replicated.property_id),
+                  replicated.company_profile_id ?? null,
+                  replicated.guest_profile_id ?? null,
+                  tx,
+                );
+              }
+            } else if (value.qty < 0) {
+              // Newest block first, each cancelled once; checked-in/out blocks skipped.
+              const cancelCandidates = (value.folio_id.length > 0 ? children.filter((c: any) => value.folio_id.includes(Number(c.id))) : [])
+                .filter((c: any) => c.status_reservation !== STATUS_RESERVATION.check_in.id && c.status_reservation !== STATUS_RESERVATION.check_out.id)
+                .sort((a: any, b: any) => Number(b.id) - Number(a.id));
+              for (let i = 0; i < Math.abs(value.qty); i++) {
+                const cancelTarget = cancelCandidates[i];
+                if (!cancelTarget) break;
+                await tx.folios.update({
+                  where: { id: cancelTarget.id },
+                  data: {
+                    status_reservation: STATUS_RESERVATION.cancel_reservation.id,
+                    parent: 0,
+                    remark: `Deleted from Parent GIT => ${folio.folio_number}`,
+                  },
                 });
               }
             }
           }
-        } else if (value.qty < 0) {
-          for (let i = 0; i < Math.abs(value.qty); i++) {
-            const cancelTargets = value.folio_id.length > 0 ? children.filter((c: any) => value.folio_id.includes(Number(c.id))) : [];
-            const cancelTarget = cancelTargets[cancelTargets.length - 1];
-            if (!cancelTarget) continue;
-            if (cancelTarget.status_reservation === STATUS_RESERVATION.check_in.id || cancelTarget.status_reservation === STATUS_RESERVATION.check_out.id) continue;
-            await prisma.folios.update({
-              where: { id: cancelTarget.id },
-              data: {
-                status_reservation: STATUS_RESERVATION.cancel_reservation.id,
-                parent: 0,
-                remark: `Deleted from Parent GIT => ${folio.folio_number}`,
-              },
-            });
-          }
-        }
-      }
+        },
+        { timeout: 60000, maxWait: 15000 },
+      );
 
       // @ts-ignore
       await writeAudit(prisma, req, {
@@ -6049,11 +6273,15 @@ const filtered = data.filter((d: any) => d.available > 0);
           type_reservation: folio.type_reservation,
           deltas: arrTemp.map((v: any) => ({ room_type_id: v.room_type_id, qty: v.qty })),
           requested: reservationList.map((r: any) => ({ id: r.id, qty: r.qty })),
+          added_folios: newFolioIds.map((x) => Number(x)),
         },
       });
 
       res.json({ code: 200, message: 'Success', data: arrTemp });
-    } catch (err: any) { console.error('Reservation update room parent git error:', err); error(res, 'Failed to update room parent git', 500); }
+    } catch (err: any) {
+      console.error('Reservation update room parent git error:', err);
+      error(res, err?.message || 'Failed to update room parent git', 500);
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

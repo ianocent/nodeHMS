@@ -964,22 +964,32 @@ export class RateAddonController {
       const codePostOptions = codePosts.map((c: any) => ({ value: Number(c.id), label: c.name }));
       const codePostName = new Map(codePosts.map((c: any) => [Number(c.id), c.name]));
 
-      // Laravel Rate::formatData() parity: `code_post_id` is {value,label}.
-      // The row used to keep the raw bigint, so the select column rendered the
-      // numeric id instead of the postcode name.
+      // Laravel Rate::formatData() parity: both `code_post_id` and
+      // `code_post_extra_bed_id` are {value,label}. The row used to keep the raw
+      // bigint, so the select column rendered the numeric id instead of the
+      // postcode name.
       for (const r of formatted) {
         const cid = r.code_post_id != null ? Number(r.code_post_id) : null;
         r.code_post_id = cid != null ? { value: cid, label: codePostName.get(cid) ?? '' } : null;
+        const eid = r.code_post_extra_bed_id != null ? Number(r.code_post_extra_bed_id) : null;
+        r.code_post_extra_bed_id = eid != null ? { value: eid, label: codePostName.get(eid) ?? '' } : null;
       }
 
+      // QA: "Status dan Action di table ganti ke Post Code Extra Bed".
+      //  - Status was declared type:'badge', which the grid renderer has no branch
+      //    for, so it printed a bare 1/0.
+      //  - Action was a phantom column: `action` is never a row key and Rate rows
+      //    carry no `actions`, so the header showed with a permanently empty cell.
+      // Both are replaced by the Post Code Extra Bed column, which Laravel's
+      // Rate::formatTable() has and this grid was missing entirely.
       const table = [
         { label: 'Code', key: 'code', type: 'none', is_search: true },
         { label: 'Name', key: 'name', type: 'none', is_search: true },
+        { label: 'Description', key: 'description', type: 'none', is_search: true },
         { label: 'Start Date', key: 'start_date', type: 'none', is_search: false },
         { label: 'End Date', key: 'end_date', type: 'none', is_search: false },
         { label: 'Code Post', key: 'code_post_id', type: 'select', is_search: false, options: codePostOptions },
-        { label: 'Status', key: 'status', type: 'badge', is_search: false },
-        { label: 'Action', key: 'action', type: 'action', is_search: false },
+        { label: 'Post Code Extra Bed', key: 'code_post_extra_bed_id', type: 'select', is_search: false, options: codePostOptions },
       ];
 
       const permFlags = getPermissionFlags(req.user, 87);

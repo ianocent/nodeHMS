@@ -104,6 +104,13 @@ function getValueRate(value: number, rateAmount: number, type: string | null | u
   return rateAmount + value;
 }
 
+// Extra Adult / Extra Child are currency offsets. Laravel reuses `type` for them,
+// so a percentage rule turned a 20,000 extra-bed charge into a 20,000% uplift -
+// the "1% rule" QA reported prices that did not add up.
+function getFlatOffset(value: number, amount: number | null | undefined): number {
+  return Number(amount || 0) + Number(value || 0);
+}
+
 interface LinkedRule {
   roomTypeId: bigint;
   rateId: bigint;
@@ -195,8 +202,8 @@ async function applyLinkedRateCascade(
       const extraChild = pick('extra_child');
       data.one_adult = oneAdult !== undefined ? getValueRate(oneAdult, rule.amount, rule.type) : (existing?.one_adult ?? 0);
       data.two_adult = twoAdult !== undefined ? getValueRate(twoAdult, rule.amount, rule.type) : (existing?.two_adult ?? 0);
-      data.extra_adult = extraAdult !== undefined ? getValueRate(extraAdult, rule.offsetExtraAdult, rule.type) : (existing?.extra_adult ?? 0);
-      data.extra_child = extraChild !== undefined ? getValueRate(extraChild, rule.offsetExtraChild, rule.type) : (existing?.extra_child ?? 0);
+      data.extra_adult = extraAdult !== undefined ? getFlatOffset(extraAdult, rule.offsetExtraAdult) : (existing?.extra_adult ?? 0);
+      data.extra_child = extraChild !== undefined ? getFlatOffset(extraChild, rule.offsetExtraChild) : (existing?.extra_child ?? 0);
 
       await saveRateRate(
         { rate_id: rule.rateId, room_type_id: rule.roomTypeId, date },
@@ -2623,20 +2630,53 @@ const { name, description, image, status } = req.body;
     return Math.round((v + a) * 100) / 100;
   }
 
+  /**
+   * Extra Adult / Extra Child are currency offsets, never percentages - the grid
+   * labels them as plain amounts next to a "Type" select that only governs the
+   * base room amount. Reusing `type` for them made a saved 1% rule turn a
+   * 20,000 extra-bed charge into a 20,000% uplift.
+   */
+  private static getFlatOffset(value: number, amount: number | null | undefined): number {
+    const v = Number(value || 0);
+    return Math.round((v + Number(amount || 0)) * 100) / 100;
+  }
+
+  private static toListingMap(rows: any[]): Map<string, any> {
+    // rows arrive id-asc, so the last write per (room_type, status) wins = newest edit.
+    const map = new Map<string, any>();
+    for (const l of rows) {
+      if (l.room_type_id == null) continue;
+      map.set(`${l.room_type_id}|${l.status === '1' ? '1' : '0'}`, l);
+    }
+    return map;
+  }
+
 // Called as `RateController.getRateLinkRows(...)`, never `this.getRateLinkRows(...)`:
 // routes register `RateController.rateLinkListing` as a bare reference, so Express
 // invokes it with `this === undefined` and a `this.` lookup throws
 // `Cannot read properties of undefined (reading 'getRateLinkRows')`.
-private static async getRateLinkRows(rateId: bigint, statusFilter?: string, propertyId?: bigint | number | null): Promise<any[]> {
-    const [links, rll] = await Promise.all([
-      prisma.model_has_rates.findMany({ where: { model_id: rateId, model_type: 'App\\Models\\Rate' } }),
+private static async getRateLinkRows(
+    rateId: bigint,
+    statusFilter?: string,
+    propertyId?: bigint | number | null,
+    userId?: bigint | null,
+  ): Promise<any[]> {
+    const [links, allListings] = await Promise.all([
+      // Laravel link(): ->onlyInactive() (status 0 links). applyLink(): status = 1 OR temp_status = 1.
+      prisma.model_has_rates.findMany({
+        where: {
+          model_id: rateId,
+          model_type: 'App\\Models\\Rate',
+          ...(statusFilter === '1' ? { OR: [{ status: 1 }, { temp_status: 1 }] } : { status: 0 }),
+        },
+      }),
       prisma.rate_link_listings.findMany({
         where: {
           rate_id: rateId,
           deleted_at: null,
-          ...(statusFilter ? { status: statusFilter } : {}),
           ...(propertyId ? { property_id: propertyId } : {}),
         },
+        orderBy: { id: 'asc' },
       }),
     ]);
     const linkedRateIds = links.map(l => l.rate_id);
@@ -2656,9 +2696,82 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       if (!byRoomType.has(rr.room_type_id)) byRoomType.set(rr.room_type_id, rr);
     }
 
-    return [...byRoomType.entries()].map(([rtId, rr]: any) => {
-      const link = rll.find(l => l.room_type_id === rtId);
-      return {
+    // ── Draft selection parity with Laravel RateRelationController::link() ────
+    // A room type can hold two rows for the same rate: the applied one
+    // (status='1') and the draft being edited (status='0'). The old lookup was
+    // `rll.find(l => l.room_type_id === rtId)` over an unordered result, so once
+    // Apply had run the applied row kept winning. The grid then re-displayed the
+    // pre-edit amount (the change looked unsaved) and rateLinkApply priced off
+    // that same stale row, so a 1% rule left the room price untouched. The setup
+    // grid now reads the draft, and a room type holding only an applied row gets a
+    // fresh draft replicated from it exactly like Laravel, so the edit form always
+    // opens on the values actually in force.
+    const listingMap = RateController.toListingMap(allListings);
+
+    // Every room type the link currently has a rule for, with its name, so the
+    // "Applied to" multi-select can list them.
+    const listedRoomTypes = new Set<bigint>();
+    for (const l of allListings) {
+      if (l.room_type_id != null) listedRoomTypes.add(l.room_type_id);
+    }
+    for (const rtId of byRoomType.keys()) listedRoomTypes.add(rtId);
+
+    const nameRows = listedRoomTypes.size > 0
+      ? await prisma.room_types.findMany({
+          where: { id: { in: [...listedRoomTypes].map((x) => BigInt(x)) } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const roomTypeName = new Map<string, string>(nameRows.map((r: any) => [String(r.id), r.name]));
+    for (const [rtId, rr] of byRoomType.entries()) {
+      if (!roomTypeName.has(String(rtId))) roomTypeName.set(String(rtId), rr.room_types?.name ?? '');
+    }
+
+    // "Applied to" is a copy-this-rule-to-these-room-types control, so it should
+    // list the room types currently sharing the SAME rule values - not just the
+    // edited row. Showing only the row's own id made the box look empty/random on
+    // reopen and hid which room types the rule had really been copied onto.
+    const ruleKey = (l: any) =>
+      [l.amount ?? 0, l.type ?? '', l.offsetExtraAdult ?? 0, l.offsetExtraChild ?? 0].join('|');
+    const ruleGroups = new Map<string, Set<string>>();
+    for (const [, l] of listingMap.entries()) {
+      const k = ruleKey(l);
+      if (!ruleGroups.has(k)) ruleGroups.set(k, new Set());
+      ruleGroups.get(k)!.add(String(l.room_type_id));
+    }
+
+    const resolveListing = async (rtId: bigint): Promise<any | undefined> => {
+      if (statusFilter) return listingMap.get(`${rtId}|${statusFilter === '1' ? '1' : '0'}`);
+      const draft = listingMap.get(`${rtId}|0`);
+      if (draft) return draft;
+      const applied = listingMap.get(`${rtId}|1`);
+      if (!applied) return undefined;
+      const replica = await prisma.rate_link_listings.create({
+        data: {
+          rate_id: applied.rate_id,
+          room_type_id: applied.room_type_id,
+          property_id: applied.property_id ?? (propertyId != null ? BigInt(propertyId) : null),
+          amount: applied.amount,
+          type: applied.type,
+          offsetAdult1: applied.offsetAdult1,
+          offsetAdult2: applied.offsetAdult2,
+          offsetExtraAdult: applied.offsetExtraAdult,
+          offsetExtraChild: applied.offsetExtraChild,
+          sort: applied.sort ?? 0,
+          status: '0',
+          created_at: new Date(),
+          updated_at: new Date(),
+          created_by: userId ?? null,
+        },
+      });
+      listingMap.set(`${rtId}|0`, replica);
+      return replica;
+    };
+
+    const rows: any[] = [];
+    for (const [rtId, rr] of byRoomType.entries()) {
+      const link = await resolveListing(rtId);
+      rows.push({
         id: Number(rtId),
         room_type: rr.room_types?.name || null,
         amount: link?.amount ?? 0,
@@ -2669,8 +2782,17 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
         offsetAdult2: link?.offsetAdult2 ?? 0,
         offsetExtraAdult: link?.offsetExtraAdult ?? 0,
         offsetExtraChild: link?.offsetExtraChild ?? 0,
-      };
-    });
+        // Drives the "Applied to" multi-select so saved room types are shown again
+        // instead of an always-empty box that implied the rule had been lost.
+        applied_to: statusFilter || !link
+          ? []
+          : [...(ruleGroups.get(ruleKey(link)) ?? new Set<string>())]
+              .filter((x) => roomTypeName.has(x))
+              .map((x) => ({ value: Number(x), label: roomTypeName.get(x) ?? '' }))
+              .sort((a, b) => a.value - b.value),
+      });
+    }
+    return rows;
   }
 
   /** Column metadata for the Rate Link grids; `appliedTo` is empty when there are no rows. */
@@ -2706,7 +2828,7 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       const rateId = BigInt(rateIdRaw);
       const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
-      const rows = await RateController.getRateLinkRows(rateId, undefined, req.user?.lastProperty);
+      const rows = await RateController.getRateLinkRows(rateId, undefined, req.user?.lastProperty, req.user?.id);
       success(res, rows, 'Success', 200, {
         table: RateController.rateLinkTable(rows.map((r: any) => ({ value: r.id, label: r.room_type }))),
         permission,
@@ -2739,7 +2861,7 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       const rateId = BigInt(rateIdRaw);
       const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
-      const rows = await RateController.getRateLinkRows(rateId, '1', req.user?.lastProperty);
+      const rows = await RateController.getRateLinkRows(rateId, '1', req.user?.lastProperty, req.user?.id);
       success(res, rows, 'Success', 200, {
         table: applyTable,
         permission,
@@ -2759,32 +2881,48 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       // TableView inline edit in this app. Reading `rate_id` from the body only made the
       // handler answer 400 "rate_id and id are required", so Rate Link could never be saved.
       const { amount, type, offsetAdult1, offsetAdult2, offsetExtraAdult, offsetExtraChild, applied_to_ori } = req.body;
-      // frontend-node FinalPOstDat strips `_ori` keys, so the multi-select value
-      // arrives as `applied_to` instead — accept both (Laravel reads applied_to_ori).
-      const appliedToRaw = Array.isArray(applied_to_ori) ? applied_to_ori : (Array.isArray(req.body.applied_to) ? req.body.applied_to : undefined);
+      // "Applied to" may arrive as `applied_to_ori` (Laravel shape), as
+      // `applied_to` (frontend-node FinalPOstDat drops the `_ori` twin), and as
+      // either an array of ids, an array of {value,label}, or a bare scalar.
+      // Normalise all of them to a list instead of only accepting an array, which
+      // silently dropped the selection and left the save writing one row only.
+      const appliedToSource = applied_to_ori ?? req.body.applied_to;
+      const appliedToList: any[] =
+        appliedToSource === undefined || appliedToSource === null
+          ? []
+          : Array.isArray(appliedToSource)
+          ? appliedToSource
+          : [appliedToSource];
       const rateIdRaw = req.body.rate_id ?? req.query.rate_id;
       if (!rateIdRaw || !/^\d+$/.test(String(rateIdRaw)) || !/^\d+$/.test(id)) { badRequest(res, 'rate_id and id are required'); return; }
       const rateId = BigInt(String(rateIdRaw));
+      // `id` is the room type of the edited row and "Applied to" normally repeats
+      // it, so de-dupe before writing - the old loop upserted the same room type
+      // twice, which is how duplicate draft/applied pairs piled up for one rate.
       const roomTypeIds: bigint[] = [BigInt(id)];
-      if (Array.isArray(appliedToRaw)) {
-        for (const at of appliedToRaw) {
-          const v = at?.value ?? at;
-          if (v && /^\d+$/.test(String(v))) roomTypeIds.push(BigInt(v));
+      for (const at of appliedToList) {
+        const v = at && typeof at === 'object' ? at.value : at;
+        if (v !== undefined && v !== null && v !== '' && /^\d+$/.test(String(v)) && !roomTypeIds.includes(BigInt(v))) {
+          roomTypeIds.push(BigInt(v));
         }
       }
       const userId = req.user?.id;
+      // A blank numeric input means "no offset", not "keep the old one" - Laravel
+      // assigns the posted value unconditionally, and Number('') === 0.
+      const num = (v: any, fallback: number | null) => (v === undefined || v === null ? fallback : Number(v) || 0);
       for (const rtId of roomTypeIds) {
         const existing = await prisma.rate_link_listings.findFirst({
-          where: { rate_id: rateId, room_type_id: rtId, status: '0' },
+          where: { rate_id: rateId, room_type_id: rtId, status: '0', deleted_at: null },
+          orderBy: { id: 'desc' },
         });
         const data = {
-          property_id: req.user?.lastProperty ?? null,
-          amount: amount !== undefined ? Number(amount) : existing?.amount,
+          property_id: req.user?.lastProperty ?? existing?.property_id ?? null,
+          amount: num(amount, existing?.amount ?? null),
           type: type !== undefined ? type : existing?.type,
-          offsetAdult1: offsetAdult1 !== undefined ? Number(offsetAdult1) : existing?.offsetAdult1,
-          offsetAdult2: offsetAdult2 !== undefined ? Number(offsetAdult2) : existing?.offsetAdult2,
-          offsetExtraAdult: offsetExtraAdult !== undefined ? Number(offsetExtraAdult) : existing?.offsetExtraAdult,
-          offsetExtraChild: offsetExtraChild !== undefined ? Number(offsetExtraChild) : existing?.offsetExtraChild,
+          offsetAdult1: num(offsetAdult1, existing?.offsetAdult1 ?? null),
+          offsetAdult2: num(offsetAdult2, existing?.offsetAdult2 ?? null),
+          offsetExtraAdult: num(offsetExtraAdult, existing?.offsetExtraAdult ?? null),
+          offsetExtraChild: num(offsetExtraChild, existing?.offsetExtraChild ?? null),
           status: '0',
           updated_at: new Date(),
           updated_by: userId,
@@ -2863,78 +3001,103 @@ private static async getRateLinkRows(rateId: bigint, statusFilter?: string, prop
       const rate = await prisma.rates.findUnique({ where: { id: rateId } });
       if (!rate || rate.deleted_at) { notFound(res, 'Rate is not found'); return; }
 
-      await prisma.model_has_rates.deleteMany({
-        where: { model_id: rateId, model_type: 'App\\Models\\Rate', status: 1 },
-      });
-      await prisma.model_has_rates.updateMany({
-        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
-        data: { status: 1 },
-      });
-      const links = await prisma.model_has_rates.findMany({
-        where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
-      });
-      const linkedRateIds = links.map(l => l.rate_id);
-
-      await prisma.rate_link_listings.deleteMany({ where: { rate_id: rateId, status: '1' } });
-      await prisma.rate_link_listings.updateMany({ where: { rate_id: rateId }, data: { status: '1' } });
-      const rll = await prisma.rate_link_listings.findMany({ where: { rate_id: rateId } });
-      const roomTypeIds = rll.map(l => l.room_type_id).filter((x): x is bigint => x !== null);
-
-      const existingRateRates = linkedRateIds.length > 0 && roomTypeIds.length > 0
-        ? await prisma.rate_rates.findMany({
-            where: { rate_id: { in: linkedRateIds }, room_type_id: { in: roomTypeIds }, deleted_at: null },
-          })
-        : [];
-
-      if (roomTypeIds.length > 0) {
-        await prisma.rate_rates.deleteMany({ where: { rate_id: rateId, room_type_id: { in: roomTypeIds } } });
-      }
-
-      const rows: any[] = [];
-      const grouped = new Map<string, any[]>();
-      for (const rr of existingRateRates) {
-        const key = `${formatDate(rr.date)}|${rr.room_type_id}`;
-        if (!grouped.has(key)) grouped.set(key, []);
-        grouped.get(key)!.push(rr);
-      }
-      for (const [key, items] of grouped) {
-        const [dateStr, rtIdStr] = key.split('|');
-        const roomTypeId = BigInt(rtIdStr);
-        const link = rll.find(l => l.room_type_id === roomTypeId);
-        const sum = (f: string) => items.reduce((acc, it) => acc + Number(it[f] || 0), 0);
-        const min = (f: string) => Math.min(...items.map(it => Number(it[f] || 0)));
-        rows.push({
-          rate_id: rateId,
-          property_id: items[0].property_id,
-          room_type_id: roomTypeId,
-          date: new Date(dateStr),
-          // Route handlers are registered as bare `RateController.rateLinkApply`
-          // references, so Express invokes this with `this === undefined`.
-          // `this.getValueRate(...)` threw a TypeError here, the catch turned it
-          // into a 500, and the linked prices were never written back to
-          // rate_rates - which is why saving a Rate Link appeared to do nothing.
-          one_adult: RateController.getValueRate(sum('one_adult'), link?.amount, link?.type),
-          two_adult: RateController.getValueRate(sum('two_adult'), link?.amount, link?.type),
-          extra_adult: RateController.getValueRate(sum('extra_adult'), link?.offsetExtraAdult, link?.type),
-          extra_child: RateController.getValueRate(sum('extra_child'), link?.offsetExtraChild, link?.type),
-          min_night: sum('min_night'),
-          max_night: sum('max_night'),
-          stop_arrival: min('stop_arrival'),
-          stop_departure: min('stop_departure'),
-          stop_sell: min('stop_sell'),
-          min_los: min('min_los'),
-          status: 1,
-          created_at: new Date(),
-          updated_at: new Date(),
-          created_by: req.user?.id,
+      const applied = await prisma.$transaction(async (tx) => {
+        await tx.model_has_rates.deleteMany({
+          where: { model_id: rateId, model_type: 'App\\Models\\Rate', status: 1 },
         });
-      }
-      if (rows.length > 0) {
-        for (let i = 0; i < rows.length; i += 500) {
-          await prisma.rate_rates.createMany({ data: rows.slice(i, i + 500), skipDuplicates: true });
+        await tx.model_has_rates.updateMany({
+          where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+          data: { status: 1 },
+        });
+        const links = await tx.model_has_rates.findMany({
+          where: { model_id: rateId, model_type: 'App\\Models\\Rate' },
+        });
+        const linkedRateIds = links.map(l => l.rate_id);
+
+        await tx.rate_link_listings.deleteMany({ where: { rate_id: rateId, status: '1' } });
+        await tx.rate_link_listings.updateMany({ where: { rate_id: rateId }, data: { status: '1' } });
+        const listings = await tx.rate_link_listings.findMany({
+          where: { rate_id: rateId, deleted_at: null },
+          orderBy: { id: 'asc' },
+        });
+
+        // Self-heal: keep only the newest row per room type. Without this a rate
+        // that had been edited after an earlier Apply ended up with several rows
+        // for one room type, all now status='1', and the pricing lookup below had
+        // to guess which one was current.
+        const byRoomType = new Map<string, any>();
+        for (const l of listings) {
+          if (l.room_type_id != null) byRoomType.set(String(l.room_type_id), l);
         }
-      }
-      success(res, { applied: rows.length }, 'Success');
+        const staleIds = listings
+          .filter((l: any) => l.room_type_id != null && byRoomType.get(String(l.room_type_id))?.id !== l.id)
+          .map((l: any) => l.id);
+        if (staleIds.length > 0) {
+          await tx.rate_link_listings.deleteMany({ where: { id: { in: staleIds } } });
+        }
+
+        const linkByRoomType = new Map<bigint, any>();
+        for (const l of byRoomType.values()) linkByRoomType.set(l.room_type_id, l);
+        const roomTypeIds = [...linkByRoomType.keys()];
+        if (roomTypeIds.length === 0 || linkedRateIds.length === 0) return 0;
+
+        const existingRateRates = await tx.rate_rates.findMany({
+          where: { rate_id: { in: linkedRateIds }, room_type_id: { in: roomTypeIds }, deleted_at: null },
+        });
+
+        const grouped = new Map<string, any[]>();
+        for (const rr of existingRateRates) {
+          const key = `${formatDate(rr.date)}|${rr.room_type_id}`;
+          if (!grouped.has(key)) grouped.set(key, []);
+          grouped.get(key)!.push(rr);
+        }
+        if (grouped.size === 0) return 0;
+
+        // Only wipe the grid rows that are about to be rebuilt. The previous code
+        // deleted first and rebuilt second with no transaction, so any throw
+        // between the two left the rate with no prices at all for those room types.
+        await tx.rate_rates.deleteMany({ where: { rate_id: rateId, room_type_id: { in: roomTypeIds } } });
+
+        const rows: any[] = [];
+        for (const [key, items] of grouped) {
+          const [dateStr, rtIdStr] = key.split('|');
+          const roomTypeId = BigInt(rtIdStr);
+          const link = linkByRoomType.get(roomTypeId);
+          const sum = (f: string) => items.reduce((acc, it) => acc + Number(it[f] || 0), 0);
+          const min = (f: string) => Math.min(...items.map(it => Number(it[f] || 0)));
+          rows.push({
+            rate_id: rateId,
+            property_id: items[0].property_id,
+            room_type_id: roomTypeId,
+            date: new Date(dateStr),
+            // Route handlers are registered as bare `RateController.rateLinkApply`
+            // references, so Express invokes this with `this === undefined`.
+            // `this.getValueRate(...)` threw a TypeError here, the catch turned it
+            // into a 500, and the linked prices were never written back to
+            // rate_rates - which is why saving a Rate Link appeared to do nothing.
+            one_adult: RateController.getValueRate(sum('one_adult'), link?.amount, link?.type),
+            two_adult: RateController.getValueRate(sum('two_adult'), link?.amount, link?.type),
+            extra_adult: RateController.getValueRate(sum('extra_adult'), link?.offsetExtraAdult, link?.type),
+            extra_child: RateController.getValueRate(sum('extra_child'), link?.offsetExtraChild, link?.type),
+            min_night: sum('min_night'),
+            max_night: sum('max_night'),
+            stop_arrival: min('stop_arrival'),
+            stop_departure: min('stop_departure'),
+            stop_sell: min('stop_sell'),
+            min_los: min('min_los'),
+            status: 1,
+            created_at: new Date(),
+            updated_at: new Date(),
+            created_by: req.user?.id,
+          });
+        }
+        for (let i = 0; i < rows.length; i += 500) {
+          await tx.rate_rates.createMany({ data: rows.slice(i, i + 500), skipDuplicates: true });
+        }
+        return rows.length;
+      });
+
+      success(res, { applied: applied }, 'Success');
     } catch (err: any) {
       console.error('Rate link apply error:', err);
       error(res, 'Failed to apply rate links', 500);
