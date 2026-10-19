@@ -4372,3 +4372,178 @@ enum event_events_status {
   Definitely
   Fix
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// POOL MODULE (Mobile-App-Optimize.md §5.3) — 7 tabel modul Swimming Pool.
+// DDL: sql/2026-10-18_pool_tables.sql (baiikkan 1:1, kolom & constraint sama).
+// Style: plain columns (tanpa @relation), mengikuti housekeeping_* — supaya
+// TIDAK mengubah model existing sama sekali (back-relation tidak dibutuhkan).
+// ════════════════════════════════════════════════════════════════════════
+
+enum pool_attendance_status {
+  draft      // 0 belum check-in
+  present    // 1 dalam tolerance
+  late       // 2 lewat tolerance
+  absent     // 3 dihitung server saat shift berakhir
+  leave      // 4 cuti/izin + alasan
+  incomplete // 5 keluar tapi checklist belum lengkap
+  overtime   // 6 check_out > shift.time_end
+}
+
+model pool_areas {
+  id            BigInt             @id @default(autoincrement())
+  property_id   BigInt
+  code          String             @db.VarChar(50)
+  name          String             @db.VarChar(191)
+  area_type     String?            @db.VarChar(50) // 'main' | 'kids' | 'jacuzzi' | 'lounge'
+  capacity      Int                @default(0)
+  depth_meter   Decimal?           @db.Decimal(5, 2)
+  location_note String?
+  sort          Int                @default(0)
+  status        Boolean            @default(true)
+  current_status Int               @default(0) // 0=closed 1=open 2=maintenance
+  created_at    DateTime?
+  updated_at    DateTime?
+  deleted_at    DateTime?
+  created_by    BigInt?
+  updated_by    BigInt?
+  deleted_by    BigInt?
+
+  @@unique([code, property_id], map: "pool_areas_code_per_property")
+  @@index([property_id, status, sort], map: "pool_areas_property_status_sort_idx")
+}
+
+model pool_setups {
+  id               BigInt             @id @default(autoincrement())
+  property_id      BigInt
+  code             String             @db.VarChar(50)
+  item_name        String             @db.VarChar(191)
+  category         String?            @db.VarChar(100) // 'equipment' | 'safety' | 'hygiene' | 'linen'
+  used_by          String             @default("both") @db.VarChar(20) // 'attendant' | 'supervisor' | 'both'
+  is_required      Boolean            @default(true)
+  mandatory_check  Boolean            @default(false)
+  description      String?
+  sort             Int                @default(0)
+  status           Boolean            @default(true)
+  created_at       DateTime?
+  updated_at       DateTime?
+  deleted_at       DateTime?
+  created_by       BigInt?
+  updated_by       BigInt?
+  deleted_by       BigInt?
+
+  @@unique([code, property_id], map: "pool_setups_code_per_property")
+  @@index([property_id, category, sort], map: "pool_setups_property_category_sort_idx")
+}
+
+model pool_setup_areas {
+  id            BigInt      @id @default(autoincrement())
+  property_id   BigInt
+  pool_setup_id BigInt
+  pool_area_id  BigInt
+  qty           Int         @default(1)
+  is_required   Boolean     @default(true)
+  created_at    DateTime?
+  updated_at    DateTime?
+
+  @@unique([pool_setup_id, pool_area_id], map: "pool_setup_areas_unique")
+  @@index([property_id], map: "pool_setup_areas_property_idx")
+}
+
+model pool_attendances {
+  id              BigInt     @id @default(autoincrement())
+  property_id     BigInt
+  user_id         BigInt
+  pool_area_id    BigInt?
+  attendance_date DateTime   @db.Date
+  shift_id        BigInt?
+  check_in_at     DateTime?
+  check_out_at    DateTime?
+  check_in_by     BigInt? // front office yang scan
+  check_out_by    BigInt?
+  status          Int        @default(0) // pool_attendance_status (urut §5.3)
+  is_override     Boolean    @default(false)
+  override_reason String?
+  break_minutes   Int        @default(0)
+  notes           String?
+  photo_in        String? // OPSIONAL (§10 jawaban #1)
+  photo_out       String?
+  created_at      DateTime?
+  updated_at      DateTime?
+  deleted_at      DateTime?
+  created_by      BigInt?
+  updated_by      BigInt?
+  deleted_by      BigInt?
+
+  @@unique([property_id, user_id, attendance_date, shift_id], map: "pool_attendances_uniq")
+  @@index([property_id, attendance_date], map: "pool_attendances_property_date_idx")
+  @@index([user_id, attendance_date], map: "pool_attendances_user_date_idx")
+  @@index([pool_area_id, attendance_date], map: "pool_attendances_area_date_idx")
+  @@index([status, attendance_date], map: "pool_attendances_status_date_idx")
+}
+
+model pool_attendance_checklists {
+  id                 BigInt    @id @default(autoincrement())
+  pool_attendance_id BigInt
+  pool_setup_id      BigInt
+  qty_required       Int       @default(1)
+  qty_checked        Int       @default(0)
+  is_checked         Boolean   @default(false)
+  created_at         DateTime?
+  updated_at         DateTime?
+
+  @@index([pool_attendance_id], map: "pool_attendance_checklists_attendance_idx")
+  @@index([pool_setup_id], map: "pool_attendance_checklists_setup_idx")
+}
+
+model pool_usages {
+  id             BigInt     @id @default(autoincrement())
+  property_id    BigInt
+  usage_date     DateTime   @db.Date
+  folio_id       BigInt? // tamu in-house
+  folio_number   String?    @db.VarChar(50) // denormalisasi
+  guest_name     String?    @db.VarChar(191)
+  guest_id_card  String?    @db.VarChar(50)
+  pool_area_id   BigInt?
+  swimmer_qty    Int        @default(1)
+  usage_time     DateTime?
+  return_time    DateTime?
+  qty_total      Int        @default(0) // denormalisasi items (rekap)
+  amount_total   Decimal    @default(0) @db.Decimal(14, 2)
+  posting_status Int        @default(0) // 0=DRAFT 1=POSTED 2=POSTED_PARTIAL 3=VOID
+  posted_at      DateTime?
+  posted_by      BigInt?
+  notes          String?
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?
+  updated_by     BigInt?
+  deleted_by     BigInt?
+
+  @@index([property_id, usage_date], map: "pool_usages_property_date_idx")
+  @@index([folio_id, usage_date], map: "pool_usages_folio_date_idx")
+  @@index([posting_status, usage_date], map: "pool_usages_posting_date_idx")
+  @@index([guest_id_card], map: "pool_usages_id_card_idx")
+}
+
+model pool_usage_items {
+  id             BigInt    @id @default(autoincrement())
+  property_id    BigInt
+  pool_usage_id  BigInt
+  code_item_id   BigInt? // NULL = item bebas (tanpa charge)
+  item_name      String    @db.VarChar(191) // snapshot
+  qty            Int       @default(1)
+  unit_price     Decimal   @default(0) @db.Decimal(14, 2)
+  total_amount   Decimal   @default(0) @db.Decimal(14, 2)
+  transaction_id BigInt? // traceability setelah POSTED
+  created_at     DateTime?
+  updated_at     DateTime?
+  deleted_at     DateTime?
+  created_by     BigInt?
+  updated_by     BigInt?
+  deleted_by     BigInt?
+
+  @@index([pool_usage_id], map: "pool_usage_items_usage_idx")
+  @@index([code_item_id], map: "pool_usage_items_code_item_idx")
+}

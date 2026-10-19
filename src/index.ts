@@ -28,6 +28,7 @@ import adminRoutes from './routes/admin.routes';
 import masterSetupRoutes from './routes/master-setup.routes';
 import companyRoutes from './routes/company.routes';
 import housekeepingRoutes from './routes/housekeeping.routes';
+import poolRoutes from './routes/pool.routes';
 import conciergeRoutes from './routes/concierge.routes';
 import eventRoutes from './routes/event.routes';
 import statisticRoutes from './routes/statistic.routes';
@@ -202,6 +203,11 @@ mountLegacyCmsAlias(companyRoutes);
 app.use('/api', housekeepingRoutes);
 app.use('/cms', housekeepingRoutes);
 mountLegacyCmsAlias(housekeepingRoutes);
+
+// Pool routes — M8 (Mobile-App-Optimize.md): menu 1201-1206 (lama 1190-1195 diambil modul Loyalty)
+app.use('/api', poolRoutes);
+app.use('/cms', poolRoutes);
+mountLegacyCmsAlias(poolRoutes);
 
 // Concierge routes — Phase 4.8
 app.use('/api', conciergeRoutes);
