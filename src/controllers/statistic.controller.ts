@@ -1365,7 +1365,7 @@ success(res, null, 'Success', 200, meta);
           },
         });
         if (conflict) {
-          res.status(400).json({ code: 400, message: 'Cannot update room availability, because there is a reservation on the date' });
+          error(res, 'Cannot update room availability, because there is a reservation on the date', 400);
           return;
         }
       }
@@ -1399,7 +1399,7 @@ success(res, null, 'Success', 200, meta);
       const { start_date, end_date, room_status, reason } = req.body || {};
       const value = room_status?.value;
       if (!start_date || !end_date || !value || !['vacant', 'blocked'].includes(value) || !reason) {
-        res.status(400).json({ code: 400, message: 'start_date, end_date, room_status.value (vacant|blocked) and reason are required' });
+        error(res, 'start_date, end_date, room_status.value (vacant|blocked) and reason are required', 400);
         return;
       }
       const start = new Date(`${String(start_date).substring(0, 10)}T00:00:00.000Z`);
@@ -1416,7 +1416,7 @@ success(res, null, 'Success', 200, meta);
         },
       });
       if (conflict) {
-        res.status(400).json({ code: 400, message: 'Cannot update room availability, because there is a reservation on the date' });
+        error(res, 'Cannot update room availability, because there is a reservation on the date', 400);
         return;
       }
 
@@ -1436,7 +1436,7 @@ success(res, null, 'Success', 200, meta);
 
         if (bDate.getTime() === day.getTime() && room) {
           if (room.room_status !== ROOM_STATUSES.vacant.id && value === 'blocked') {
-            res.status(400).json({ code: 400, message: 'Room status is not vacant' });
+            error(res, 'Room status is not vacant', 400);
             return;
           }
           if (value === 'blocked') {
@@ -1486,30 +1486,30 @@ success(res, null, 'Success', 200, meta);
       const folioNumber = /^\d+$/.test(folioIdInput) ? `F${folioIdInput}` : folioIdInput;
 
       const folio: any = await prisma.folios.findFirst({ where: { property_id: pid, folio_number: folioNumber, deleted_at: null } });
-      if (!folio) { res.status(404).json({ code: 404, message: `Folio not found: ${folioNumber}` }); return; }
+      if (!folio) { error(res, `Folio not found: ${folioNumber}`, 404); return; }
 
       const toRoomName = String(req.body?.toRoom ?? '').trim();
       const targetRoom = await prisma.rooms.findFirst({ where: { property_id: pid, name: toRoomName, deleted_at: null } });
-      if (!targetRoom) { res.status(400).json({ code: 400, message: `Target room not found: ${req.body?.toRoom}` }); return; }
+      if (!targetRoom) { error(res, `Target room not found: ${req.body?.toRoom}`, 400); return; }
 
       const reservation: any = await prisma.reservations.findFirst({
         where: { property_id: pid, folio_id: folio.id, deleted_at: null },
         orderBy: { check_in_date: 'asc' },
       });
-      if (!reservation) { res.status(404).json({ code: 404, message: 'Reservation not found' }); return; }
+      if (!reservation) { error(res, 'Reservation not found', 404); return; }
 
       const oldCheckIn = StatisticController.safeParseDate(reservation.check_in_date);
       const oldCheckOut = StatisticController.safeParseDate(reservation.check_out_date);
       if (!oldCheckIn || !oldCheckOut) {
-        res.status(400).json({ code: 400, message: 'Reservation has invalid check-in or check-out date in database' });
+        error(res, 'Reservation has invalid check-in or check-out date in database', 400);
         return;
       }
 
       const newCheckIn = StatisticController.safeParseDate(req.body?.checkInDate);
       const newCheckOut = StatisticController.safeParseDate(req.body?.checkOutDate);
-      if (!newCheckIn) { res.status(400).json({ code: 400, message: `Invalid checkInDate: ${req.body?.checkInDate}` }); return; }
-      if (!newCheckOut) { res.status(400).json({ code: 400, message: `Invalid checkOutDate: ${req.body?.checkOutDate}` }); return; }
-      if (newCheckIn >= newCheckOut) { res.status(400).json({ code: 400, message: 'checkInDate must be before checkOutDate' }); return; }
+      if (!newCheckIn) { error(res, `Invalid checkInDate: ${req.body?.checkInDate}`, 400); return; }
+      if (!newCheckOut) { error(res, `Invalid checkOutDate: ${req.body?.checkOutDate}`, 400); return; }
+      if (newCheckIn >= newCheckOut) { error(res, 'checkInDate must be before checkOutDate', 400); return; }
 
       const night = Math.round((newCheckOut.getTime() - newCheckIn.getTime()) / (1000 * 60 * 60 * 24));
       const warnings: string[] = [];
@@ -1548,25 +1548,22 @@ success(res, null, 'Success', 200, meta);
 
       const guestName = `${folio.first_name ?? ''} ${folio.last_name ?? ''}`.trim();
 
-      res.json({
-        code: 200,
-        data: {
-          folio_id: Number(folio.id),
-          folio_number: folio.folio_number,
-          guest_name: guestName || '-',
-          type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
-          from_room: req.body?.fromRoom,
-          to_room: req.body?.toRoom,
-          old_check_in: oldCheckIn.toISOString().substring(0, 10),
-          old_check_out: oldCheckOut.toISOString().substring(0, 10),
-          new_check_in: newCheckIn.toISOString().substring(0, 10),
-          new_check_out: newCheckOut.toISOString().substring(0, 10),
-          night,
-          is_subfolio: isSubfolio,
-          parent: parentData,
-          can_move: warnings.length === 0,
-          warnings,
-        },
+      success(res, {
+        folio_id: Number(folio.id),
+        folio_number: folio.folio_number,
+        guest_name: guestName || '-',
+        type_reservation: String(folio.type_reservation ?? '').toUpperCase(),
+        from_room: req.body?.fromRoom,
+        to_room: req.body?.toRoom,
+        old_check_in: oldCheckIn.toISOString().substring(0, 10),
+        old_check_out: oldCheckOut.toISOString().substring(0, 10),
+        new_check_in: newCheckIn.toISOString().substring(0, 10),
+        new_check_out: newCheckOut.toISOString().substring(0, 10),
+        night,
+        is_subfolio: isSubfolio,
+        parent: parentData,
+        can_move: warnings.length === 0,
+        warnings,
       });
     } catch (err: any) {
       console.error('previewDragRoomAvailability error:', err);
@@ -1579,14 +1576,14 @@ success(res, null, 'Success', 200, meta);
       const pid = req.user?.lastProperty ?? 0n;
       const { toRoom, folioId, checkInDate, checkOutDate } = req.body || {};
       if (!toRoom || !folioId || !checkInDate || !checkOutDate) {
-        res.status(400).json({ code: 400, message: 'toRoom, toDate, folioId, checkInDate and checkOutDate are required' });
+        error(res, 'toRoom, toDate, folioId, checkInDate and checkOutDate are required', 400);
         return;
       }
       const folioIdInput = String(folioId).trim();
       const folioNumber = /^\d+$/.test(folioIdInput) ? `F${folioIdInput}` : folioIdInput;
 
       const folio: any = await prisma.folios.findFirst({ where: { property_id: pid, folio_number: folioNumber, deleted_at: null } });
-      if (!folio) { res.status(404).json({ code: 404, message: `Folio tidak ditemukan: ${folioNumber}` }); return; }
+      if (!folio) { error(res, `Folio tidak ditemukan: ${folioNumber}`, 404); return; }
 
       // Status guard — only pure Reservation/Pending may move (Laravel :903-917)
       const activeReservation: any = await prisma.reservations.findFirst({
@@ -1595,21 +1592,18 @@ success(res, null, 'Success', 200, meta);
       });
       const st = activeReservation?.status_reservation;
       if ([0, 1].includes(st)) {
-        res.status(400).json({
-          code: 400,
-          message: `Move Reservation only allowed in Reservation status (current: ${STATUS_RESERVATION_MAP[st] ?? st})`,
-        });
+        error(res, `Move Reservation only allowed in Reservation status (current: ${STATUS_RESERVATION_MAP[st] ?? st})`, 400);
         return;
       }
 
       const targetRoom = await prisma.rooms.findFirst({ where: { property_id: pid, name: String(toRoom).trim(), deleted_at: null } });
-      if (!targetRoom) { res.status(404).json({ code: 404, message: `Room tujuan tidak ditemukan: ${toRoom}` }); return; }
+      if (!targetRoom) { error(res, `Room tujuan tidak ditemukan: ${toRoom}`, 404); return; }
 
       const newCheckIn = StatisticController.safeParseDate(checkInDate);
       const newCheckOut = StatisticController.safeParseDate(checkOutDate);
-      if (!newCheckIn) { res.status(400).json({ code: 400, message: `Invalid checkInDate: ${checkInDate}` }); return; }
-      if (!newCheckOut) { res.status(400).json({ code: 400, message: `Invalid checkOutDate: ${checkOutDate}` }); return; }
-      if (newCheckIn >= newCheckOut) { res.status(400).json({ code: 400, message: 'Check In Date harus kurang dari Check Out Date' }); return; }
+      if (!newCheckIn) { error(res, `Invalid checkInDate: ${checkInDate}`, 400); return; }
+      if (!newCheckOut) { error(res, `Invalid checkOutDate: ${checkOutDate}`, 400); return; }
+      if (newCheckIn >= newCheckOut) { error(res, 'Check In Date harus kurang dari Check Out Date', 400); return; }
 
       const conflict = await prisma.reservations.findFirst({
         where: {
@@ -1622,13 +1616,13 @@ success(res, null, 'Success', 200, meta);
           folios: { is: { status_reservation: { notIn: [1, 2] }, deleted_at: null } },
         },
       });
-      if (conflict) { res.status(409).json({ code: 409, message: 'Room sudah terisi pada rentang tanggal tersebut' }); return; }
+      if (conflict) { error(res, 'Room sudah terisi pada rentang tanggal tersebut', 409); return; }
 
       const latestReservation: any = await prisma.reservations.findFirst({
         where: { property_id: pid, folio_id: folio.id, deleted_at: null },
         orderBy: { id: 'desc' },
       });
-      if (!latestReservation) { res.status(404).json({ code: 404, message: 'Tidak ada reservation di folio' }); return; }
+      if (!latestReservation) { error(res, 'Tidak ada reservation di folio', 404); return; }
 
       await prisma.$transaction(async (tx: any) => {
         // Delete existing reservations for this folio (soft delete, Laravel :973-975)
@@ -1687,7 +1681,7 @@ success(res, null, 'Success', 200, meta);
         }
       });
 
-      res.json({ code: 200, message: `Reservation berhasil dipindahkan ke ${String(toRoom).trim()}` });
+      success(res, null, `Reservation berhasil dipindahkan ke ${String(toRoom).trim()}`);
     } catch (err: any) {
       console.error('dragRoomAvailability error:', err);
       error(res, err?.message ?? 'drag failed', 500);
@@ -1701,10 +1695,10 @@ success(res, null, 'Success', 200, meta);
   static async statisticsRoomTypeMouseOver(req: Request, res: Response): Promise<void> {
     try {
       const { room_type_id, date } = req.body || {};
-      if (!room_type_id || !date) { res.status(400).json({ code: 400, message: 'room_type_id and date are required' }); return; }
+      if (!room_type_id || !date) { error(res, 'room_type_id and date are required', 400); return; }
 
       const roomType: any = await prisma.room_types.findUnique({ where: { id: BigInt(room_type_id) }, include: { rooms: true } });
-      if (!roomType) { res.status(400).json({ code: 400, message: 'Room Type not found' }); return; }
+      if (!roomType) { error(res, 'Room Type not found', 400); return; }
 
       const dayStart = new Date(`${String(date).substring(0, 10)}T00:00:00.000Z`);
       const dayEnd = new Date(dayStart); dayEnd.setDate(dayEnd.getDate() + 1);
@@ -1737,21 +1731,17 @@ success(res, null, 'Success', 200, meta);
         room_id: item.rooms?.name ?? null,
       }));
 
-      res.json({
-        data: {
-          name: `${roomType.name} on ${dayStart.toISOString().substring(0, 10)}`,
-          total_room: totalRoom,
-          total_room_sold: totalRoomSold,
-          block_room: blockRoom,
-          ooo_room: oooRoom,
-          total_allotment: 0,
-          total_allotment_used: 0,
-          occupancy: `${Number(occupancyPct)}%`,
-          list_folio: listFolio,
-        },
-        code: 200,
-        message: 'Data has been loaded',
-      });
+      success(res, {
+        name: `${roomType.name} on ${dayStart.toISOString().substring(0, 10)}`,
+        total_room: totalRoom,
+        total_room_sold: totalRoomSold,
+        block_room: blockRoom,
+        ooo_room: oooRoom,
+        total_allotment: 0,
+        total_allotment_used: 0,
+        occupancy: `${Number(occupancyPct)}%`,
+        list_folio: listFolio,
+      }, 'Data has been loaded');
     } catch (err: any) {
       console.error('statisticsRoomTypeMouseOver error:', err);
       error(res, err?.message ?? 'mouseover failed', 500);
@@ -1761,7 +1751,7 @@ success(res, null, 'Success', 200, meta);
   static async statisticsRoomTypeAddMessage(req: Request, res: Response): Promise<void> {
     try {
       const { date } = req.body || {};
-      if (!date) { res.status(400).json({ code: 400, message: 'The date field is required.' }); return; }
+      if (!date) { error(res, 'The date field is required.', 400); return; }
       const pid = Number(req.user?.lastProperty ?? 0);
       const text = String(req.body?.form?.text ?? '');
       const dayStart = new Date(`${String(date).substring(0, 10)}T00:00:00.000Z`);
@@ -1773,7 +1763,7 @@ success(res, null, 'Success', 200, meta);
       } else {
         row = await prisma.statistic_messages.update({ where: { id: existing.id }, data: { text } });
       }
-      res.json({ data: row, code: 200, message: 'Data has been saved' });
+      success(res, row, 'Data has been saved');
     } catch (err: any) {
       console.error('statisticsRoomTypeAddMessage error:', err);
       error(res, err?.message ?? 'add message failed', 500);
@@ -1783,7 +1773,7 @@ success(res, null, 'Success', 200, meta);
   static async statisticsRoomTypeAddRateCode(req: Request, res: Response): Promise<void> {
     try {
       const { date } = req.body || {};
-      if (!date) { res.status(400).json({ code: 400, message: 'The date field is required.' }); return; }
+      if (!date) { error(res, 'The date field is required.', 400); return; }
       const pid = Number(req.user?.lastProperty ?? 0);
       const text = String(req.body?.form?.text ?? '');
       const dayStart = new Date(`${String(date).substring(0, 10)}T00:00:00.000Z`);
@@ -1795,7 +1785,7 @@ success(res, null, 'Success', 200, meta);
       } else {
         row = await prisma.statistic_rate_codes.update({ where: { id: existing.id }, data: { text } });
       }
-      res.json({ data: row, code: 200, message: 'Data has been saved' });
+      success(res, row, 'Data has been saved');
     } catch (err: any) {
       console.error('statisticsRoomTypeAddRateCode error:', err);
       error(res, err?.message ?? 'add rate-code failed', 500);

@@ -13,6 +13,7 @@ import { badRequest, error, notFound, success, validationError } from '../utils/
 import { applySearchField, dataSearch } from '../utils/search';
 import { pushCondition, searchPredicate } from '../utils/querySafety';
 import { mandatoryCheckInBlock, readPropertyMandatory } from '../utils/guestMandatory';
+import { availableRoom } from '../utils/roomAvailability';
 import { writeAudit } from '../utils/audit';
 import {
   performCheckIn,
@@ -1044,6 +1045,140 @@ async function createFolioWithRetry(propertyId: bigint, typeReservation: string,
     }
   }
   throw new Error('Failed to generate unique folio number after retries');
+}
+
+/**
+ * GIT-parent date propagation — Laravel ReservationController::update
+ * (:1598-1700). When a parent GIT folio's stay moves (check-in pulled earlier
+ * and/or check-out pushed later), every selected sub-folio follows: the folio
+ * window shifts and its per-night reservation rows are rebuilt to match.
+ *
+ * Parity notes:
+ * - shiftFront  = how many days the parent's check-in moved EARLIER
+ *                 (`req.check_in_date < parent.check_in_date`).
+ * - shiftBack   = how many days the parent's check-out moved LATER
+ *                 (`req.check_out_date > parent.check_out_date`).
+ * - Laravel guards the newly opened front nights against the sub-folio's own
+ *   room (Room::AvailableRoom) and 400s with 'Room Not Available for Subfolio
+ *   ...' when occupied.
+ */
+async function shiftGitSubFolioStay(
+  subFolioId: bigint,
+  shiftFrontDays: number,
+  shiftBackDays: number
+): Promise<void> {
+  if (shiftFrontDays <= 0 && shiftBackDays <= 0) return;
+
+  const subFolio: any = await prisma.folios.findUnique({ where: { id: subFolioId } });
+  if (!subFolio) return;
+
+  const oldCheckIn = subFolio.check_in_date ? new Date(subFolio.check_in_date) : null;
+  const oldCheckOut = subFolio.check_out_date ? new Date(subFolio.check_out_date) : null;
+  if (!oldCheckIn || !oldCheckOut) return;
+
+  const addDays = (d: Date, n: number) => {
+    const x = new Date(d);
+    x.setDate(x.getDate() + n);
+    return x;
+  };
+  const newCheckIn = shiftFrontDays > 0 ? addDays(oldCheckIn, -shiftFrontDays) : oldCheckIn;
+  const newCheckOut = shiftBackDays > 0 ? addDays(oldCheckOut, shiftBackDays) : oldCheckOut;
+
+  // Room-availability guard on the newly opened front nights (Laravel :1619-1632).
+  if (shiftFrontDays > 0) {
+    const firstReserSub = await prisma.reservations.findFirst({
+      where: { folio_id: subFolioId, deleted_at: null },
+      orderBy: { date: 'asc' },
+    });
+    const roomSubOld = firstReserSub?.room_id
+      ? await prisma.rooms.findUnique({ where: { id: firstReserSub.room_id } })
+      : null;
+    if (roomSubOld && firstReserSub?.room_id) {
+      const conflict = await prisma.reservations.findFirst({
+        where: {
+          room_id: firstReserSub.room_id,
+          deleted_at: null,
+          folio_id: { not: subFolioId },
+          check_in_date: { lt: newCheckOut },
+          check_out_date: { gt: newCheckIn },
+          folios: { is: { status_reservation: { notIn: [1, 2] }, deleted_at: null } },
+        },
+      });
+      if (conflict) {
+        throw new Error(`Room Not Available for Subfolio ${subFolio.folio_number ?? subFolioId}`);
+      }
+    }
+  }
+
+  const netShift = shiftBackDays - shiftFrontDays;
+  await prisma.folios.update({
+    where: { id: subFolioId },
+    data: {
+      check_in_date: newCheckIn,
+      check_out_date: newCheckOut,
+      updated_at: new Date(),
+    },
+  });
+
+  if (netShift === 0) {
+    // Window extended on one side only with rows covering it already? Never
+    // happens in practice here: extension adds nights the parent does not have,
+    // so the sub rows must move with the window. Keep the safe no-op when the
+    // net is zero (both sides moved an equal amount — dates unchanged).
+    return;
+  }
+
+  // Rebuild the per-night rows exactly like Laravel's saveReservation call:
+  // every existing (non-audited) row is soft-deleted and re-created with its
+  // date shifted; the first row carries folio window dates, other rows carry
+  // day-scope check_in/check_out.
+  const rows = await prisma.reservations.findMany({
+    where: { folio_id: subFolioId, deleted_at: null },
+    orderBy: { date: 'asc' },
+  });
+  if (rows.length === 0) return;
+
+  await prisma.reservations.updateMany({
+    where: { folio_id: subFolioId, deleted_at: null },
+    data: { deleted_at: new Date() },
+  });
+
+  const nights = Math.max(
+    1,
+    Math.round((newCheckOut.getTime() - newCheckIn.getTime()) / (1000 * 60 * 60 * 24))
+  );
+
+  for (let i = 0; i < nights; i++) {
+    const src = rows[Math.min(i, rows.length - 1)];
+    const rowDate = addDays(newCheckIn, i);
+    await prisma.reservations.create({
+      data: {
+        property_id: src.property_id,
+        folio_id: src.folio_id,
+        rate_id: src.rate_id,
+        room_type_id: src.room_type_id,
+        room_id: src.room_id,
+        eta: src.eta,
+        etd: src.etd,
+        adult: src.adult ?? 1,
+        child: src.child ?? 0,
+        add_bed: src.add_bed ?? 0,
+        check_in_date: i === 0 ? newCheckIn : rowDate,
+        check_out_date: i === 0 ? newCheckOut : addDays(rowDate, 1),
+        date: rowDate,
+        status_reservation: src.status_reservation,
+        status: src.status,
+        night: nights,
+        amount: src.amount,
+        amountt: src.amountt,
+        total: src.total,
+        service_charge: src.service_charge,
+        pb1: src.pb1,
+        tax3: src.tax3,
+        created_by: src.created_by,
+      },
+    });
+  }
 }
 export class ReservationController {
   // Replicates Laravel ReservationController@moveLedger (PUT /reservation/ledger/move/:id).
@@ -2199,6 +2334,9 @@ success(res, formatted, 'Success', 200, {
         is_house_use,
         complimentary,
         is_compliment_tour_leader,
+        print_status,
+        use_allotment,
+        is_incognito,
         check_in_date,
         check_out_date,
         reservation_list = [],
@@ -2445,6 +2583,12 @@ success(res, formatted, 'Success', 200, {
         is_house_use: is_house_use || false,
         complimentary: complimentary || false,
         is_compliment_tour_leader: is_compliment_tour_leader || false,
+        // Laravel mass-assigns every folio column the form posts, so the toggle
+        // switches (Print, Use Allotment, Incognito) persisted at create. The
+        // Node store() dropped them — the switches flipped back on reload.
+        print_status: print_status === true || print_status === 1 || print_status === '1',
+        use_allotment: use_allotment === true || use_allotment === 1 || use_allotment === '1',
+        is_incognito: is_incognito === true || is_incognito === 1 || is_incognito === '1',
         is_day_use: type_reservation === 'day-use',
         is_virtual: type_reservation === 'vr',
         promo_code: promo_code || null,
@@ -2504,18 +2648,47 @@ success(res, formatted, 'Success', 200, {
           const isPendingRsv = statusReservation === STATUS_RESERVATION.pending.id;
           const isImmediate = item.immediately === true || Number(item.immediately) === 1;
           const promoteRoom = isImmediate || statusReservation === STATUS_RESERVATION.reservation.id;
-          const roomIdEff: bigint | null = isPendingRsv
+          let roomIdEff: bigint | null = isPendingRsv
             ? null
             : promoteRoom
               ? (item.room_id_next ? BigInt(item.room_id_next) : (item.room_id ? BigInt(item.room_id) : null))
               : (item.room_id ? BigInt(item.room_id) : null);
-          const roomTypeIdEff: bigint | null = isPendingRsv
+          let roomTypeIdEff: bigint | null = isPendingRsv
             ? null
             : promoteRoom
               ? (item.room_type_id_next ? BigInt(item.room_type_id_next) : (item.room_type_id ? BigInt(item.room_type_id) : null))
               : (item.room_type_id ? BigInt(item.room_type_id) : null);
           const roomNextIdEff = isPendingRsv || promoteRoom ? null : (item.room_id_next ? BigInt(item.room_id_next) : null);
           const roomTypeNextIdEff = isPendingRsv || promoteRoom ? null : (item.room_type_id_next ? BigInt(item.room_type_id_next) : null);
+
+          // Laravel Folio::saveReservation :2512-2522 — `is_auto_assign_room`
+          // picks a free room of the chosen room type at save time. The Node
+          // port ignored the toggle, so "Auto Assign" creates were left with
+          // no room attached until someone assigned manually.
+          if (!roomIdEff && roomTypeIdEff) {
+            const autoAssign = flagToInt(item.is_auto_assign_room) === 1;
+            if (autoAssign) {
+              const nightsTotal = Math.max(1, Math.ceil((itemCheckOut.getTime() - itemCheckIn.getTime()) / 86400000));
+              const candidates = await prisma.rooms.findMany({
+                where: { property_id: propertyId!, room_type_id: roomTypeIdEff, deleted_at: null },
+                orderBy: { id: 'asc' },
+                take: 50,
+              });
+              for (const candidate of candidates) {
+                // Room must be free across the WHOLE stay, checked per night.
+                let freeForStay = true;
+                for (let n = 0; n < nightsTotal; n++) {
+                  const nd = new Date(itemCheckIn); nd.setDate(nd.getDate() + n);
+                  const ndEnd = new Date(nd); ndEnd.setDate(ndEnd.getDate() + 1);
+                  if (!(await availableRoom(prisma as any, candidate.id, nd, ndEnd, folio.id))) { freeForStay = false; break; }
+                }
+                if (freeForStay) {
+                  roomIdEff = candidate.id;
+                  break;
+                }
+              }
+            }
+          }
 
           for (let i = 0; i < loopCount; i++) {
             const nightDate = new Date(itemCheckIn);
@@ -2676,6 +2849,12 @@ success(res, formatted, 'Success', 200, {
                 postal_code: guestProfile?.postal_code || null,
                 remark: remark || null,
                 is_pending: is_pending || false,
+                // Laravel copies every request column onto the sub-folio — the
+                // toggles were dropped here, so a GIT block's children always
+                // came back with cleared switches.
+                print_status: print_status === true || print_status === 1 || print_status === '1',
+                use_allotment: use_allotment === true || use_allotment === 1 || use_allotment === '1',
+                is_incognito: is_incognito === true || is_incognito === 1 || is_incognito === '1',
                 is_compliment_tour_leader: false,
                 check_in_date: new Date(actualCheckIn),
                 check_out_date: new Date(actualCheckOut),
@@ -3578,6 +3757,45 @@ success(res, formatted, 'Success', 200, {
       if (is_long_stay !== undefined) updateData.is_long_stay = !!is_long_stay;
 
       await prisma.folios.update({ where: { id }, data: updateData });
+
+      // GIT parent propagation — Laravel ReservationController::update
+      // (:1604-1700). A parent GIT folio that moved its stay pushes the change
+      // to the sub-folios the request selected (`sub_folio_selected`), or to
+      // every child when none was picked. Without this a parent Extend/Move
+      // saved the parent date while every child tab stayed untouched.
+      const oldFolioCheckIn = existing.check_in_date ? new Date(existing.check_in_date) : null;
+      const oldFolioCheckOut = existing.check_out_date ? new Date(existing.check_out_date) : null;
+      const newFolioCheckIn = updateData.check_in_date ?? oldFolioCheckIn;
+      const newFolioCheckOut = updateData.check_out_date ?? oldFolioCheckOut;
+      if (
+        String(existing.type_reservation ?? '').toLowerCase() === 'git' &&
+        oldFolioCheckIn && oldFolioCheckOut && newFolioCheckIn && newFolioCheckOut
+      ) {
+        const dayDiff = (a: Date, b: Date) =>
+          Math.round((new Date(a).getTime() - new Date(b).getTime()) / (1000 * 60 * 60 * 24));
+        const shiftFrontDays = Math.max(0, dayDiff(oldFolioCheckIn, newFolioCheckIn)); // newCheckIn earlier
+        const shiftBackDays = Math.max(0, dayDiff(newFolioCheckOut, oldFolioCheckOut)); // newCheckOut later
+        if (shiftFrontDays > 0 || shiftBackDays > 0) {
+          const subFolioRequested = Array.isArray((req.body as any)?.sub_folio_selected)
+            ? (req.body as any).sub_folio_selected
+            : null;
+          const subFolios = subFolioRequested
+            ? subFolioRequested.map((v: any) => BigInt(v))
+            : await prisma.folios.findMany({
+                where: { parent: id, deleted_at: null },
+                select: { id: true },
+              }).then((rows: any[]) => rows.map((r) => r.id));
+          for (const subId of subFolios) {
+            try {
+              await shiftGitSubFolioStay(subId, shiftFrontDays, shiftBackDays);
+            } catch (err: any) {
+              console.error('GIT sub-folio date propagation failed:', err);
+              res.status(400).json({ code: 400, message: err?.message ?? 'Sub-folio date propagation failed' });
+              return;
+            }
+          }
+        }
+      }
 
       // Mirror the guest fields onto `guest_profiles`.
       //
@@ -4662,43 +4880,139 @@ res_date: new Date(),
         }
       }
 
-      // Group close-out: when every non-cancelled p-block is checked out, the
-      // master folio follows. Without this a group stayed "in house" forever
-      // after the last guest left.
+      // Group close-out parity with Laravel (ReservationController.php:3409-3449):
+      // - After a bulk check-in, the parent GIT folio joins the house (check_in).
+      // - After a bulk un-check-in with no child left checked in, the parent
+      //   reverts to reservation.
+      // - After a bulk un-check-out, the parent goes back to check_in so the
+      //   group stays "in house"; when every non-cancelled p-block is checked
+      //   out the master folio follows (check_out).
+      // The parent id comes from the payload, and if absent (non-GIT buttons
+      // funnel here too) it is derived from the child folios' `parent` column.
       let parentClosed: number | null = null;
-      const parentId = parent_folio_id != null ? BigInt(parent_folio_id) : null;
-      if (status_reservation === 'check_out' && parentId !== null) {
-        const remaining = await prisma.folios.count({
-          where: {
-            parent: parentId,
-            status_reservation: STATUS_RESERVATION.check_in.id,
-          },
+      let parentUpdated: number | null = null;
+      const requestedParentId =
+        parent_folio_id != null && parent_folio_id !== '' ? BigInt(parent_folio_id) : null;
+      let parentId = requestedParentId;
+      if (parentId === null) {
+        // Derive: each parsed folio already knows its parent from the batch loop.
+        const childIds = parsed;
+        const parentRows = await prisma.folios.findMany({
+          where: { id: { in: childIds } },
+          select: { parent: true },
+          distinct: ['parent'],
         });
-        if (remaining === 0) {
-          const parent = await prisma.folios.findUnique({ where: { id: parentId }, select: { id: true, folio_number: true } });
-          if (parent) {
+        const nonzero = parentRows.find((r: any) => BigInt(r.parent ?? 0) !== 0n);
+        if (nonzero) parentId = BigInt(nonzero.parent);
+      }
+      const parentStatusActions: Record<string, number | null> = {
+        check_in: STATUS_RESERVATION.check_in.id,
+        un_check_in: STATUS_RESERVATION.reservation.id,
+        un_check_out: STATUS_RESERVATION.check_in.id,
+        check_out: STATUS_RESERVATION.check_out.id,
+      };
+      const desiredParentStatus = parentStatusActions[status_reservation] ?? null;
+      if (parentId !== null && desiredParentStatus !== null && succeeded.length > 0) {
+        const parent = await prisma.folios.findUnique({ where: { id: parentId } });
+        if (
+          parent &&
+          Number(parent.status_reservation) !== desiredParentStatus &&
+          String(parent.type_reservation ?? '').toLowerCase().includes('git')
+        ) {
+          if (status_reservation === 'check_in') {
             await prisma.folios.update({
               where: { id: parentId },
               data: {
-                status_reservation: STATUS_RESERVATION.check_out.id,
-                check_out_date: new Date(businessDate + 'T00:00:00.000Z'),
+                status_reservation: desiredParentStatus,
                 updated_by: userId,
                 updated_at: new Date(),
               },
             });
+            parentUpdated = Number(parentId);
+          } else if (status_reservation === 'un_check_in') {
+            const checkedInCount = await prisma.folios.count({
+              where: { parent: parentId, status_reservation: STATUS_RESERVATION.check_in.id },
+            });
+            if (checkedInCount === 0) {
+              await prisma.folios.update({
+                where: { id: parentId },
+                data: {
+                  status_reservation: STATUS_RESERVATION.reservation.id,
+                  updated_by: userId,
+                  updated_at: new Date(),
+                },
+              });
+              parentUpdated = Number(parentId);
+            }
+          } else if (status_reservation === 'un_check_out') {
+            await prisma.folios.update({
+              where: { id: parentId },
+              data: {
+                status_reservation: STATUS_RESERVATION.check_in.id,
+                updated_by: userId,
+                updated_at: new Date(),
+              },
+            });
+            parentUpdated = Number(parentId);
+          } else if (status_reservation === 'check_out') {
+            const remaining = await prisma.folios.count({
+              where: {
+                parent: parentId,
+                status_reservation: STATUS_RESERVATION.check_in.id,
+              },
+            });
+            if (remaining === 0) {
+              await prisma.folios.update({
+                where: { id: parentId },
+                data: {
+                  status_reservation: STATUS_RESERVATION.check_out.id,
+                  check_out_date: new Date(businessDate + 'T00:00:00.000Z'),
+                  updated_by: userId,
+                  updated_at: new Date(),
+                },
+              });
+              parentClosed = Number(parentId);
+              parentUpdated = Number(parentId);
+            }
+          }
+          if (parentUpdated !== null) {
             // @ts-ignore
             await writeAudit(prisma, req, {
               table: 'folios',
               event: 'updated',
               subjectId: parentId,
-              name: 'git-parent-auto-checked-out',
-              description: `GIT parent ${parent.folio_number ?? parentId} closed: all p-blocks checked out`,
+              name: 'git-parent-status-sync',
+              description: `GIT parent ${parent.folio_number ?? parentId} -> ${status_reservation} (bulk follow-up)`,
               logName: 'front_desk',
-              meta: { folio_number: parent.folio_number, children_closed: succeeded.length, business_date: businessDate },
+              meta: {
+                folio_number: parent.folio_number,
+                action: status_reservation,
+                children_succeeded: succeeded.length,
+                business_date: businessDate,
+              },
             });
-            parentClosed = Number(parentId);
           }
         }
+      }
+
+      // Bulk change_date resizes the parent GIT window to the new stay
+      // (Laravel :3401-3403 rebuilds the master dates alongside the children).
+      if (
+        status_reservation === 'change_date' &&
+        parentId !== null &&
+        succeeded.length > 0 &&
+        (req.body as any)?.check_in_date && (req.body as any)?.check_out_date
+      ) {
+        await prisma.folios.update({
+          where: { id: parentId },
+          data: {
+            check_in_date: new Date(`${String((req.body as any).check_in_date).substring(0, 10)}T00:00:00.000Z`),
+            check_out_date: new Date(`${String((req.body as any).check_out_date).substring(0, 10)}T00:00:00.000Z`),
+            updated_by: userId,
+            updated_at: new Date(),
+          },
+        });
+        parentUpdated = Number(parentId);
       }
 
       // @ts-ignore
@@ -4715,6 +5029,7 @@ res_date: new Date(),
           failed,
           parent_folio_id: parentId != null ? String(parentId) : null,
           parent_auto_closed: parentClosed,
+          parent_updated: parentUpdated,
           business_date: businessDate,
         },
       });
@@ -4727,6 +5042,7 @@ res_date: new Date(),
         succeeded: succeeded.map(Number),
         failed,
         parent_closed: parentClosed,
+        parent_updated: parentUpdated,
         status_reservation: status_reservation,
       }, failed.length > 0 && succeeded.length === 0 ? 'No folio was updated' : 'Success');
     } catch (err: any) {
@@ -5063,51 +5379,140 @@ res_date: new Date(),
   // Shift reservation item dates by a delta (from_date → to_date).
   static async moveReservationItems(req: Request, res: Response): Promise<void> {
     try {
-      const id = BigInt(String(req.params.id));
-      const { from_date, to_date } = req.body;
-      if (!from_date || !to_date) { badRequest(res, 'from_date and to_date are required'); return; }
+      const idRaw = String(req.params.id);
+      if (!/^\d+$/.test(idRaw)) { badRequest(res, 'Invalid id'); return; }
+      const id = BigInt(idRaw);
 
-      const fromDate = new Date(`${from_date}T00:00:00Z`);
-      const toDate = new Date(`${to_date}T00:00:00Z`);
-      const shiftDays = Math.round((toDate.getTime() - fromDate.getTime()) / 86400000);
-      if (shiftDays === 0) { success(res, null, 'No shift needed'); return; }
+      // Laravel ReservationItemController::moveReservation (:880+) resolves the
+      // FOLIO row from the path id. The row grid posts the folio id as col0, but
+      // some callers pass a reservation-item id — accept both.
+      let folio: any = null;
+      const asReservation = await prisma.reservations.findUnique({ where: { id } });
+      if (asReservation) {
+        folio = await prisma.folios.findUnique({ where: { id: asReservation.folio_id } });
+      }
+      if (!folio) folio = await prisma.folios.findUnique({ where: { id } });
+      if (!folio) { notFound(res, 'Folio not found'); return; }
+      const folioId = folio.id as bigint;
 
-      const reservation = await prisma.reservations.findUnique({ where: { id }, include: { folios: true } });
-      if (!reservation) { notFound(res, 'Reservation not found'); return; }
-
-      const folio = reservation.folios as any;
       if (String(folio?.type_reservation ?? '').toLowerCase() === 'git' && Number(folio?.parent) === 0) {
         badRequest(res, 'Action not allowed'); return;
       }
 
-      // Move ALL non-posted items for this folio+room_type from the from-date onward
-      const itemsToMove = await prisma.reservations.findMany({
+      // Original period: request wins, folio dates fall back (Laravel :894-895).
+      const checkInRaw = req.body?.check_in_date ?? req.body?.from_date;
+      const checkOutRaw = req.body?.check_out_date ?? req.body?.to_date;
+      const checkInStr = checkInRaw ? String(checkInRaw).substring(0, 10) : (folio.check_in_date ? new Date(folio.check_in_date).toISOString().substring(0, 10) : null);
+      const checkOutStr = checkOutRaw ? String(checkOutRaw).substring(0, 10) : (folio.check_out_date ? new Date(folio.check_out_date).toISOString().substring(0, 10) : null);
+      if (!checkInStr || !checkOutStr) { badRequest(res, 'check_in_date and check_out_date are required'); return; }
+
+      // Where to_room (a room NAME in Laravel) is used, else room_id (numeric).
+      const targetRoomName = String(req.body?.to_room ?? '').trim();
+      let targetRoom: any = null;
+      if (targetRoomName) {
+        targetRoom = await prisma.rooms.findFirst({ where: { property_id: folio.property_id, name: targetRoomName, deleted_at: null } });
+      } else if (req.body?.room_id && String(req.body.room_id) !== '0') {
+        targetRoom = await prisma.rooms.findFirst({ where: { property_id: folio.property_id, id: BigInt(req.body.room_id), deleted_at: null } });
+      }
+      if (!targetRoom) { badRequest(res, 'Target room is required'); return; }
+
+      const checkInDate = new Date(`${checkInStr}T00:00:00.000Z`);
+      const checkOutDate = new Date(`${checkOutStr}T00:00:00.000Z`);
+      if (checkInDate > checkOutDate) { badRequest(res, 'Check In Date must be less than Check Out Date'); return; }
+
+      const businessDate = await AuthController.getBusinessDate(folio.property_id);
+      if (checkInStr < businessDate) { badRequest(res, 'Check In Date must be greater than or equal to business date'); return; }
+
+      // Availability of the target room across the whole window (Laravel :929-944).
+      const conflict = await prisma.reservations.findFirst({
         where: {
-          folio_id: BigInt(folio.id),
-          room_type_id: reservation.room_type_id,
-          is_posting: 0,
+          room_id: targetRoom.id,
           deleted_at: null,
-          date: { gte: fromDate },
+          folio_id: { not: folioId },
+          date: { gte: checkInDate, lt: checkOutDate },
         },
       });
-      for (const item of itemsToMove) {
-        await prisma.reservations.update({
-          where: { id: item.id },
+      if (conflict) { badRequest(res, 'Target room is already occupied during this period'); return; }
+
+      // Latest reservation is the template (Laravel :946-953).
+      const latestReservation: any = await prisma.reservations.findFirst({
+        where: { folio_id: folioId, deleted_at: null },
+        orderBy: { id: 'desc' },
+      });
+      if (!latestReservation) { badRequest(res, 'No reservation found for this folio'); return; }
+
+      // Step 1: clear the old unposted rows in the window (Laravel :955-960).
+      const removed = await prisma.reservations.deleteMany({
+        where: { folio_id: folioId, is_posting: 0, deleted_at: null, date: { gte: checkInDate, lt: checkOutDate } },
+      });
+
+      // Step 2: rebuild in the target room (Laravel :962-983 via saveReservation).
+      const nights = Math.max(1, Math.round((checkOutDate.getTime() - checkInDate.getTime()) / 86400000));
+      const rateIdBig = latestReservation.rate_id ? BigInt(latestReservation.rate_id) : null;
+      const rateRow = rateIdBig ? await prisma.rates.findUnique({ where: { id: rateIdBig }, select: { code_post_id: true } }) : null;
+      const rateCodePost = rateRow?.code_post_id ? await prisma.code_posts.findUnique({ where: { id: rateRow.code_post_id } }) : null;
+      const property = await prisma.properties.findUnique({ where: { id: folio.property_id }, select: { is_tax: true } });
+      const isTax = (property as any)?.is_tax === 1;
+      const userId = req.user?.id ?? null;
+
+      for (let i = 0; i < nights; i++) {
+        const rowDate = new Date(checkInDate); rowDate.setDate(rowDate.getDate() + i);
+        const pricing = await priceNight({
+          // @ts-ignore
+          prisma,
+          rateId: rateIdBig,
+          roomTypeId: targetRoom.room_type_id,
+          night: rowDate,
+          getNight: nights,
+          adult: Number(latestReservation.adult || 1),
+          child: Number(latestReservation.child || 0),
+          isTax,
+          rateCodePost,
+        } as any);
+        await prisma.reservations.create({
           data: {
-            date: new Date(item.date!.getTime() + shiftDays * 86400000),
-            check_in_date: item.check_in_date ? new Date(item.check_in_date.getTime() + shiftDays * 86400000) : null,
-            check_out_date: item.check_out_date ? new Date(item.check_out_date.getTime() + shiftDays * 86400000) : null,
-            updated_at: new Date(),
-            updated_by: req.user?.id,
+            property_id: folio.property_id,
+            folio_id: folioId,
+            rate_id: rateIdBig,
+            room_type_id: targetRoom.room_type_id,
+            room_id: targetRoom.id,
+            eta: latestReservation.eta,
+            etd: latestReservation.etd,
+            adult: latestReservation.adult || 1,
+            child: latestReservation.child || 0,
+            add_bed: latestReservation.add_bed || 0,
+            check_in_date: i === 0 ? checkInDate : rowDate,
+            check_out_date: i === 0 ? checkOutDate : new Date(rowDate.getTime() + 86400000),
+            date: rowDate,
+            status_reservation: latestReservation.status_reservation,
+            status: latestReservation.status,
+            night: nights,
+            amount: pricing.amount,
+            amountt: pricing.amount,
+            total: pricing.total,
+            service_charge: pricing.service_charge,
+            pb1: pricing.pb1,
+            tax3: pricing.tax3,
+            created_by: userId,
           },
         });
       }
-      // Also shift folio dates
-      if (folio.check_in_date) await prisma.folios.update({ where: { id: BigInt(folio.id) }, data: { check_in_date: new Date(new Date(folio.check_in_date).getTime() + shiftDays * 86400000), check_out_date: folio.check_out_date ? new Date(new Date(folio.check_out_date).getTime() + shiftDays * 86400000) : null, updated_at: new Date() } });
+
+      // The old shift-style handler never touched the folio header dates; keep
+      // them in sync with the new window (Laravel does so via saveReservation).
+      await prisma.folios.update({
+        where: { id: folioId },
+        data: {
+          check_in_date: checkInDate,
+          check_out_date: checkOutDate,
+          updated_at: new Date(),
+          updated_by: userId,
+        },
+      });
 
       enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
-      success(res, { moved: itemsToMove.length }, 'Success');
-    } catch (err: any) { console.error('moveReservation error:', err); error(res, 'Failed to move reservation', 500); }
+      success(res, { moved: removed.count }, `Reservation moved successfully to ${targetRoomName || targetRoom.name}`);
+    } catch (err: any) { console.error('moveReservation error:', err); error(res, err?.message ?? 'Failed to move reservation', 500); }
   }
 
   private static bn(val: any): any {
