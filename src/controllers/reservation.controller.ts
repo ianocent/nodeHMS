@@ -888,23 +888,70 @@ async function updateSubFolioImpl(req: Request, res: Response, id: bigint): Prom
   });
   if (!folio || folio.deleted_at) { notFound(res, 'Folio not found'); return; }
 
+  // Resolve the stay window, falling back to the folio's own dates when the
+  // grid only posts a guest/room change without dates.
+  const toNight = (v: any): string | null => {
+    if (v == null || v === '') return null;
+    const s = v instanceof Date ? v.toISOString() : String(v);
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  };
+  const checkInNight = toNight(body.check_in_date) ?? toNight(folio.check_in_date);
+  const checkOutNight = toNight(body.check_out_date) ?? toNight(folio.check_out_date);
+  if (!checkInNight || !checkOutNight) { badRequest(res, 'Check In Date or Check Out Date Not Valid'); return; }
+
+  // Laravel :1027-1033 — the guest change is saved BEFORE the status gate, so a
+  // sub-folio guest edit persists even when the stay edit itself is rejected.
+  // The folio name/contact columns are mirrors of the profile that the folio
+  // list renders (Laravel ReservationController@update :1512-1516 re-copies
+  // them) — without this mirror the folio list kept showing the old Guest Name.
+  if (body.guest_profile_id !== undefined) {
+    const guestUpdate: any = {
+      guest_profile_id: body.guest_profile_id ? BigInt(body.guest_profile_id) : null,
+      updated_at: new Date(),
+    };
+    if (body.guest_profile_id) {
+      const profile = await prisma.guest_profiles.findUnique({
+        where: { id: BigInt(body.guest_profile_id) },
+        select: {
+          first_name: true, last_name: true, email: true, telp: true,
+          mobile_phone: true, address: true, postal_code: true, gender: true,
+          city_id: true, country_id: true, nationality_id: true,
+        },
+      });
+      if (profile) {
+        guestUpdate.first_name = profile.first_name ?? null;
+        guestUpdate.last_name = profile.last_name ?? null;
+        guestUpdate.email = profile.email ?? null;
+        guestUpdate.telp = profile.telp ?? null;
+        guestUpdate.mobile_phone = profile.mobile_phone ?? null;
+        guestUpdate.address = profile.address ?? null;
+        guestUpdate.postal_code = profile.postal_code ?? null;
+        guestUpdate.gender = profile.gender ?? null;
+        guestUpdate.city_id = profile.city_id;
+        guestUpdate.country_id = profile.country_id;
+        guestUpdate.nationality_id = profile.nationality_id;
+      }
+    }
+    await prisma.folios.update({ where: { id: folio.id }, data: guestUpdate });
+  }
+
   // Room availability over the requested stay window
   const roomId = body.room_id ? BigInt(body.room_id) : null;
+  const windowStart = new Date(checkInNight + 'T00:00:00.000Z');
+  const windowEnd = new Date(checkOutNight + 'T00:00:00.000Z');
   if (roomId != null) {
-    const s = new Date(body.check_in_date + 'T00:00:00.000Z');
-    const e = new Date(body.check_out_date + 'T00:00:00.000Z');
     const [holds, wos, overlaps] = await Promise.all([
-      prisma.room_availabilities.count({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: s, lt: e } } }),
-      prisma.work_orders.count({ where: { deleted_at: null, status: 1, room_id: roomId, date: { lte: s }, OR: [{ end_date: null }, { end_date: { gt: e } }] } }),
+      prisma.room_availabilities.count({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: windowStart, lt: windowEnd } } }),
+      prisma.work_orders.count({ where: { deleted_at: null, status: 1, room_id: roomId, date: { lte: windowStart }, OR: [{ end_date: null }, { end_date: { gt: windowEnd } }] } }),
       prisma.reservations.count({
-        where: { date: { gte: s, lt: e }, folio_id: { not: folio.id }, deleted_at: null, folios: { is: { status_reservation: { in: [0, 3] } } }, OR: [{ room_id: roomId }, { room_id_next: roomId }] },
+        where: { date: { gte: windowStart, lt: windowEnd }, folio_id: { not: folio.id }, deleted_at: null, folios: { is: { status_reservation: { in: [0, 3] } } }, OR: [{ room_id: roomId }, { room_id_next: roomId }] },
       }),
     ]);
     if (holds > 0 || wos > 0 || overlaps > 0) { badRequest(res, 'Room Already Used'); return; }
   }
-
-  const folioUpdate: any = { updated_at: new Date() };
-  if (body.guest_profile_id !== undefined) folioUpdate.guest_profile_id = body.guest_profile_id ? BigInt(body.guest_profile_id) : null;
 
   if (folio.status_reservation !== STATUS_RESERVATION.reservation.id) {
     badRequest(res, 'Folio status is not reservation');
@@ -915,27 +962,30 @@ async function updateSubFolioImpl(req: Request, res: Response, id: bigint): Prom
   if (Number(folio.parent ?? 0) !== 0) {
     const parentFolio = await prisma.folios.findUnique({ where: { id: BigInt(Number(folio.parent)) } });
     if (parentFolio && parentFolio.check_in_date != null && parentFolio.check_out_date != null
-      && (new Date(body.check_in_date) < new Date(parentFolio.check_in_date) || new Date(body.check_out_date) > new Date(parentFolio.check_out_date))) {
+      && (new Date(checkInNight) < new Date(new Date(parentFolio.check_in_date).toISOString().slice(0, 10))
+        || new Date(checkOutNight) > new Date(new Date(parentFolio.check_out_date).toISOString().slice(0, 10)))) {
       badRequest(res, 'Check In Date or Check Out Date Not Valid');
       return;
     }
   }
 
-  folioUpdate.check_in_date = new Date(body.check_in_date);
-  folioUpdate.check_out_date = new Date(body.check_out_date);
-  await prisma.folios.update({ where: { id: folio.id }, data: folioUpdate });
-  if (body.guest_profile_id !== undefined) {
-    // guest_profile_id handled above via folioUpdate
-  }
+  await prisma.folios.update({
+    where: { id: folio.id },
+    data: {
+      check_in_date: windowStart,
+      check_out_date: windowEnd,
+      updated_at: new Date(),
+    },
+  });
 
   const firstResv = folio.reservations[0];
   const arr = [{
     eta: firstResv?.eta ?? null,
     etd: firstResv?.etd ?? null,
     room_type_id: body.room_type_id,
-    room_id: body.room_id ?? null,
-    check_in_date: body.check_in_date,
-    check_out_date: body.check_out_date,
+    room_id: roomId,
+    check_in_date: checkInNight,
+    check_out_date: checkOutNight,
     adult: firstResv?.adult ?? 1,
     child: firstResv?.child ?? 0,
     add_bed: 0,
@@ -1749,11 +1799,26 @@ success(res, formatted, 'Success', 200, {
         if (req.body.status_reservation === 'move_reservation' && typeUpper !== 'GIT') {
           return await ReservationController.moveReservationItems(req, res);
         }
-        if (roomActions.includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 1) === 0) {
+        // Laravel :292-294 — `$request->is_list_parent_git` is compared loosely,
+        // so an ABSENT flag (= null) matches `== 0`: room actions on GIT child
+        // rows must go to assignRoom, not fall into the generic path.
+        if (roomActions.includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 0) === 0) {
           return await ReservationController.assignRoom(req, res);
         }
         if (roomActions.concat('move_reservation').includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 0) === 1) {
           return await updateSubFolioImpl(req, res, id);
+        }
+        if (req.body.status_reservation === 'move_reservation' && typeUpper === 'GIT') {
+          // The grid posts is_list_parent_git only for the MASTER list; sub-folio
+          // rows arrive without it. A GIT child (parent != 0) is a sub-folio row
+          // and must be saved through updateSubFolio — the previous fallthrough
+          // ended in the generic path, which rejected the payload with "The rate
+          // id field is required." So Move/Extend and sub-folio room/guest edits
+          // never persisted.
+          const routeFolio = await prisma.folios.findUnique({ where: { id }, select: { parent: true, deleted_at: true } });
+          if (routeFolio && !routeFolio.deleted_at && Number(routeFolio.parent ?? 0) !== 0) {
+            return await updateSubFolioImpl(req, res, id);
+          }
         }
       }
 
@@ -4759,6 +4824,14 @@ res_date: new Date(),
         try { parsed.push(BigInt(raw)); } catch { /* skip malformed id */ }
       }
       if (parsed.length === 0) { badRequest(res, 'No valid folio id supplied'); return; }
+
+      // Laravel requires a remark on cancel (Folio.php :1516-1518) even when it
+      // is triggered from the bulk grid — without this gate the whole batch
+      // could be cancelled with an empty reason.
+      if (status_reservation === 'cancel_reservation' && !reason && !remark) {
+        badRequest(res, 'The remark field is required.');
+        return;
+      }
 
       const pid = req.user?.lastProperty ?? 0n;
       const businessDate = await AuthController.getBusinessDate(pid);
