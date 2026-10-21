@@ -449,7 +449,7 @@ export class FolioController {
     try {
       const id = idParam(req.params.folio);
       const userId = req.user?.id;
-      const { status_reservation, check_in_date, check_out_date, reason, to_virtual } = req.body;
+      const { status_reservation, check_in_date, check_out_date, reason, to_virtual, remark } = req.body;
 
       const folio: any = await prisma.folios.findUnique({ where: { id } });
       if (!folio) {
@@ -555,7 +555,6 @@ export class FolioController {
 
         await prisma.folios.update({ where: { id }, data: updateData });
         const updated: any = await prisma.folios.findUnique({ where: { id } });
-        await auditFolioStatus(req, folio, updated, status_reservation, { reason, to_virtual });
       await auditFolioStatus(req, folio, updated, status_reservation, {
         reason,
         remark: (req.body as any)?.remark ?? null,
@@ -779,7 +778,12 @@ export class FolioController {
       // Laravel parity: handle special actions
       if (status_reservation === 'cancel_reservation') {
         // Laravel parity (Folio.php:1515-1586)
-        if (!reason) { badRequest(res, 'The remark field is required.'); return; }
+        // Laravel validates `remark` required (:1516-1518); the payload field
+        // is `remark`, NOT `reason` — the old `reason` check rejected every
+        // cancel whose remark was filled but sent no reason object. The reason
+        // dropdown stays mandatory (QA), matching the bulk path.
+        if (!remark || !String(remark).trim()) { badRequest(res, 'The remark field is required.'); return; }
+        if (!reason) { badRequest(res, 'The reason field is required.'); return; }
         if (![STATUS_RESERVATION.reservation.id, STATUS_RESERVATION.pending.id].includes(folio.status_reservation)) {
           badRequest(res, 'Failed to cancel reservation, only reservation and pending status can be canceled');
           return;
@@ -802,8 +806,10 @@ export class FolioController {
         updateData.status_reservation = STATUS_RESERVATION.cancel_reservation.id;
         updateData.data = JSON.stringify({
           ...(folio.data ? JSON.parse(folio.data as string) : {}),
-          remark_cancel_reservation: reason || null,
-          reason_cancel_reservation: (reason && typeof reason === 'object' ? reason.value : reason) || null,
+          // Laravel stores the REMARK in remark_cancel_reservation and the
+          // picked reason value in reason_cancel_reservation (:1545-1548).
+          remark_cancel_reservation: remark || null,
+          reason_cancel_reservation: (reason && typeof reason === 'object' ? (reason as any).value : reason) || null,
         });
 
         // GIT parent → cascade cancel to child folios
@@ -838,7 +844,10 @@ export class FolioController {
 
       if (status_reservation === 'un_check_in') {
         // Laravel parity (Folio.php:1422-1513)
-        if (!reason) { badRequest(res, 'The remark field is required.'); return; }
+        // Laravel validates `remark` required (:1425-1427) — payload field is
+        // `remark`, not `reason`; the old check rejected every un-check-in
+        // even with the remark filled ("Error kurang Remark").
+        if (!remark || !String(remark).trim()) { badRequest(res, 'The remark field is required.'); return; }
         // Validate: can only un_check_in if check_in_date == business date
         const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
         const folioCheckIn = folio.check_in_date ? new Date(folio.check_in_date.getTime() - folio.check_in_date.getTimezoneOffset() * 60000).toISOString().slice(0, 10) : '';
@@ -864,7 +873,7 @@ export class FolioController {
 
         updateData.data = JSON.stringify({
           ...(folio.data ? JSON.parse(folio.data as string) : {}),
-          remark_un_check_in: reason,
+          remark_un_check_in: remark,
         });
 
         // GIT parent → children back to reservation with room restore
@@ -874,7 +883,16 @@ export class FolioController {
             where: { parent: id, status_reservation: STATUS_RESERVATION.check_in.id },
           });
           for (const child of children) {
-            await prisma.folios.update({ where: { id: child.id }, data: { status_reservation: STATUS_RESERVATION.reservation.id } });
+            // Laravel :1473-1476 merges `remark_un_check_out` (its own key
+            // naming quirk) into each checked-in child's data on un-check-in.
+            const childDataParsed: any = (() => { try { return child.data ? JSON.parse(child.data as string) : {}; } catch { return {}; } })();
+            await prisma.folios.update({
+              where: { id: child.id },
+              data: {
+                status_reservation: STATUS_RESERVATION.reservation.id,
+                data: JSON.stringify({ ...childDataParsed, remark_un_check_out: remark }),
+              },
+            });
             const childResvs = await prisma.reservations.findMany({ where: { folio_id: child.id, deleted_at: null }, select: { room_id: true, room_id_next: true } });
             const cRoomIds = childResvs.map(r => r.room_id_next ?? r.room_id).filter((x): x is bigint => x != null);
             if (cRoomIds.length > 0) {
@@ -891,8 +909,10 @@ export class FolioController {
           badRequest(res, 'Status reservation is not check out');
           return;
         }
-        if (!reason) {
-          badRequest(res, 'Remark required');
+        // Laravel validates `remark` required (:1832-1834) — payload field is
+        // `remark`; the old `reason` check failed every non-GIT un-check-out.
+        if (!remark || !String(remark).trim()) {
+          badRequest(res, 'The remark field is required.');
           return;
         }
         const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? null);
@@ -916,7 +936,7 @@ export class FolioController {
         updateData.status_reservation = STATUS_RESERVATION.check_in.id;
         updateData.data = JSON.stringify({
           ...(folio.data ? JSON.parse(folio.data as string) : {}),
-          remark_un_check_out: reason,
+          remark_un_check_out: remark,
         });
 
         // NOTE: Laravel's main-folio room-status block here (:1858-1894) is DEAD CODE —

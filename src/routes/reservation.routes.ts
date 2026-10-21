@@ -106,7 +106,7 @@ router.post('/reservation/:id/unassign-room', authMiddleware, requirePermission(
 router.post('/reservation/:id/replicate', authMiddleware, requirePermission(60, 'add'), ReservationController.replicate);
 router.post('/reservation/:id/assign-room', authMiddleware, requirePermission(60, 'edit'), ReservationController.assignRoom);
 // Laravel ReservationController@unAssignRoom (cms.php:989) — param named {folio}
-router.post('/reservation/un-assign-room/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.unassignRoom);
+router.post('/reservation/un-assign-room/:id', authMiddleware, requirePermission(60, 'edit'), ReservationController.unassignRoomByFolio);
 
 // update-status (mirror Laravel ReservationController@updateStatus)
 router.post('/reservation/update-status/:folio', authMiddleware, requirePermission(60, 'edit'), FolioController.updateStatus);

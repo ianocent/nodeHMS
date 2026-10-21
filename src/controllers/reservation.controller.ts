@@ -2,28 +2,27 @@ import { prisma } from '../config/prisma';
 // @ts-ignore
 import { Prisma } from '@prisma/client';
 // @ts-ignore
-import { Prisma, PrismaClient } from '@prisma/client';
 import { Request, Response } from 'express';
 import { enqueueJob } from '../config/queue';
 import { getPermissionFlags } from '../middleware/permission.middleware';
+import { writeAudit } from '../utils/audit';
 import { calculateCodePost, moneyFormat } from '../utils/cmsConfig';
-import { ROOM_STATUSES, MAID_STATUSES, STATUS_RESERVATION_MAP, getColorRoom, getColorMaid } from '../utils/cmsStatus';
+import { getColorMaid, getColorRoom, MAID_STATUSES, ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { mandatoryCheckInBlock, readPropertyMandatory } from '../utils/guestMandatory';
+import { pushCondition, searchPredicate } from '../utils/querySafety';
 import { applyPromoDiscounts, findPromosForNight, priceNight, PromoLike } from '../utils/reservationPricing';
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
-import { applySearchField, dataSearch } from '../utils/search';
-import { pushCondition, searchPredicate } from '../utils/querySafety';
-import { mandatoryCheckInBlock, readPropertyMandatory } from '../utils/guestMandatory';
 import { availableRoom } from '../utils/roomAvailability';
-import { writeAudit } from '../utils/audit';
+import { applySearchField, dataSearch } from '../utils/search';
+import { AuthController } from './auth.controller';
 import {
+  folioBalanceMinorUnits,
+  isFolioSettledMinorPublic,
+  performChangeStayDate,
   performCheckIn,
   performCheckOut,
   performReverseStay,
-  performChangeStayDate,
-  folioBalanceMinorUnits,
-  isFolioSettledMinorPublic,
 } from './front-desk.controller';
-import { AuthController } from './auth.controller';
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0];
@@ -1780,13 +1779,18 @@ success(res, formatted, 'Success', 200, {
       const id = BigInt(idParam);
       const userId = req.user?.id;
 
-      const existing = await prisma.reservations.findUnique({ where: { id } });
-      if (!existing || existing.deleted_at) {
-        notFound(res, 'Not Found');
-        return;
-      }
-
       // ── Laravel :276-297 — action routing matrix ──
+      // Laravel routes FIRST and resolves rows inside each branch: move /
+      // VR / sub-folio / is_parentfolio payloads POST the FOLIO id as the path
+      // id (Folio::find($id) at :295, :311, :721, :885), while assignRoom and
+      // the generic path use the reservation id (Reservation::find at :785,
+      // :329). Looking up only the reservation table up-front 404'd every
+      // folio-id payload, so "Move Reservation", sub-folio room/guest edits
+      // and parent-folio edits were never saved.
+      // The reservation row is resolved non-fatally here — the generic path
+      // validates it below, exactly where Laravel does (Reservation::find
+      // at :329).
+      const existing = await prisma.reservations.findUnique({ where: { id } });
       if ((req.body || {}).type_reservation !== undefined) {
         const typeUpper = String(req.body.type_reservation ?? '').toUpperCase();
         const roomActions = ['assign_room', 'un_check_out', 'un_check_in', 'check_out', 'check_in'];
@@ -1805,7 +1809,11 @@ success(res, formatted, 'Success', 200, {
         if (roomActions.includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 0) === 0) {
           return await ReservationController.assignRoom(req, res);
         }
-        if (roomActions.concat('move_reservation').includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 0) === 1) {
+        // Laravel :294 — the GIT + is_list_parent_git==1 branch covers
+        // ['move_reservation','un_check_out','un_check_in','check_out',
+        // 'check_in'] only; assign_room is NOT routed to updateSubFolio and
+        // falls through to the is_parentfolio/generic handling.
+        if (['move_reservation', 'un_check_out', 'un_check_in', 'check_out', 'check_in'].includes(req.body.status_reservation) && typeUpper === 'GIT' && Number(req.body.is_list_parent_git ?? 0) === 1) {
           return await updateSubFolioImpl(req, res, id);
         }
         if (req.body.status_reservation === 'move_reservation' && typeUpper === 'GIT') {
@@ -1815,9 +1823,14 @@ success(res, formatted, 'Success', 200, {
           // ended in the generic path, which rejected the payload with "The rate
           // id field is required." So Move/Extend and sub-folio room/guest edits
           // never persisted.
-          const routeFolio = await prisma.folios.findUnique({ where: { id }, select: { parent: true, deleted_at: true } });
+          let routeFolio: any = await prisma.folios.findUnique({ where: { id }, select: { id: true, parent: true, deleted_at: true } });
+          // Some callers post the reservation-item id — resolve its folio too
+          // (moveReservationItems already accepts both kinds of id).
+          if (!routeFolio && existing) {
+            routeFolio = await prisma.folios.findUnique({ where: { id: existing.folio_id }, select: { id: true, parent: true, deleted_at: true } });
+          }
           if (routeFolio && !routeFolio.deleted_at && Number(routeFolio.parent ?? 0) !== 0) {
-            return await updateSubFolioImpl(req, res, id);
+            return await updateSubFolioImpl(req, res, BigInt(routeFolio.id));
           }
         }
       }
@@ -1833,6 +1846,15 @@ success(res, formatted, 'Success', 200, {
       // Laravel :310-312 — parent folio edit delegates to updateParentFolio
       if (req.body.is_parentfolio) {
         return await updateParentFolioImpl(req, res, id);
+      }
+
+      // Laravel :329 — the generic path is the only branch that needs the
+      // RESERVATION row (path id = reservation id). Folio-id payloads that
+      // fell through every action branch would crash on `reservations` below,
+      // so drop them here.
+      if (!existing || existing.deleted_at) {
+        notFound(res, 'Not Found');
+        return;
       }
 
       // Laravel :314-324 validates `remark_room` as required. The Room grid can
@@ -3764,7 +3786,7 @@ success(res, formatted, 'Success', 200, {
       };
       const isIdVal = (v: any) => v !== undefined && v !== null && v !== '' && v !== 0 && v !== '0';
       if (isIdVal(guest_profile_id)) updateData.guest_profile_id = BigInt(guest_profile_id);
-      else if (guest_profile_id === null || guest_profile_id === '') updateData.guest_profile_id = null;
+      else if (guest_profile_id === null || guest_profile_id === '' || guest_profile_id === 0 || guest_profile_id === '0') updateData.guest_profile_id = null;
       if (isIdVal(company_profile_id)) updateData.company_profile_id = BigInt(company_profile_id);
       else if (company_profile_id === null || company_profile_id === '') updateData.company_profile_id = null;
       if (first_name !== undefined) updateData.first_name = first_name;
@@ -3876,27 +3898,68 @@ success(res, formatted, 'Success', 200, {
       // other way round (guest -> folio); doing both keeps the two screens in
       // agreement, which is what the user expects from editing either one.
       const guestProfileId = updateData.guest_profile_id ?? existing.guest_profile_id;
-      if (guestProfileId) {
-        const guestPatch: any = {};
-        if (first_name !== undefined) guestPatch.first_name = first_name;
-        if (last_name !== undefined) guestPatch.last_name = last_name;
-        if (email !== undefined) guestPatch.email = email;
-        if (telp !== undefined) guestPatch.telp = telp;
-        if (mobile_phone !== undefined) guestPatch.mobile_phone = mobile_phone;
-        if (card_type !== undefined) guestPatch.card_type = card_type;
-        if (card_number !== undefined) guestPatch.card_number = card_number;
-        if (card_expiry !== undefined) guestPatch.card_expiry = card_expiry;
-        if (Object.keys(guestPatch).length > 0) {
-          try {
-            await prisma.guest_profiles.update({
-              where: { id: BigInt(guestProfileId) },
-              data: { ...guestPatch, updated_at: new Date(), updated_by: userId ?? undefined },
-            });
-          } catch (err: any) {
-            // Never fail the reservation save because the guest mirror did not
-            // stick (e.g. a concurrent soft-delete).
-            console.error('Guest profile sync from reservation failed:', err?.message || err);
-          }
+      const guestChanged = guestProfileId && guestProfileId !== existing.guest_profile_id;
+
+      // When the guest profile changes, mirror first_name/last_name onto the
+      // folio even if the FE didn't send them — otherwise the folio listing
+      // keeps showing the old Guest Name (reads folio.first_name/last_name first,
+      // falls back to guest_profiles only when both are blank).
+      let resolvedFirstName = first_name;
+      let resolvedLastName = last_name;
+      if (guestChanged && (resolvedFirstName === undefined || resolvedLastName === undefined)) {
+        const profile = await prisma.guest_profiles.findUnique({
+          where: { id: guestProfileId },
+          select: { first_name: true, last_name: true },
+        });
+        if (profile) {
+          if (resolvedFirstName === undefined) resolvedFirstName = profile.first_name ?? null;
+          if (resolvedLastName === undefined) resolvedLastName = profile.last_name ?? null;
+        }
+      }
+
+      const guestPatch: any = {};
+      if (resolvedFirstName !== undefined) {
+        updateData.first_name = resolvedFirstName;
+        guestPatch.first_name = resolvedFirstName;
+      }
+      if (resolvedLastName !== undefined) {
+        updateData.last_name = resolvedLastName;
+        guestPatch.last_name = resolvedLastName;
+      }
+      if (email !== undefined) {
+        updateData.email = email;
+        guestPatch.email = email;
+      }
+      if (telp !== undefined) {
+        updateData.telp = telp;
+        guestPatch.telp = telp;
+      }
+      if (mobile_phone !== undefined) {
+        updateData.mobile_phone = mobile_phone;
+        guestPatch.mobile_phone = mobile_phone;
+      }
+      if (card_type !== undefined) {
+        updateData.card_type = card_type;
+        guestPatch.card_type = card_type;
+      }
+      if (card_number !== undefined) {
+        updateData.card_number = card_number;
+        guestPatch.card_number = card_number;
+      }
+      if (card_expiry !== undefined) {
+        updateData.card_expiry = card_expiry;
+        guestPatch.card_expiry = card_expiry;
+      }
+      if (Object.keys(guestPatch).length > 0 && guestProfileId) {
+        try {
+          await prisma.guest_profiles.update({
+            where: { id: BigInt(guestProfileId) },
+            data: { ...guestPatch, updated_at: new Date(), updated_by: userId ?? undefined },
+          });
+        } catch (err: any) {
+          // Never fail the reservation save because the guest mirror did not
+          // stick (e.g. a concurrent soft-delete).
+          console.error('Guest profile sync from reservation failed:', err?.message || err);
         }
       }
 
@@ -3910,7 +3973,7 @@ success(res, formatted, 'Success', 200, {
       await syncTypesPivot('App\\Models\\Folio', id, updMarketSegments);
 
       // Update reservation items if provided
-      if (reservation_list && reservation_list.length > 0 && existing.type_reservation !== 'git') {
+      if (reservation_list && reservation_list.length > 0) {
         // Laravel Folio.php:2524-2530 / 2639-2642 / 2656-2664 — nights already
         // posted by the night audit are NEVER deleted or overwritten; only
         // unposted nights outside the new range are removed.
@@ -4658,6 +4721,38 @@ let allAvailable = true;
   }
 
   
+  // POST /api/reservation/un-assign-room/:id — Laravel ReservationController@unAssignRoom (Folio-bound)
+  // Clears room_id on every live reservation row of the folio.
+  static async unassignRoomByFolio(req: Request, res: Response): Promise<void> {
+    try {
+      const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const folioId = BigInt(idParam);
+      const userId = req.user?.id;
+
+      const folio = await prisma.folios.findUnique({ where: { id: folioId } });
+      if (!folio || folio.deleted_at) {
+        notFound(res, 'Folio Not Found');
+        return;
+      }
+
+      await prisma.reservations.updateMany({
+        where: { folio_id: folioId, deleted_at: null },
+        data: { room_id: null, room_id_next: null, updated_at: new Date(), updated_by: userId },
+      });
+
+      enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
+
+      const updatedFolio = await prisma.folios.findUnique({
+        where: { id: folioId },
+        include: { reservations: { where: { deleted_at: null } } },
+      });
+      success(res, bigintToNumber(updatedFolio), 'Success');
+    } catch (err: any) {
+      console.error('Reservation unassign room (folio) error:', err);
+      error(res, 'Failed to unassign room', 400);
+    }
+  }
+
   // POST /api/reservations/:id/unassign-room
   
   static async unassignRoom(req: Request, res: Response): Promise<void> {
@@ -4741,10 +4836,10 @@ let allAvailable = true;
           contact_person_id: existing.contact_person_id,
           check_in_date: existing.check_in_date,
           check_out_date: existing.check_out_date,
-res_date: new Date(),
+          res_date: new Date(),
                 // `res_time` is a timestamp column, not TIME — an "HH:mm" string
                 // makes Prisma throw and aborts the whole GIT create.
-                res_time: new Date(),
+          res_time: new Date(),
           status: STATUS_ACTIVE,
           status_reservation: STATUS_RESERVATION.reservation.id,
           is_compliment_tour_leader: false,
@@ -4826,9 +4921,23 @@ res_date: new Date(),
       if (parsed.length === 0) { badRequest(res, 'No valid folio id supplied'); return; }
 
       // Laravel requires a remark on cancel (Folio.php :1516-1518) even when it
-      // is triggered from the bulk grid — without this gate the whole batch
-      // could be cancelled with an empty reason.
-      if (status_reservation === 'cancel_reservation' && !reason && !remark) {
+      // is triggered from the bulk grid; the Reason dropdown is validated by
+      // every bulk caller, so a batch cannot be cancelled quietly without one.
+      if (status_reservation === 'cancel_reservation' && !String(remark ?? '').trim()) {
+        badRequest(res, 'The remark field is required.');
+        return;
+      }
+      if (status_reservation === 'cancel_reservation' && !reason) {
+        badRequest(res, 'The reason field is required.');
+        return;
+      }
+      // Laravel setUpdateStatus validates `remark` required for the same bulk
+      // per-folio actions it validates one-shot (Folio.php :1425-1427,
+      // :1516-1518, :1832-1834).
+      if (
+        (status_reservation === 'un_check_in' || status_reservation === 'un_check_out') &&
+        !String(remark ?? '').trim()
+      ) {
         badRequest(res, 'The remark field is required.');
         return;
       }
@@ -4934,6 +5043,40 @@ res_date: new Date(),
             where: { folio_id: id, deleted_at: null },
             data: { status_reservation: statusId },
           });
+          if (status_reservation === 'cancel_reservation') {
+            // Laravel parity (Folio.php:1515-1586) — a cancelled folio keeps
+            // its cancellation reason/password remark in the `data` JSON (the
+            // cancelled-folio report reads it), resets the pending room-change
+            // pointers and cascades the cancel to its child folios.
+            // The single updateStatus path does the same.
+            const fresh = await prisma.folios.findUnique({ where: { id }, select: { data: true, type_reservation: true, parent: true } });
+            await prisma.reservations.updateMany({
+              where: { folio_id: id, deleted_at: null },
+              data: { room_id_next: null, room_type_id_next: null },
+            });
+            if (fresh) {
+              let parsedData: any = {};
+              try { parsedData = fresh.data ? JSON.parse(fresh.data as string) : {}; } catch { parsedData = {}; }
+              await prisma.folios.update({
+                where: { id },
+                data: {
+                  data: JSON.stringify({
+                    ...parsedData,
+                    remark_cancel_reservation: remark ?? null,
+                    reason_cancel_reservation: reason ?? null,
+                  }),
+                },
+              });
+              const isGitParent =
+                String(fresh.type_reservation ?? '').toLowerCase() === 'git' && Number(fresh.parent ?? 0) === 0;
+              if (isGitParent) {
+                await prisma.folios.updateMany({
+                  where: { parent: id },
+                  data: { status_reservation: statusId },
+                });
+              }
+            }
+          }
           // @ts-ignore
           await writeAudit(prisma, req, {
             table: 'folios',
@@ -5018,15 +5161,28 @@ res_date: new Date(),
               parentUpdated = Number(parentId);
             }
           } else if (status_reservation === 'un_check_out') {
-            await prisma.folios.update({
-              where: { id: parentId },
-              data: {
-                status_reservation: STATUS_RESERVATION.check_in.id,
-                updated_by: userId,
-                updated_at: new Date(),
+            // Laravel :3437-3445 — the master may only revert to Check In when
+            // NO child folio still carries the Check Out status (the one just
+            // un-checked-out has already left that status). A single un-check-out
+            // in a group with other checked-out p-blocks must not pull the
+            // master back into the house.
+            const stillCheckOut = await prisma.folios.count({
+              where: {
+                parent: parentId,
+                status_reservation: STATUS_RESERVATION.check_out.id,
               },
             });
-            parentUpdated = Number(parentId);
+            if (stillCheckOut === 0) {
+              await prisma.folios.update({
+                where: { id: parentId },
+                data: {
+                  status_reservation: STATUS_RESERVATION.check_in.id,
+                  updated_by: userId,
+                  updated_at: new Date(),
+                },
+              });
+              parentUpdated = Number(parentId);
+            }
           } else if (status_reservation === 'check_out') {
             const remaining = await prisma.folios.count({
               where: {
@@ -5035,17 +5191,28 @@ res_date: new Date(),
               },
             });
             if (remaining === 0) {
-              await prisma.folios.update({
-                where: { id: parentId },
-                data: {
-                  status_reservation: STATUS_RESERVATION.check_out.id,
-                  check_out_date: new Date(businessDate + 'T00:00:00.000Z'),
-                  updated_by: userId,
-                  updated_at: new Date(),
-                },
-              });
-              parentClosed = Number(parentId);
-              parentUpdated = Number(parentId);
+              // Laravel :3420 — AND the master's own balance (ex-posting) must
+              // settle: ceil(getBalanceWithOutPosting()) in [0,1,-1]. Without
+              // this gate the master flipped to Check Out the moment the last
+              // in-house p-block left, even though the master folio still
+              // carried money — the QA report "Master Folio berubah status jadi
+              // Check Out saat salah 1 Subfolio terCheckOut". The master only
+              // checks out once every active subfolio is out AND the master
+              // itself is settled.
+              const balanceMinor = await folioBalanceMinorUnits(parent);
+              if (isFolioSettledMinorPublic(balanceMinor)) {
+                await prisma.folios.update({
+                  where: { id: parentId },
+                  data: {
+                    status_reservation: STATUS_RESERVATION.check_out.id,
+                    check_out_date: new Date(businessDate + 'T00:00:00.000Z'),
+                    updated_by: userId,
+                    updated_at: new Date(),
+                  },
+                });
+                parentClosed = Number(parentId);
+                parentUpdated = Number(parentId);
+              }
             }
           }
           if (parentUpdated !== null) {

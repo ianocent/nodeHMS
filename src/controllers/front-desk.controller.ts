@@ -37,34 +37,81 @@ class HttpError extends Error {
 }
 
 
-// Laravel Room::AvailableRoom parity: room blocked if availability hold, active work order, or overlapping reservation
+// Laravel Room::AvailableRoom (Room.php:112-174) parity — that reference is a
+// ROOM-TYPE capacity check anchored on the room's type, NOT a per-room lock:
+//   1. Overlapping reservations of the same room TYPE (room_type_id /
+//      room_type_id_next) from folios still in Check In / Reservation, window
+//      `date >= start AND date < end` — the CHECK-OUT day is EXCLUSIVE.
+//   2. Rooms of that type are unsellable for the window when they carry a
+//      room_availabilities hold (`date >= start AND date < end`) or a work
+//      order spanning it (`date <= start AND (end_date > end OR null)`).
+//   3. Capacity = free-of-hold-and-not-reserved rooms − reservations with no
+//      room assigned (counted once per folio). Available when capacity > 0.
 //
-// `db` is injectable so check-in can run the read inside the same serializable
-// transaction that writes the occupancy. The old signature always used the
-// module-level client, which made the check a plain read-then-write (TOCTOU):
-// two concurrent check-ins could both observe a free room and both commit.
+// The old node version had four false-reject bugs behind the QA report
+// "Error gak bisa check in room not available, di room availability kosong":
+//   - window included the checkout day (`date <= end 23:59:59`) — every night
+//     row landed on the departure date rejected the room;
+//   - the reservation overlap filtered reservation rows by THEIR status
+//     instead of the folio's status (Laravel checked folio status);
+//   - the room itself was rejected when ANY overlapping reservation row
+//     pointed at it, even though Laravel only needs one free room of the type;
+//   - work orders were matched inside the window (`date >= start AND
+//     end_date <= end`) instead of spanning it — and room_status block(3) was
+//     treated as unsellable while the base app only excludes out of order.
 type Db = Pick<typeof prisma, 'rooms' | 'room_availabilities' | 'work_orders' | 'reservations'>;
 async function isRoomAvailableFor(propertyId: bigint, roomId: bigint, start: string, end: string, excludeFolioId?: bigint, db: Db = prisma): Promise<boolean> {
   const s = new Date(start + 'T00:00:00.000Z');
-  const e = new Date(end + 'T23:59:59.999Z');
-  const [room, avail, workOrders, reservations] = await Promise.all([
-    db.rooms.findUnique({ where: { id: roomId }, select: { id: true, deleted_at: true, room_status: true } }),
-    db.room_availabilities.findMany({ where: { deleted_at: null, room_id: Number(roomId), date: { gte: s, lte: e } }, select: { id: true } }),
-    db.work_orders.findMany({ where: { deleted_at: null, status: 1, room_id: roomId, date: { gte: s }, end_date: { lte: e } }, select: { id: true } }),
-    db.reservations.findMany({
-      where: {
-        date: { gte: s, lte: e },
-        status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] },
-        ...(excludeFolioId ? { folio_id: { not: excludeFolioId } } : {}),
-        OR: [{ room_id: roomId }, { room_id_next: roomId }],
-      },
-      select: { id: true },
-    }),
+  // Exclusive end — Laravel `date < $dateEnd`.
+  const e = new Date(end + 'T00:00:00.000Z');
+  const room = await db.rooms.findUnique({
+    where: { id: roomId },
+    select: { id: true, deleted_at: true, room_status: true, room_type_id: true, status: true },
+  });
+  // out_of_order(4) is the only unsellable status in the reference
+  // (Room.php:146 — whereNotIn out_of_order). block(3) participates and must
+  // not block check-in.
+  if (!room || room.deleted_at || room.status !== 1 || room.room_status === ROOM_STATUSES.out_of_order.id) return false;
+  const roomTypeId = Number(room.room_type_id);
+
+  // 1. Overlapping reservations on this ROOM TYPE from other active folios.
+  const overlapping = await db.reservations.findMany({
+    where: {
+      deleted_at: null,
+      date: { gte: s, lt: e },
+      OR: [{ room_type_id: roomTypeId }, { room_type_id_next: roomTypeId }],
+      folios: { is: { status_reservation: { in: [STATUS_RESERVATION.check_in.id, STATUS_RESERVATION.reservation.id] } } },
+      ...(excludeFolioId ? { folio_id: { not: excludeFolioId } } : {}),
+    },
+    select: { room_id: true, folio_id: true },
+  });
+  const occupiedRoomIds = new Set<number>(
+    overlapping.filter((r: any) => r.room_id > 0).map((r: any) => Number(r.room_id))
+  );
+  const unassignedFolioIds = new Set<number>(
+    overlapping.filter((r: any) => !r.room_id).map((r: any) => Number(r.folio_id))
+  );
+
+  // 2. Rooms of the same type minus availability holds + spanning work orders.
+  const typeRooms = await db.rooms.findMany({
+    // Room global scope: is_physical = 1 (Room.php:32-34); active status.
+    where: { deleted_at: null, status: 1, is_physical: true, room_type_id: roomTypeId, room_status: { not: ROOM_STATUSES.out_of_order.id } },
+    select: { id: true },
+  });
+  const typeRoomIds = typeRooms.map((r: any) => Number(r.id));
+  const [holds, wos] = await Promise.all([
+    db.room_availabilities.findMany({ where: { deleted_at: null, room_id: { in: typeRoomIds }, date: { gte: s, lt: e } }, select: { room_id: true } }),
+    // Laravel :134-143 — the work order must SPAN the window start and not have
+    // ended inside it (`date <= start AND (end_date > end OR null)`).
+    db.work_orders.findMany({ where: { deleted_at: null, room_id: { in: typeRoomIds }, date: { lte: s }, OR: [{ end_date: { gt: e } }, { end_date: null }] }, select: { room_id: true } }),
   ]);
-  // out_of_order(4) and block(3) are both unsellable. Only rejecting 4 (the old
-  // behaviour) let a room blocked on the grid be handed to a guest.
-  const unsellable = room?.room_status === ROOM_STATUSES.out_of_order.id || room?.room_status === ROOM_STATUSES.block.id;
-  return !!room && !room.deleted_at && !unsellable && avail.length === 0 && workOrders.length === 0 && reservations.length === 0;
+  const blockedByHoldOrWo = new Set<number>([...holds, ...wos].map((r: any) => Number(r.room_id)));
+
+  // 3. Capacity: free rooms − unassigned-room reservations, at least one left.
+  const capacity = typeRooms.filter((r: any) =>
+    !blockedByHoldOrWo.has(Number(r.id)) && !occupiedRoomIds.has(Number(r.id))
+  ).length - unassignedFolioIds.size;
+  return capacity > 0;
 }
 
 // Laravel Allotment::checkAllotmentRoom (:31-82) — quota decrement per weekday is
@@ -1319,7 +1366,10 @@ export async function performChangeStayDate(
 
     // An explicit departure date must keep the same length of stay, otherwise a
     // "date change" silently turns a 3-night booking into a 1-night one.
-    if (checkOutDate) {
+    // Sub-folios (GIT children) may legitimately change stay length as long as
+    // the new window stays inside the parent folio's range — that guard lives in
+    // updateSubFolioImpl. Do not reject their date changes here.
+    if (checkOutDate && Number(folio.parent ?? 0) === 0) {
       const nights = Math.max(1, Math.round((new Date(new Date(folio.check_out_date).toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime() - currentDay) / dayMs));
       const wanted = new Date(new Date(String(checkOutDate).slice(0, 10) + 'T00:00:00.000Z').getTime() - targetDay).getTime();
       const wantedNights = Math.round(wanted / dayMs);

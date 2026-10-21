@@ -615,8 +615,9 @@ export class ContentController {
   // body; row ids on this grid are guest_profile_id, not other_guests.id.
   private static otherGuestFolioId(req: Request): string {
     const q = req.query as any;
-    const sub = q.subfolio_id;
-    const folio = q.folio_id;
+    const b = req.body as any;
+    const sub = q.subfolio_id ?? b?.subfolio_id;
+    const folio = q.folio_id ?? b?.folio_id;
     if (sub !== undefined && sub !== 'null' && sub !== '') return String(sub);
     return String(folio ?? '');
   }
@@ -727,7 +728,12 @@ export class ContentController {
     try {
       const pid = BigInt(req.user?.lastProperty ?? 0);
       const body: any = req.body ?? {};
-      const folioIdRaw = ContentController.otherGuestFolioId(req) || (body.folio_id != null ? String(body.folio_id) : '');
+      // Prefer the explicit subfolio target when the caller (Other Guest tab on
+      // a subfolio page) posts `subfolio_id`. Without this the Other Guest is
+      // saved on the master folio and never shows up when viewing the subfolio.
+      const folioIdRaw = ContentController.otherGuestFolioId(req)
+        || (body.subfolio_id != null ? String(body.subfolio_id) : '')
+        || (body.folio_id != null ? String(body.folio_id) : '');
       if (!/^\d+$/.test(folioIdRaw)) { badRequest(res, 'The folio id field is required.'); return; }
       // Laravel store() takes `idx` (array of guest_profiles ids) from the
       // checked rows of the guest picker popup, not a single guest_profile_id.

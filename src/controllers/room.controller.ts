@@ -415,11 +415,14 @@ export class RoomController {
           where: {
             date: { gte: start, lt: end },
             ...(pidScope ? { property_id: Number(pidScope) } : {}),
-            OR: [{ room_type_id: id }, { room_type_id_next: id }],
+            AND: [
+              { OR: [{ room_type_id: id }, { room_type_id_next: id }, { rooms: { room_type_id: id } }] },
+              { OR: [{ room_id: { gt: 0 } }, { room_id_next: { gt: 0 } }] },
+            ],
+            deleted_at: null,
             folios: { status_reservation: { in: [0, 3] }, deleted_at: null, ...(folioId ? { id: { not: folioId } } : {}) },
-            room_id: { gt: 0 },
           },
-          select: { room_id: true },
+          select: { room_id: true, room_id_next: true },
         }),
         prisma.rooms.findMany({
           where: { room_type_id: id, status: 1, deleted_at: null, is_physical: true, room_status: { not: 4 }, ...(pidScope ? { property_id: Number(pidScope) } : {}) },
@@ -430,7 +433,7 @@ export class RoomController {
       const blocked = new Set<string>();
       for (const b of blockedByAvailability) blocked.add(String(b.room_id));
       for (const w of blockedByWorkOrder) blocked.add(String(w.room_id));
-      for (const r of busyReservations) blocked.add(String(r.room_id));
+      for (const r of busyReservations as any[]) { if (r.room_id) blocked.add(String(r.room_id)); if (r.room_id_next) blocked.add(String(r.room_id_next)); }
       const available = rooms.filter((r) => !blocked.has(String(r.id)));
 
       const mht = await prisma.model_has_types.findMany({
@@ -516,6 +519,7 @@ export class RoomController {
           where: {
             date: { gte: start, lt: end },
             OR: [{ room_type_id: id }, { room_type_id_next: id }],
+            deleted_at: null,
             folios: { status_reservation: { in: [0, 3] }, deleted_at: null },
             room_id: { gt: 0n },
           },
