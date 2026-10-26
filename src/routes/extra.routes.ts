@@ -56,6 +56,45 @@ router.get('/channel-manager-interface/:id/edit', authMiddleware, (req, res) => 
 router.put('/channel-manager-interface/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.update(req, res); });
 router.delete('/channel-manager-interface/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_interfaces'; generic.destroy(req, res); });
 
+// Channel Manager Room Type + Rate Plan (parity with base controllers)
+function cmFilter(req: Request, res: Response) {
+  req.params.model = 'channel_manager_room_types';
+  const cmId = (req.query as any).ChannelManagerInterface_id || (req.body as any)?.ChannelManagerInterface_id || (req.query as any)?.channel_manager_interface_id;
+  if (cmId) { (req.query as any).channel_manager_interface_id = cmId; }
+  generic.list(req, res);
+}
+router.get('/channel-manager-room-type', authMiddleware, cmFilter);
+router.get('/channel-manager-room-type/create', authMiddleware, (req, res) => { req.params.model = 'channel_manager_room_types'; generic.createForm(req, res); });
+router.post('/channel-manager-room-type', authMiddleware, (req, res) => {
+  req.params.model = 'channel_manager_room_types';
+  const directId = (req.body as any)?.ChannelManagerInterface_id ?? (req.body as any)?.channel_manager_interface_id ?? (req.query as any)?.ChannelManagerInterface_id;
+  if (directId) (req.body as any).channel_manager_interface_id = directId;
+  generic.create(req, res);
+});
+router.get('/channel-manager-room-type/:id/update', authMiddleware, (req, res) => { req.params.model = 'channel_manager_room_types'; generic.editForm(req, res); });
+router.get('/channel-manager-room-type/:id/edit', authMiddleware, (req, res) => { req.params.model = 'channel_manager_room_types'; generic.editForm(req, res); });
+router.put('/channel-manager-room-type/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_room_types'; generic.update(req, res); });
+router.delete('/channel-manager-room-type/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_room_types'; generic.destroy(req, res); });
+
+function cmRateFilter(req: Request, res: Response) {
+  req.params.model = 'channel_manager_rate_plans';
+  const cmId = (req.query as any).ChannelManagerInterface_id || (req.body as any)?.ChannelManagerInterface_id || (req.query as any)?.channel_manager_interface_id;
+  if (cmId) { (req.query as any).channel_manager_interface_id = cmId; }
+  generic.list(req, res);
+}
+router.get('/channel-manager-rate-plan', authMiddleware, cmRateFilter);
+router.get('/channel-manager-rate-plan/create', authMiddleware, (req, res) => { req.params.model = 'channel_manager_rate_plans'; generic.createForm(req, res); });
+router.post('/channel-manager-rate-plan', authMiddleware, (req, res) => {
+  req.params.model = 'channel_manager_rate_plans';
+  const directId = (req.body as any)?.ChannelManagerInterface_id ?? (req.body as any)?.channel_manager_interface_id ?? (req.query as any)?.ChannelManagerInterface_id;
+  if (directId) (req.body as any).channel_manager_interface_id = directId;
+  generic.create(req, res);
+});
+router.get('/channel-manager-rate-plan/:id/update', authMiddleware, (req, res) => { req.params.model = 'channel_manager_rate_plans'; generic.editForm(req, res); });
+router.get('/channel-manager-rate-plan/:id/edit', authMiddleware, (req, res) => { req.params.model = 'channel_manager_rate_plans'; generic.editForm(req, res); });
+router.put('/channel-manager-rate-plan/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_rate_plans'; generic.update(req, res); });
+router.delete('/channel-manager-rate-plan/:id', authMiddleware, (req, res) => { req.params.model = 'channel_manager_rate_plans'; generic.destroy(req, res); });
+
 // Content Room
 router.get('/content-room', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.list(req, res); });
 router.get('/content-room/create', authMiddleware, (req, res) => { req.params.model = 'content_rooms'; generic.createForm(req, res); });

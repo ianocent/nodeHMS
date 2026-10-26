@@ -40,6 +40,7 @@ import pgAdminRoutes from './routes/pg-admin.routes';
 import initialSetupRoutes from './routes/initial-setup.routes';
 import { bookingRoutes } from './routes/booking.routes';
 import { middlewareRoutes } from './routes/middleware.routes';
+import syncRoutes from './routes/sync.routes';
 import { posRoutes } from './routes/pos.routes';
 import pdfRoutes from './routes/pdf.routes';
 import { initQueue } from './config/queue';
@@ -269,6 +270,7 @@ app.use('/booking', bookingRoutes);
 // still 404'd.
 app.use('/middleware', middlewareRoutes);
 app.use('/middleware/booking', bookingRoutes);
+app.use('/sync', syncRoutes);
 
 // Mobile POS (Laravel web.php parity, public)
 app.use(posRoutes);

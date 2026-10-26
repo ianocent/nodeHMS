@@ -204,7 +204,7 @@ export class ReportController {
     try {
       const rawPathParam = (req.params && (req.params[0] !== undefined ? req.params[0] : req.params.path)) as any;
       const path = typeof rawPathParam === 'string' ? rawPathParam : Array.isArray(rawPathParam) ? rawPathParam.join('/') : (rawPathParam || '');
-      const pid = req.user?.lastProperty ?? 0n;
+      const pid = req.user?.lastProperty ? Number(req.user?.lastProperty) : 0;
       const params = { ...parseReportParams(req), ...(req.query as any), propertyId: pid, folioId: req.query.folio_id as string || '' };
 
       const segments = path.split('/').filter(Boolean);
