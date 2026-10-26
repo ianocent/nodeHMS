@@ -918,6 +918,8 @@ async function updateSubFolioImpl(req: Request, res: Response, id: bigint): Prom
           first_name: true, last_name: true, email: true, telp: true,
           mobile_phone: true, address: true, postal_code: true, gender: true,
           city_id: true, country_id: true, nationality_id: true,
+          birth_of_date: true, status_profile: true, is_subscribe: true,
+          card_type: true, card_number: true, card_expiry: true,
         },
       });
       if (profile) {
@@ -932,6 +934,12 @@ async function updateSubFolioImpl(req: Request, res: Response, id: bigint): Prom
         guestUpdate.city_id = profile.city_id;
         guestUpdate.country_id = profile.country_id;
         guestUpdate.nationality_id = profile.nationality_id;
+        guestUpdate.birth_of_date = profile.birth_of_date ?? null;
+        guestUpdate.status_profile = profile.status_profile == null ? null : String(profile.status_profile);
+        guestUpdate.is_subscribe = profile.is_subscribe ?? null;
+        guestUpdate.card_type = profile.card_type ?? null;
+        guestUpdate.card_number = profile.card_number ?? null;
+        guestUpdate.card_expiry = profile.card_expiry ?? null;
       }
     }
     await prisma.folios.update({ where: { id: folio.id }, data: guestUpdate });
@@ -959,12 +967,16 @@ async function updateSubFolioImpl(req: Request, res: Response, id: bigint): Prom
 
   // Stay must be inside the parent folio's window (= Laravel :1042-1048)
   if (Number(folio.parent ?? 0) !== 0) {
-    const parentFolio = await prisma.folios.findUnique({ where: { id: BigInt(Number(folio.parent)) } });
-    if (parentFolio && parentFolio.check_in_date != null && parentFolio.check_out_date != null
-      && (new Date(checkInNight) < new Date(new Date(parentFolio.check_in_date).toISOString().slice(0, 10))
-        || new Date(checkOutNight) > new Date(new Date(parentFolio.check_out_date).toISOString().slice(0, 10)))) {
-      badRequest(res, 'Check In Date or Check Out Date Not Valid');
-      return;
+    const parentFolio = await prisma.folios.findUnique({ where: { id: BigInt(Number(folio.parent)) }, select: { check_in_date: true, check_out_date: true } });
+    if (parentFolio && parentFolio.check_in_date != null && parentFolio.check_out_date != null) {
+      const pIn = new Date(new Date(parentFolio.check_in_date).toISOString().slice(0, 10) + 'T00:00:00Z');
+      const pOut = new Date(new Date(parentFolio.check_out_date).toISOString().slice(0, 10) + 'T00:00:00Z');
+      const subIn = new Date(checkInNight + 'T00:00:00Z');
+      const subOut = new Date(checkOutNight + 'T00:00:00Z');
+      if (subIn < pIn || subOut > pOut) {
+        badRequest(res, 'Check In Date or Check Out Date Not Valid');
+        return;
+      }
     }
   }
 
@@ -3743,6 +3755,16 @@ success(res, formatted, 'Success', 200, {
         card_type,
         card_number,
         card_expiry,
+        gender,
+        birth_of_date,
+        nationality_id,
+        status_profile,
+        is_subscribe,
+        is_do_not_contact,
+        address,
+        city_id,
+        country_id,
+        postal_code,
         remark,
         remark_ins,
         booking_agent_id,
@@ -3760,6 +3782,7 @@ success(res, formatted, 'Success', 200, {
         is_do_not_disturb,
         is_incognito,
         is_long_stay,
+        image,
       } = req.body;
 
       // Resolve company name
@@ -3842,6 +3865,9 @@ success(res, formatted, 'Success', 200, {
       if (is_do_not_disturb !== undefined) updateData.is_do_not_disturb = !!is_do_not_disturb;
       if (is_incognito !== undefined) updateData.is_incognito = !!is_incognito;
       if (is_long_stay !== undefined) updateData.is_long_stay = !!is_long_stay;
+      if (image !== undefined) {
+        updateData.image = image || null;
+      }
 
       await prisma.folios.update({ where: { id }, data: updateData });
 
@@ -3949,6 +3975,72 @@ success(res, formatted, 'Success', 200, {
       if (card_expiry !== undefined) {
         updateData.card_expiry = card_expiry;
         guestPatch.card_expiry = card_expiry;
+      }
+      // QA — "Folio Detail Sub Folio: Data Guest tidak tersimpan (Gender, Date
+      // of Birth, Status, Nationality, Address, City, Country, Postal Code,
+      // toggle subscribe, toggle Dont Contact)". The folio edit form posts
+      // these on /cms/reservation/:id; the controller only knew first/last
+      // name, telp, email and the card fields. References:
+      // ReservationController::update (:1512-1560) copies the guest block onto
+      // both the folio and the guest profile.
+      //
+      // Note the type split: `folios.city_id` / `country_id` / `nationality_id`
+      // are Int, `guest_profiles` uses Int too, `folios.status_profile` is a
+      // String while `guest_profiles.status_profile` is an Int, and
+      // `is_do_not_contact` only exists on `folios`.
+      const toNullableInt = (v: any): number | null => {
+        if (v === null || v === '' || v === undefined) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.trunc(n) : null;
+      };
+      const toBool = (v: any): boolean => v === true || v === 1 || v === '1' || v === 'true';
+      if (gender !== undefined) {
+        updateData.gender = gender;
+        guestPatch.gender = gender;
+      }
+      if (birth_of_date !== undefined) {
+        const dob = birth_of_date ? new Date(birth_of_date) : null;
+        updateData.birth_of_date = dob && !isNaN(dob.getTime()) ? dob : null;
+        guestPatch.birth_of_date = dob && !isNaN(dob.getTime()) ? dob : null;
+      }
+      if (nationality_id !== undefined) {
+        const nid = toNullableInt(nationality_id);
+        updateData.nationality_id = nid;
+        guestPatch.nationality_id = nid;
+      }
+      if (status_profile !== undefined) {
+        // folio column is varchar, profile column is int
+        updateData.status_profile = status_profile === null ? null : String(status_profile);
+        guestPatch.status_profile = toNullableInt(status_profile);
+      }
+      if (is_subscribe !== undefined) {
+        updateData.is_subscribe = toBool(is_subscribe);
+        guestPatch.is_subscribe = toBool(is_subscribe);
+      }
+      if (is_do_not_contact !== undefined) {
+        // guest_profiles has no is_do_not_contact column — folio only.
+        updateData.is_do_not_contact = toBool(is_do_not_contact);
+      }
+      if (address !== undefined) {
+        updateData.address = address;
+        guestPatch.address = address;
+      }
+      if (city_id !== undefined) {
+        const cid = toNullableInt(city_id);
+        updateData.city_id = cid;
+        guestPatch.city_id = cid;
+      }
+      if (country_id !== undefined) {
+        const coid = toNullableInt(country_id);
+        updateData.country_id = coid;
+        guestPatch.country_id = coid;
+      }
+      if (postal_code !== undefined) {
+        updateData.postal_code = postal_code;
+        guestPatch.postal_code = postal_code;
+      }
+      if (image !== undefined) {
+        guestPatch.image = image || null;
       }
       if (Object.keys(guestPatch).length > 0 && guestProfileId) {
         try {
@@ -4773,15 +4865,12 @@ let allAvailable = true;
         return;
       }
 
+      // Laravel ReservationController@unAssignRoom :3060-3065 clears the room
+      // on EVERY reservation row of the folio. The old `status: 0` filter
+      // matched no row at all, so Un Assign Room silently did nothing.
       await prisma.reservations.updateMany({
-        where: {
-          folio_id: folio.id,
-          deleted_at: null,
-          date: { gte: reservation.date },
-          room_type_id: reservation.room_type_id,
-          status: 0
-        },
-        data: { room_id: null, updated_at: new Date(), updated_by: userId },
+        where: { folio_id: folio.id, deleted_at: null },
+        data: { room_id: null, room_id_next: null, updated_at: new Date(), updated_by: userId },
       });
 
       const updatedFolio = await prisma.folios.findUnique({
@@ -5184,13 +5273,24 @@ let allAvailable = true;
               parentUpdated = Number(parentId);
             }
           } else if (status_reservation === 'check_out') {
-            const remaining = await prisma.folios.count({
+            // The master may only check out when EVERY non-cancelled child
+            // folio is already checked out. Counting only `check_in` children
+            // left children in `reservation` / `pending` invisible, so a single
+            // checked-out sub-folio flipped the master — the QA report
+            // "Master Folio berubah status jadi Check Out saat salah 1 Subfolio
+            // terCheckOut".
+            const notCheckedOut = await prisma.folios.count({
               where: {
                 parent: parentId,
-                status_reservation: STATUS_RESERVATION.check_in.id,
+                status_reservation: {
+                  notIn: [
+                    STATUS_RESERVATION.check_out.id,
+                    STATUS_RESERVATION.cancel_reservation.id,
+                  ],
+                },
               },
             });
-            if (remaining === 0) {
+            if (notCheckedOut === 0) {
               // Laravel :3420 — AND the master's own balance (ex-posting) must
               // settle: ceil(getBalanceWithOutPosting()) in [0,1,-1]. Without
               // this gate the master flipped to Check Out the moment the last
@@ -5359,7 +5459,7 @@ let allAvailable = true;
 
       await prisma.$transaction(
         async (tx) => {
-          if (reservation.room_id && folio.status_reservation === 3) { // 3 is STATUS_RESERVATION.check_in.id
+          if (reservation.room_id && folio.status_reservation === STATUS_RESERVATION.check_in.id) {
             await tx.rooms.update({
               where: { id: reservation.room_id },
               data: { room_status: 1, maid_status: 3 } // vacant, dirty
@@ -5367,12 +5467,17 @@ let allAvailable = true;
           }
 
           await tx.reservations.updateMany({
-            where: { 
-              folio_id: folio.id, 
+            // Laravel ReservationItemController@assignRoom :811-846 filters on
+            // `is_posting = 0` only. The old `status: 0` here matched NOTHING:
+            // every reservation row is created with status = 1 (STATUS_ACTIVE),
+            // so the room was never written. That is the QA report
+            // "Room yang sudah di assigned tidak muncul di folio detail".
+            where: {
+              folio_id: folio.id,
               deleted_at: null,
               date: { gte: reservation.date },
               room_type_id: reservation.room_type_id,
-              status: 0
+              is_posting: 0,
             },
             data: updateData,
           });

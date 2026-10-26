@@ -398,6 +398,12 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (!name) { badRequest(res, 'name required'); return; }
+      const typeVal = v('type_company');
+      if (typeVal === undefined || typeVal === null || typeVal === '') { badRequest(res, 'type_company required'); return; }
+      const sourceVal = v('source');
+      if (sourceVal === undefined || sourceVal === null || sourceVal === '' || Array.isArray(sourceVal)) { badRequest(res, 'source required'); return; }
+      const marketSegVal = v('market_segment_1');
+      if (marketSegVal === undefined || marketSegVal === null || marketSegVal === '' || Array.isArray(marketSegVal)) { badRequest(res, 'market_segment_1 required'); return; }
       // Laravel CompanyProfileController@store:253
       // 'name' => [... 'unique_extend:company_profiles,name,NULL,id,deleted_at,NULL']
       // Property-scoped: company_profiles carries property_id and each property keeps
@@ -445,6 +451,13 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const { name, email, telp, mobile_phone, billing_address, billing_city, billing_country, credit_limit, status } = req.body;
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
+      if (req.body.name !== undefined && !req.body.name) { badRequest(res, 'name required'); return; }
+      const typeValUpd = v('type_company');
+      if (typeValUpd !== undefined && (typeValUpd === null || typeValUpd === '')) { badRequest(res, 'type_company required'); return; }
+      const sourceValUpd = v('source');
+      if (sourceValUpd !== undefined && (sourceValUpd === null || sourceValUpd === '' || Array.isArray(sourceValUpd))) { badRequest(res, 'source required'); return; }
+      const marketSegValUpd = v('market_segment_1');
+      if (marketSegValUpd !== undefined && (marketSegValUpd === null || marketSegValUpd === '' || Array.isArray(marketSegValUpd))) { badRequest(res, 'market_segment_1 required'); return; }
       // Laravel CompanyProfileController@update:503 (own id excluded).
       if (name !== undefined) {
         const dupName = await uniqueExtendError(prisma, 'company_profiles', 'name', 'name', name, id, {

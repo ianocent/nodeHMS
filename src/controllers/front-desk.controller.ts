@@ -1363,24 +1363,6 @@ export async function performChangeStayDate(
     const targetDay = new Date(String(checkInDate).slice(0, 10) + 'T00:00:00.000Z').getTime();
     if (Number.isNaN(targetDay)) return { ok: false, code: 400, message: 'Invalid check-in date' };
     ms = targetDay - currentDay;
-
-    // An explicit departure date must keep the same length of stay, otherwise a
-    // "date change" silently turns a 3-night booking into a 1-night one.
-    // Sub-folios (GIT children) may legitimately change stay length as long as
-    // the new window stays inside the parent folio's range — that guard lives in
-    // updateSubFolioImpl. Do not reject their date changes here.
-    if (checkOutDate && Number(folio.parent ?? 0) === 0) {
-      const nights = Math.max(1, Math.round((new Date(new Date(folio.check_out_date).toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime() - currentDay) / dayMs));
-      const wanted = new Date(new Date(String(checkOutDate).slice(0, 10) + 'T00:00:00.000Z').getTime() - targetDay).getTime();
-      const wantedNights = Math.round(wanted / dayMs);
-      if (wantedNights !== nights) {
-        return {
-          ok: false,
-          code: 400,
-          message: `Stay length must stay ${nights} night(s); the requested dates are ${wantedNights}`,
-        };
-      }
-    }
   } else {
     const shift = Number(days ?? 0);
     if (!Number.isFinite(shift) || shift === 0) {
@@ -1389,14 +1371,46 @@ export async function performChangeStayDate(
     ms = Math.trunc(shift) * dayMs;
   }
 
-  if (ms === 0) return { ok: true };
+  if (ms === 0 && !checkOutDate) return { ok: true };
+
+  // Absolute dates win over a pure shift. The old implementation shifted the
+  // OLD check-out by the check-in delta and never read `checkOutDate`, so a
+  // date change that also altered the stay length kept the wrong departure —
+  // the QA report "Move Reservation lewat Change Check-in/out date: Check Out
+  // Date masih belum tersimpan dengan benar".
+  const nightOf = (v: any): Date | null => {
+    if (v == null || v === '') return null;
+    const s = String(v).slice(0, 10);
+    const d = new Date(`${s}T00:00:00.000Z`);
+    return isNaN(d.getTime()) ? null : d;
+  };
+  const targetCheckIn = checkInDate ? nightOf(checkInDate) : (folio.check_in_date ? new Date(folio.check_in_date.getTime() + ms) : null);
+  const targetCheckOut = checkOutDate ? nightOf(checkOutDate) : (folio.check_out_date ? new Date(folio.check_out_date.getTime() + ms) : null);
+  if (targetCheckIn && targetCheckOut && targetCheckOut.getTime() <= targetCheckIn.getTime()) {
+    return { ok: false, code: 400, message: 'Check-out date must be after check-in date' };
+  }
+
+  // Laravel :3330-3352 — a GIT sub-folio must stay inside its master window.
+  if (Number(folio.parent ?? 0) !== 0 && targetCheckIn && targetCheckOut) {
+    const master = await prisma.folios.findUnique({
+      where: { id: BigInt(Number(folio.parent)) },
+      select: { check_in_date: true, check_out_date: true },
+    });
+    if (master?.check_in_date && master?.check_out_date) {
+      const mIn = new Date(new Date(master.check_in_date).toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime();
+      const mOut = new Date(new Date(master.check_out_date).toISOString().slice(0, 10) + 'T00:00:00.000Z').getTime();
+      if (targetCheckIn.getTime() < mIn || targetCheckOut.getTime() > mOut) {
+        return { ok: false, code: 400, message: 'Check In Date or Check Out Date is outside the master folio stay' };
+      }
+    }
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.folios.update({
       where: { id },
       data: {
-        ...(folio.check_in_date ? { check_in_date: new Date(folio.check_in_date.getTime() + ms) } : {}),
-        ...(folio.check_out_date ? { check_out_date: new Date(folio.check_out_date.getTime() + ms) } : {}),
+        ...(targetCheckIn ? { check_in_date: targetCheckIn } : {}),
+        ...(targetCheckOut ? { check_out_date: targetCheckOut } : {}),
         data: JSON.stringify({ ...safeParseData(folio.data), remark_change_date: reason ?? remark ?? null }),
         updated_by: userId ?? null,
         updated_at: new Date(),
@@ -1411,6 +1425,12 @@ export async function performChangeStayDate(
           check_out_date: r.check_out_date ? new Date(new Date(r.check_out_date).getTime() + ms) : null,
           updated_at: new Date(),
         },
+      });
+    }
+    // A shorter stay must not keep nightly rows past the new departure.
+    if (targetCheckOut) {
+      await tx.reservations.deleteMany({
+        where: { folio_id: id, deleted_at: null, is_posting: 0, date: { gte: targetCheckOut } },
       });
     }
   });

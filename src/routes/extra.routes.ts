@@ -7,7 +7,7 @@ import { RoomController } from '../controllers/room.controller';
 import { StaahController } from '../controllers/staah.controller';
 import { SystemController } from '../controllers/system.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { getPermissionFlags, requirePermission } from '../middleware/permission.middleware';
+import { getPermissionFlags, requirePermission, requirePermissionAny } from '../middleware/permission.middleware';
 import { moneyFormat } from '../utils/cmsConfig';
 import { STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
 import { encrypt } from '../utils/encryption';
@@ -491,7 +491,12 @@ router.get('/countryByRegion', authMiddleware, requirePermission(69, 'view'), co
 router.get('/countrybyregion', authMiddleware, requirePermission(69, 'view'), countryByRegionHandler);
 
 // ── Assign Room (GET — mirror Laravel AssignRoomController@index/default/defaultParent) ──
-router.get('/assign-room', authMiddleware, requirePermission(80, 'view'), async (req: Request, res: Response) => {
+// Laravel leaves this route outside any single-menu permission guard, and the
+// picker is opened from several modules (Folio Listing 60, Reservation 62/63,
+// Front Desk 69, Room Master Folio). Guarding it with menu 80 alone 403'd the
+// popup when it was opened from Folio Listing — the QA report "Assign Room
+// from Folio Listing Error".
+router.get('/assign-room', authMiddleware, requirePermissionAny('view', [60, 62, 63, 69, 80, 1162]), async (req: Request, res: Response) => {
   try {
     const propertyId = req.user?.lastProperty;
     const folioIdStr = req.query.folio_id as string;
