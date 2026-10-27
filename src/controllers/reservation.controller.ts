@@ -3346,7 +3346,11 @@ success(res, formatted, 'Success', 200, {
       };
 
       const isDayUse = !!folio.is_day_use;
-      const lastReservation = reservations[reservations.length - 1] || null;
+      // Prefer a reservation that actually carries an assigned room so the folio-
+      // level Room field does not render blank when the last (posting) row has
+      // no room even though an earlier non-posting row was assigned one.
+      const lastReservation =
+        [...reservations].reverse().find((r: any) => r.room_id) || reservations[reservations.length - 1] || null;
       const lastRoom = lastReservation?.room_id ? roomMap.get(Number(lastReservation.room_id)) : null;
 
       const base64Key = (r: any) => `${r.rate_id}-${r.adult}-${r.child}-${r.add_bed}-${r.room_type_id}-${r.room_id}`;

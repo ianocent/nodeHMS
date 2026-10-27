@@ -276,9 +276,12 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
     for (const [k, group] of Object.entries(groups)) {
       const raw = body[k];
       if (raw === undefined || raw === null || raw === '') continue;
-      const ids = Array.isArray(raw) ? raw.map((o: any) => (o && typeof o === 'object' && 'value' in o ? o.value : o)) : [(raw && typeof raw === 'object' && 'value' in raw) ? raw.value : raw];
+      const rawIds = Array.isArray(raw) ? raw.map((o: any) => (o && typeof o === 'object' && 'value' in o ? o.value : o)) : [(raw && typeof raw === 'object' && 'value' in raw) ? raw.value : raw];
+      const ids = rawIds.filter((t: any) => t !== undefined && t !== null && t !== '' && !Array.isArray(t));
       for (const t of ids) {
-        if (t !== undefined && t !== null && t !== '') rows.push({ model_id: companyId, model_type: 'App\\Models\\CompanyProfile', type_id: t });
+        const type_id = (t && typeof t === 'object' && 'value' in t) ? t.value : t;
+        if (type_id === undefined || type_id === null || type_id === '' || Array.isArray(type_id)) continue;
+        rows.push({ model_id: companyId, model_type: 'App\\Models\\CompanyProfile', type_id });
       }
     }
     if (rows.length) await prisma.model_has_types.createMany({ data: rows });
@@ -404,6 +407,26 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       if (sourceVal === undefined || sourceVal === null || sourceVal === '' || Array.isArray(sourceVal)) { badRequest(res, 'source required'); return; }
       const marketSegVal = v('market_segment_1');
       if (marketSegVal === undefined || marketSegVal === null || marketSegVal === '' || Array.isArray(marketSegVal)) { badRequest(res, 'market_segment_1 required'); return; }
+      // Laravel CompanyProfileController@store validates market_segment_2/3/4 only
+      // when the property enables them. Mirror that so the migrated API agrees
+      // with the reference instead of silently accepting (or rejecting) them.
+      const property = await prisma.properties.findUnique({
+        where: { id: pid },
+        select: { market_segment_1: true, market_segment_2: true, market_segment_3: true, market_segment_4: true },
+      });
+      const segChecks: Array<[string, boolean | null | undefined]> = [
+        ['market_segment_2', property?.market_segment_2],
+        ['market_segment_3', property?.market_segment_3],
+        ['market_segment_4', property?.market_segment_4],
+      ];
+      for (const [key, enabled] of segChecks) {
+        if (!enabled) continue;
+        const val = v(key);
+        if (val === undefined || val === null || val === '' || (Array.isArray(val) && val.length === 0)) {
+          badRequest(res, `${key} required`);
+          return;
+        }
+      }
       // Laravel CompanyProfileController@store:253
       // 'name' => [... 'unique_extend:company_profiles,name,NULL,id,deleted_at,NULL']
       // Property-scoped: company_profiles carries property_id and each property keeps
