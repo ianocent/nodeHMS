@@ -438,7 +438,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       if (dupName) { badRequest(res, dupName); return; }
       const d = await prisma.company_profiles.create({
         data: {
-          property_id: pid, name, type_company: (v('company_type') ?? v('type_company')) || 'Corporate', email, telp, mobile_phone,
+          property_id: pid, name, type_company: String((v('company_type') ?? v('type_company')) || 'Corporate'), email, telp, mobile_phone,
           billing_address: v('billing_address'), billing_city: v('billing_city') == null ? v('billing_city') : String(v('billing_city')), billing_country: v('billing_country') == null ? v('billing_country') : String(v('billing_country')),
           billing_region: v('billing_region'), billing_postal_code: v('billing_postal_code'),
           mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country') == null ? v('mailing_country') : String(v('mailing_country')), mailing_city: v('mailing_city') == null ? v('mailing_city') : String(v('mailing_city')), mailing_postal_code: v('mailing_postal_code'),
@@ -494,7 +494,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       // raw object made Prisma reject the whole update ("Unknown argument `value`"),
       // which is why editing a company always failed. Unwrap it like every other
       // shaped field.
-      if ((v('company_type') ?? v('type_company')) !== undefined) data.type_company = v('company_type') ?? v('type_company');
+      if ((v('company_type') ?? v('type_company')) !== undefined) data.type_company = String(v('company_type') ?? v('type_company'));
       if (email !== undefined) data.email = email; if (telp !== undefined) data.telp = telp;
       if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (v('billing_address') !== undefined) data.billing_address = v('billing_address');
       if (v('billing_city') !== undefined) data.billing_city = v('billing_city') == null ? v('billing_city') : String(v('billing_city')); if (v('billing_country') !== undefined) data.billing_country = v('billing_country') == null ? v('billing_country') : String(v('billing_country'));

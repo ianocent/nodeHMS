@@ -3806,6 +3806,16 @@ success(res, formatted, 'Success', 200, {
         actualCheckOut = new Date(Math.max(...checkOuts));
       }
 
+      // GIT sub-folio: its stay must not extend beyond the master folio's
+      // check-out. Extending a sub-folio requires extending the master first.
+      if (existing.parent && Number(existing.parent) !== 0 && actualCheckOut) {
+        const parentFolio = await prisma.folios.findUnique({ where: { id: existing.parent }, select: { check_out_date: true } });
+        if (parentFolio?.check_out_date && new Date(actualCheckOut) > new Date(parentFolio.check_out_date)) {
+          badRequest(res, 'Sub-folio check-out date cannot exceed the master folio check-out date');
+          return;
+        }
+      }
+
       // Update folio
       const updateData: any = {
         updated_at: new Date(),

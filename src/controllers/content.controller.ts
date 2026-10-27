@@ -792,6 +792,26 @@ export class ContentController {
           },
         });
       }
+      // Sync folio's primary guest info so Folio Listing reflects current guest
+      // when a subfolio's guest is changed (Folio.php parity — listing reads
+      // first_name/last_name/guest_profile_id from folios table).
+      if (idx.length > 0) {
+        const primaryGuest = await prisma.guest_profiles.findUnique({
+          where: { id: BigInt(idx[0]) },
+          select: { id: true, first_name: true, last_name: true },
+        });
+        if (primaryGuest) {
+          await prisma.folios.update({
+            where: { id: folio.id },
+            data: {
+              guest_profile_id: BigInt(idx[0]),
+              first_name: primaryGuest.first_name,
+              last_name: primaryGuest.last_name,
+              updated_at: new Date(),
+            },
+          });
+        }
+      }
       success(res, null, 'Success', 200);
     } catch (err: any) { console.error('Other guest store error:', err); error(res, 'Failed to create other guest', 500); }
   }

@@ -392,7 +392,7 @@ export class UserController {
       data.roles = modelRoles.length ? { value: Number(modelRoles[0].roles.id), label: modelRoles[0].roles.name } : null;
       data.properties = props;
       data.companies = comps.length ? comps[0] : null;
-      data.status = { value: !!user.status, label: user.status ? 'Active' : 'Inactive' };
+      data.status = { value: user.status ? 1 : 0, label: user.status ? 'Active' : 'Inactive' };
       delete data.password;
 
       success(res, data, 'Success');
@@ -483,7 +483,7 @@ export class UserController {
       data.properties = props;
       data.companies = comps[0] || null;
       data.relation = { roles: data.roles ? [data.roles] : [], properties: props, companies: comps[0] || null };
-      data.status = { value: !!user.status, label: user.status ? 'Active' : 'Inactive' };
+      data.status = { value: user.status ? 1 : 0, label: user.status ? 'Active' : 'Inactive' };
       delete data.password;
       success(res, data, 'Success', 200, { master });
     } catch (err: any) {
