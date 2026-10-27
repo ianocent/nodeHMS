@@ -774,7 +774,7 @@ prisma.types.findMany({
         fields: GRID_FIELDS.map((f) => ({ value: f, label: f.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) })),
       };
 
-      const cpExtra = codePosts.find((c: any) => c.id === rate.code_post_extra_bed_id);
+      const cpExtra = codePosts.find((c: any) => Number(c.id) === Number(rate.code_post_extra_bed_id));
       const grp = companyTypes.find((c: any) => c.id.toString() === rate.grouping || c.name === rate.grouping);
 
       const result = {

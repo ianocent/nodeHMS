@@ -398,7 +398,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (!name) { badRequest(res, 'name required'); return; }
-      const typeVal = v('type_company');
+      const typeVal = v('company_type') ?? v('type_company');
       if (typeVal === undefined || typeVal === null || typeVal === '') { badRequest(res, 'type_company required'); return; }
       const sourceVal = v('source');
       if (sourceVal === undefined || sourceVal === null || sourceVal === '' || Array.isArray(sourceVal)) { badRequest(res, 'source required'); return; }
@@ -415,7 +415,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       if (dupName) { badRequest(res, dupName); return; }
       const d = await prisma.company_profiles.create({
         data: {
-          property_id: pid, name, type_company: v('type_company') || 'Corporate', email, telp, mobile_phone,
+          property_id: pid, name, type_company: (v('company_type') ?? v('type_company')) || 'Corporate', email, telp, mobile_phone,
           billing_address: v('billing_address'), billing_city: v('billing_city') == null ? v('billing_city') : String(v('billing_city')), billing_country: v('billing_country') == null ? v('billing_country') : String(v('billing_country')),
           billing_region: v('billing_region'), billing_postal_code: v('billing_postal_code'),
           mailing_address: v('mailing_address'), mailing_region: v('mailing_region'), mailing_country: v('mailing_country') == null ? v('mailing_country') : String(v('mailing_country')), mailing_city: v('mailing_city') == null ? v('mailing_city') : String(v('mailing_city')), mailing_postal_code: v('mailing_postal_code'),
@@ -452,7 +452,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       const v = (k: string): any => { const x = req.body[k]; return x && typeof x === 'object' && 'value' in x ? x.value : x; };
       const b = (k: string): any => { const x = v(k); return x === true || x === 1 || x === '1' || x === 'true' ? true : (x === false || x === 0 || x === '0' || x === 'false' ? false : undefined); };
       if (req.body.name !== undefined && !req.body.name) { badRequest(res, 'name required'); return; }
-      const typeValUpd = v('type_company');
+      const typeValUpd = v('company_type') ?? v('type_company');
       if (typeValUpd !== undefined && (typeValUpd === null || typeValUpd === '')) { badRequest(res, 'type_company required'); return; }
       const sourceValUpd = v('source');
       if (sourceValUpd !== undefined && (sourceValUpd === null || sourceValUpd === '' || Array.isArray(sourceValUpd))) { badRequest(res, 'source required'); return; }
@@ -471,7 +471,7 @@ is_tax_exclude_room: { value: !!property.is_tax_exclude_room, label: property.is
       // raw object made Prisma reject the whole update ("Unknown argument `value`"),
       // which is why editing a company always failed. Unwrap it like every other
       // shaped field.
-      if (v('type_company') !== undefined) data.type_company = v('type_company');
+      if ((v('company_type') ?? v('type_company')) !== undefined) data.type_company = v('company_type') ?? v('type_company');
       if (email !== undefined) data.email = email; if (telp !== undefined) data.telp = telp;
       if (mobile_phone !== undefined) data.mobile_phone = mobile_phone; if (v('billing_address') !== undefined) data.billing_address = v('billing_address');
       if (v('billing_city') !== undefined) data.billing_city = v('billing_city') == null ? v('billing_city') : String(v('billing_city')); if (v('billing_country') !== undefined) data.billing_country = v('billing_country') == null ? v('billing_country') : String(v('billing_country'));

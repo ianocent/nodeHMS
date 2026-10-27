@@ -389,9 +389,11 @@ export class UserController {
       const comps = userCompanies.map((c: any) => ({ value: Number(c.companies.id), label: c.companies.name }));
 
       const data: any = bigintToNumber({ ...user, id: Number(user.id) });
-      data.roles = modelRoles.map((mr: any) => mr.roles);
+      data.roles = modelRoles.length ? { value: Number(modelRoles[0].roles.id), label: modelRoles[0].roles.name } : null;
       data.properties = props;
-      data.companies = comps;
+      data.companies = comps.length ? comps[0] : null;
+      data.status = { value: !!user.status, label: user.status ? 'Active' : 'Inactive' };
+      delete data.password;
 
       success(res, data, 'Success');
     } catch (err: any) {
