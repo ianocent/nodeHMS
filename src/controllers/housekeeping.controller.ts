@@ -3,7 +3,7 @@ import { activeWhere } from '../utils/querySafety';
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
 import { success, error, badRequest, notFound } from '../utils/response';
-import { uniqueExtendError } from '../utils/uniqueExtend';
+import { assertRoomFresh, assertHousekeepingFresh } from '../utils/concurrency';import { uniqueExtendError } from '../utils/uniqueExtend';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { dataSearch } from '../utils/search';
 import { STATUSES } from '../utils/cmsConfig';
@@ -1863,6 +1863,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
   static async roomStatusUpdateStatus(req: Request, res: Response): Promise<void> {
     try {
       const roomId = idParam(req.params.id);
+      if (!(await assertRoomFresh(req, res, roomId))) return;
       const room = await prisma.rooms.findUnique({ where: { id: roomId } });
       if (!room) { notFound(res, 'Not Found'); return; }
 
@@ -1877,6 +1878,7 @@ success(res, bigintToNumber(data), 'Success', 200, {
         orderBy: { created_at: 'desc' },
       });
       if (!openHistory) { notFound(res, 'Housekeeper history not found'); return; }
+      if (!(await assertHousekeepingFresh(req, res, openHistory.id))) return;
 
       const currentUserId = req.user?.id;
       const isAssigned = currentUserId

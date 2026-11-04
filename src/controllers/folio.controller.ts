@@ -12,7 +12,7 @@ import { priceNight } from '../utils/reservationPricing';
 import { availableRoom } from '../utils/roomAvailability';
 import { ROOM_STATUSES, MAID_STATUSES } from '../utils/cmsStatus';
 import { writeAudit } from '../utils/audit';
-import { generateFolioNumber } from '../utils/folioNumber';
+import { assertFolioFresh } from '../utils/concurrency';import { generateFolioNumber } from '../utils/folioNumber';
 
 // Wrapper for drag/copy rebuild — priced per-night row creation against an arbitrary tx client.
 function priceNightPublic(tx: any, opts: {
@@ -447,10 +447,10 @@ export class FolioController {
 
   static async updateStatus(req: Request, res: Response): Promise<void> {
     try {
-      const id = idParam(req.params.folio);
+      const id = idParam(req.params.id);
+      if (!(await assertFolioFresh(req, res, id))) return;
       const userId = req.user?.id;
       const { status_reservation, check_in_date, check_out_date, reason, to_virtual, remark } = req.body;
-
       const folio: any = await prisma.folios.findUnique({ where: { id } });
       if (!folio) {
         notFound(res, 'Folio not found');
@@ -1037,8 +1037,8 @@ export class FolioController {
   static async updateData(req: Request, res: Response): Promise<void> {
     try {
       const id = idParam(req.params.id);
+      if (!(await assertFolioFresh(req, res, id))) return;
       const { remark, remark_ins, check_in_instruction, check_out_instruction, posting_instruction } = req.body;
-
       const folio: any = await prisma.folios.findUnique({ where: { id } });
       if (!folio) {
         notFound(res, 'Folio not found');

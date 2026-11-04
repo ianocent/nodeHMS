@@ -12,8 +12,8 @@ import { mandatoryCheckInBlock, readPropertyMandatory } from '../utils/guestMand
 import { pushCondition, searchPredicate } from '../utils/querySafety';
 import { applyPromoDiscounts, findPromosForNight, priceNight, PromoLike } from '../utils/reservationPricing';
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
-import { availableRoom } from '../utils/roomAvailability';
-import { applySearchField, dataSearch } from '../utils/search';
+import { assertFolioFresh } from '../utils/concurrency';
+import { availableRoom } from '../utils/roomAvailability';import { applySearchField, dataSearch } from '../utils/search';
 import { AuthController } from './auth.controller';
 import {
   folioBalanceMinorUnits,
@@ -814,6 +814,13 @@ async function saveReservationRows(folio: any, items: any[], userId: bigint | un
     cps.forEach((c: any) => codePostById.set(Number(c.id), c));
   }
 
+  // Round money to 2 decimals before persisting. `priceNight()` division can
+  // produce long fractional tails (e.g. tax-inclusive reverse calc) which
+  // PostgreSQL Decimal stores verbatim; the QA bug "pecahan postingan cukup 2
+  // angka di belakang koma (Rate, PB1, SVG Charge)" is these tails leaking
+  // into stored Rate / PB1 / Service Charge.
+  const r2 = (n: number) => Math.round((Number(n ?? 0) || 0) * 100) / 100;
+
   for (const item of items) {
     const itemCheckIn = new Date(item.check_in_date);
     let itemCheckOut = new Date(item.check_out_date);
@@ -860,12 +867,12 @@ async function saveReservationRows(folio: any, items: any[], userId: bigint | un
           status_reservation: folio.status_reservation ?? 3,
           status: STATUS_ACTIVE,
           night: nights,
-          amount: pricing.amount,
-          amountt: pricing.amount,
-          total: pricing.total,
-          service_charge: pricing.service_charge,
-          pb1: pricing.pb1,
-          tax3: pricing.tax3,
+          amount: r2(pricing.amount),
+          amountt: r2(pricing.amount),
+          total: r2(pricing.total),
+          service_charge: r2(pricing.service_charge),
+          pb1: r2(pricing.pb1),
+          tax3: r2(pricing.tax3),
           eta: item.eta ?? null,
           etd: item.etd ?? null,
           data: JSON.stringify({ rate_price: pricing.rate_price, service: pricing.service_charge, pb1: pricing.pb1, tax3: pricing.tax3, total: pricing.total }),
@@ -1682,6 +1689,23 @@ success(res, formatted, 'Success', 200, {
       ]);
       const companyName = new Map(companyRows.map((c: any) => [Number(c.id), c.name]));
       const staffName = new Map(staffRows.map((u: any) => [Number(u.id), u.name]));
+
+      // Same promotion as edit(): pending room_id_next of a not-yet-checked-in
+      // folio is the assigned room.
+      const promoteNext = folio.status_reservation !== 0 && folio.status_reservation !== 1 && folio.status_reservation !== 2;
+      if (promoteNext) {
+        const nextIds = Array.from(new Set(rows.filter((r: any) => !r.room_id && r.room_id_next).map((r: any) => r.room_id_next)));
+        if (nextIds.length) {
+          const nextRooms = await prisma.rooms.findMany({ where: { id: { in: nextIds as bigint[] } }, select: { id: true, name: true } });
+          const nm = new Map(nextRooms.map((x: any) => [String(x.id), x.name]));
+          rows.forEach((r: any) => {
+            if (!r.room_id && r.room_id_next) {
+              r.room_id = r.room_id_next;
+              r.rooms = { id: r.room_id_next, name: nm.get(String(r.room_id_next)) ?? '' };
+            }
+          });
+        }
+      }
 
       const data = rows.map((r: any) => ({
         id: Number(r.id),
@@ -3170,6 +3194,17 @@ success(res, formatted, 'Success', 200, {
         });
         if (childFolio) reservations = childFolio.reservations;
       }
+      // A room assigned from Folio Listing lands in room_id_next. While the folio
+      // has not checked in that is a plain assignment (Laravel Folio::saveReservation
+      // :2548-2584 promotes it into room_id), not a pending Change Room. Without
+      // this the detail showed an empty Room and switched Change Room on.
+      // A row can also carry room_id AND a stale room_id_next (same or older pick);
+      // that must not light Change Room either, so promote whenever _next is set.
+      if (folio.status_reservation !== 0 && folio.status_reservation !== 1 && folio.status_reservation !== 2) {
+        reservations = (reservations as any[]).map((r: any) =>
+          r.room_id_next ? { ...r, room_id: r.room_id_next, room_id_next: null } : r
+        ) as any;
+      }
       // Laravel Folio::formatAction check_in: parent GIT needs >=1 child folio with status reservation (3)
       const childReservationCount = isParentGit
         ? await prisma.folios.count({ where: { parent: id, deleted_at: null, status_reservation: 3 } })
@@ -3398,7 +3433,7 @@ success(res, formatted, 'Success', 200, {
           check_in_date: checkInDate,
           check_out_date: checkOutDate,
           room_type_id: first.room_type_id ? { value: Number(first.room_type_id), label: first.room_type_name ?? first.room_types?.name ?? '' } : [],
-          room_id: first.room_id ? { value: Number(first.room_id), label: first.room_name ?? roomMap.get(Number(first.room_id))?.name ?? '' } : [],
+          room_id: first.room_id ? { value: Number(first.room_id), label: roomMap.get(Number(first.room_id))?.name || first.room_name || '' } : [],
           room_type_id_origin: first.room_type_id ? { value: Number(first.room_type_id), label: first.room_types?.name ?? '' } : [],
           room_id_origin: { value: first.room_id ? Number(first.room_id) : 0, label: first.room_id ? (roomMap.get(Number(first.room_id))?.name ?? '') : '' },
           room_type_id_next: first.room_type_id_next ? { value: Number(first.room_type_id_next), label: '' } : [],
@@ -4056,6 +4091,12 @@ success(res, formatted, 'Success', 200, {
       if (image !== undefined) {
         guestPatch.image = image || null;
       }
+      // updateData was extended above (resolved first/last name, gender, card,
+      // address ...) AFTER the folios.update at the top ran, so those mirrored
+      // values never reached the folio row. The folio list reads the folio's own
+      // first_name/last_name first, which is why a changed guest kept the old name.
+      await prisma.folios.update({ where: { id }, data: updateData });
+
       if (Object.keys(guestPatch).length > 0 && guestProfileId) {
         try {
           await prisma.guest_profiles.update({
@@ -4680,9 +4721,16 @@ let allAvailable = true;
         const dataJson = folio.data ? safeParseFolioData(folio.data) : {};
         await prisma.folios.update({ where: { id: folio.id }, data: { data: JSON.stringify({ ...dataJson, message: body.message ?? null }), updated_at: new Date() } });
       } else if (type === 'assign_room') {
+        // Checked-in folio: pending room change (room_id_next). Otherwise the
+        // assignment is final, same result Laravel reaches when saveReservation
+        // later promotes room_id_next into room_id.
+        const nextRoom = body.room_id_next ? BigInt(body.room_id_next) : null;
+        const checkedIn = folio.status_reservation === 0;
         await prisma.reservations.updateMany({
           where: { folio_id: folio.id, deleted_at: null },
-          data: { room_id_next: body.room_id_next ? BigInt(body.room_id_next) : null },
+          data: checkedIn || !nextRoom
+            ? { room_id_next: nextRoom }
+            : { room_id: nextRoom, room_id_next: null, updated_at: new Date() },
         });
       }
       await prisma.folios.update({ where: { id: folio.id }, data: { updated_at: new Date() } });
@@ -4696,6 +4744,7 @@ let allAvailable = true;
     try {
       const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const folioId = BigInt(idParam);
+      if (!(await assertFolioFresh(req, res, folioId))) return;
       const list: any[] = Array.isArray(req.body?.reservation_list) ? req.body.reservation_list : [];
       if (list.length === 0) { badRequest(res, 'The reservation list field is required.'); return; }
 
@@ -4843,7 +4892,7 @@ let allAvailable = true;
 
       await prisma.reservations.updateMany({
         where: { folio_id: folioId, deleted_at: null },
-        data: { room_id: null, room_id_next: null, updated_at: new Date(), updated_by: userId },
+        data: { room_id: null, room_id_next: null, room_name: null, updated_at: new Date(), updated_by: userId },
       });
 
       enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
@@ -4878,13 +4927,15 @@ let allAvailable = true;
         notFound(res, 'Folio Not Found');
         return;
       }
+      if (!(await assertFolioFresh(req, res, reservation.folio_id))) return;
+       if (!(await assertFolioFresh(req, res, reservation.folio_id))) return;
 
       // Laravel ReservationController@unAssignRoom :3060-3065 clears the room
       // on EVERY reservation row of the folio. The old `status: 0` filter
       // matched no row at all, so Un Assign Room silently did nothing.
       await prisma.reservations.updateMany({
         where: { folio_id: folio.id, deleted_at: null },
-        data: { room_id: null, room_id_next: null, updated_at: new Date(), updated_by: userId },
+        data: { room_id: null, room_id_next: null, room_name: null, updated_at: new Date(), updated_by: userId },
       });
 
       const updatedFolio = await prisma.folios.findUnique({
@@ -5431,6 +5482,7 @@ let allAvailable = true;
         notFound(res, 'Folio Not Found');
         return;
       }
+      if (!(await assertFolioFresh(req, res, reservation.folio_id))) return;
 
       if (room_id) {
         const targetRoomId = BigInt(room_id);
@@ -5469,6 +5521,8 @@ let allAvailable = true;
         updated_by: userId,
       };
       if (room_id) updateData.room_id = BigInt(room_id);
+      // Not checked in yet: a leftover pending pick would keep Change Room lit.
+      if (room_id && folio.status_reservation !== STATUS_RESERVATION.check_in.id) updateData.room_id_next = null;
       if (room_type_id) updateData.room_type_id = BigInt(room_type_id);
 
       await prisma.$transaction(

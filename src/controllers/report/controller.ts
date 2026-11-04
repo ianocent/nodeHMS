@@ -825,7 +825,7 @@ export class ReportController {
     try {
       const propertyId = req.user?.lastProperty ?? 0n;
       const businessDate = await AuthController.getBusinessDate(propertyId);
-      success(res, { business_date: businessDate }, 'Success');
+      success(res, { date: businessDate }, 'Success');
     } catch (err: any) {
       console.error('Report nightAudit error:', err);
       error(res, 'Failed to get business date', 500);

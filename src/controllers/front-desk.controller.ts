@@ -6,7 +6,7 @@ import { Request, Response } from 'express';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { success, error, badRequest, notFound, forbidden } from '../utils/response';
-import { decrypt, encrypt } from '../utils/encryption';
+import { assertFolioFresh } from '../utils/concurrency';import { decrypt, encrypt } from '../utils/encryption';
 import { getPermissionFlags } from '../middleware/permission.middleware';
 import { STATUSES, moneyFormat, calculateCodePost, DEPOSIT_REFERENCE_PREFIX } from '../utils/cmsConfig';
 import { ROOM_STATUSES, MAID_STATUSES, getColorRoom, getColorMaid } from '../utils/cmsStatus';
@@ -469,6 +469,10 @@ async function postingRevenueDayUse(folioId: bigint, pid: bigint, businessDate: 
 // Tax calc helper — Laravel TransactionController@tax parity (:664-709) for non-payment types
 async function calcTaxForCode(code: string | bigint | null, sumPrice: number) {
   const codePost = code ? await prisma.code_posts.findUnique({ where: { id: BigInt(code) } }) : null;
+  const cpProperty = codePost?.property_id
+    ? await prisma.properties.findUnique({ where: { id: BigInt(codePost.property_id) }, select: { is_tax: true } })
+    : null;
+  const isTaxInclusive = !!cpProperty?.is_tax;
   const calc = codePost ? calculateCodePost(
     {
       tax: codePost.tax ?? false,
@@ -481,9 +485,10 @@ async function calcTaxForCode(code: string | bigint | null, sumPrice: number) {
       tax_include_local_tax: codePost.tax_include_local_tax ?? false,
     },
     sumPrice,
-    false
+    // Laravel CodePost::calculate() -> inclusive() when the code post's property has is_tax = 1.
+    isTaxInclusive
   ) : { amount: sumPrice, service: 0, tax3: 0, pb1: 0, total: sumPrice };
-  return { amount: calc.amount, svr_chrg: calc.service, pb1: calc.pb1, tax3: calc.tax3, total: calc.total, code: codePost ? String(codePost.id) : String(code ?? '') };
+  return { amount: calc.amount, svr_chrg: calc.service, pb1: calc.pb1, tax3: calc.tax3, total: calc.total, code: codePost ? String(codePost.id) : String(code ?? ''), code_name: codePost?.name ?? null };
 }
 
 // Laravel Folio@getBalanceWithOutPosting parity (Folio.php:761-779)
@@ -2143,7 +2148,7 @@ const [folios, total] = await Promise.all([
       const id = BigInt(folioId);
       const [folio, txns] = await Promise.all([
         prisma.folios.findUnique({ where: { id }, include: { reservations: { where: { deleted_at: null }, orderBy: { date: 'asc' } } } }),
-        prisma.transactions.findMany({ where: { folio_id: id, deleted_at: null }, orderBy: { created_at: 'desc' }, include: { type_payments: { select: { name: true } } } }),
+        prisma.transactions.findMany({ where: { folio_id: id, ...(ledger ? { bill_to: ledger } : {}), deleted_at: null }, orderBy: { created_at: 'desc' }, include: { type_payments: { select: { name: true } } } }),
       ]);
 
       if (!folio) {
@@ -2396,6 +2401,11 @@ const [folios, total] = await Promise.all([
 
       // tax calc via code post
       const codePost = await prisma.code_posts.findUnique({ where: { id: BigInt(idCode) } });
+      // Laravel CodePost::calculate() — Tax Inclusive when the property has is_tax = 1.
+      const cpProp = codePost?.property_id
+        ? await prisma.properties.findUnique({ where: { id: BigInt(codePost.property_id) }, select: { is_tax: true } })
+        : null;
+      const isTaxInclusive = !!cpProp?.is_tax;
       calc = codePost ? calculateCodePost(
         {
           tax: codePost.tax ?? false,
@@ -2408,7 +2418,7 @@ const [folios, total] = await Promise.all([
           tax_include_local_tax: codePost.tax_include_local_tax ?? false,
         },
         sumPrice,
-        false
+        isTaxInclusive
       ) : { amount: sumPrice, service: 0, tax3: 0, pb1: 0, total: sumPrice };
 
       const finalAmount = isPaymentLike ? sumPrice - surcharge : calc.amount;
@@ -2625,6 +2635,7 @@ const [folios, total] = await Promise.all([
   static async updateData(req: Request, res: Response): Promise<void> {
     try {
       const id = idParamBig(req.params.id);
+      if (!(await assertFolioFresh(req, res, id))) return;
       const whitelist = ['remark', 'remark_ins', 'check_in_instruction', 'check_out_instruction', 'posting_instruction', 'image'];
       const data: any = { updated_at: new Date(), updated_by: req.user?.id };
       for (const key of whitelist) {
@@ -3060,7 +3071,7 @@ const [folios, total] = await Promise.all([
                 folio_id: folio.id,
                 date: new Date(),
                 code: calc.code,
-                code_name: lead.code_name ?? null,
+                code_name: calc.code_name ?? lead.code_name ?? null,
                 type: 'consolidate',
                 total: calc.total,
                 svr_chrg: calc.svr_chrg,
@@ -3176,7 +3187,7 @@ const [folios, total] = await Promise.all([
             await tx.transactions.create({
               data: {
                 property_id: orig.property_id, folio_id: orig.folio_id, type: orig.type, uuid: randomUUID(),
-                date: orig.date, code: calc1.code, code_name: orig.code_name, type_payment_id: orig.type_payment_id,
+                date: orig.date, code: calc1.code, code_name: calc1.code_name ?? orig.code_name, type_payment_id: orig.type_payment_id,
                 description: orig.description,
                 amount: calc1.amount, total: calc1.total, pb1: calc1.pb1, svr_chrg: calc1.svr_chrg,
                 surcharge: Number(orig.surcharge ?? 0), tax3: calc1.tax3,

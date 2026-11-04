@@ -676,7 +676,7 @@ router.get('/assign-room', authMiddleware, requirePermissionAny('view', [60, 62,
     }
 
     // Default for check_in, check_out, move_reservation, assign_room, un_check_out, un_check_in, cancel_reservation
-    const defaultTypes = ['check_in', 'check_out', 'move_reservation', 'assign_room', 'un_check_out', 'un_check_in', 'cancel_reservation'];
+    const defaultTypes = ['check_in', 'check_out', 'move_reservation', 'assign_room', 'un_check_out', 'un_check_in', 'cancel_reservation', 'un_assign_room', 'un_cancel_reservation', 'copy_reservation', 'confirm_reservation'];
     if (defaultTypes.includes(type)) {
       const reservations = folio.reservations;
       let data: any[] = reservations.map((r: any) => ({
@@ -746,8 +746,8 @@ router.get('/assign-room', authMiddleware, requirePermissionAny('view', [60, 62,
 
     const fallbackTable = [
       { label: 'date', key: 'date', type: 'none', is_search: false },
-      { label: 'Room Type', key: 'room_type_id', type: 'none', is_search: false },
-      { label: 'Room', key: 'room_id', type: 'none', is_search: false },
+      { label: 'Room Type', key: 'room_type', type: 'none', is_search: false },
+      { label: 'Room', key: 'room', type: 'none', is_search: false },
     ];
 
     const fallbackPage = Number(req.query.page || 1);

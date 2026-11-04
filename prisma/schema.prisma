@@ -1569,6 +1569,7 @@ model folios {
   @@index([status_reservation])
   @@index([pre_registration_token])
   @@index([folio_number, pre_registration_completed_at])
+  version BigInt @default(1)
 }
 
 model guest_profile_documents {
@@ -1827,6 +1828,7 @@ model housekeeper_history {
   @@index([property_id])
   @@index([room_id, date, done_inspection])
   @@index([room_id])
+  version BigInt @default(1)
 }
 
 model housekeeper_history_user {
@@ -3062,6 +3064,7 @@ model reservations {
   @@index([room_id_next])
   @@index([room_type_id])
   @@index([room_type_id_next])
+  version BigInt @default(1)
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
@@ -3340,6 +3343,7 @@ model rooms {
   @@index([room_type_id])
   @@index([property_id])
   @@index([room_id])
+  version BigInt @default(1)
 }
 
 model roster_list {
@@ -4038,6 +4042,7 @@ model transactions {
   @@index([property_id])
   @@index([type])
   @@index([type_payment_id])
+  version BigInt @default(1)
 }
 
 model type_payments {
