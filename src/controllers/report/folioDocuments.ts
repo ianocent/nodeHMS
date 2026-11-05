@@ -55,7 +55,7 @@ interface DocContext {
   inclusivesByReservation: Map<number, { name: string; pax: number; is_room?: boolean }[]>;
 }
 
-async function loadFolioDocContext(folioId: bigint): Promise<DocContext | null> {
+async function loadFolioDocContext(folioId: bigint, ledgerId?: string | null): Promise<DocContext | null> {
   const folio: any = await prisma.folios.findUnique({
     where: { id: folioId },
     include: {
@@ -70,7 +70,11 @@ async function loadFolioDocContext(folioId: bigint): Promise<DocContext | null> 
         },
       },
       transactions: {
-        where: { deleted_at: null },
+        // Laravel GuestFolioReportController@generate parses `ledger_id` (`id-company`
+        // or `id-guest`) and only prints transactions whose bill_to belongs to that
+        // ledger. The port ignored it, so every printed ledger invoice contained
+        // every transaction in the folio.
+        where: { deleted_at: null, ...(ledgerId ? { bill_to: ledgerId } : {}) },
         orderBy: { date: 'asc' },
         include: {
           type_payments: { select: { name: true } },
@@ -491,7 +495,20 @@ export async function generateFolioDocumentPdf(req: Request, res: Response, foli
     return;
   }
 
-  const ctx = await loadFolioDocContext(BigInt(folioId));
+  // Laravel GuestFolioReportController@generate requires `ledger_id`
+  // (`<id>-company` | `<id>-guest`) and prints only that bill_to's transactions.
+  const ledgerRaw = req.query.ledger_id;
+  const ledgerId = typeof ledgerRaw === 'string' ? ledgerRaw : Array.isArray(ledgerRaw) ? String(ledgerRaw[0] ?? '') : '';
+  if (ledgerId && !/^\d+-(company|guest)$/.test(ledgerId)) {
+    badRequest(res, 'The ledger_id field format is invalid.');
+    return;
+  }
+  if (documentType === 'guest-folio' && !ledgerId) {
+    badRequest(res, 'The ledger_id field is required.');
+    return;
+  }
+
+  const ctx = await loadFolioDocContext(BigInt(folioId), ledgerId || null);
   if (!ctx) {
     notFound(res, 'Folio not found');
     return;

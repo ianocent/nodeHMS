@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { prisma } from '../config/prisma';
+import { AllotmentController } from '../controllers/allotment.controller';
 import { ApprovalMatrixController } from '../controllers/approval-matrix.controller';
 import { AuthController } from '../controllers/auth.controller';
 import { GenericController } from '../controllers/generic.controller';
@@ -260,11 +261,11 @@ router.put('/staah-ota-mapping/:id', authMiddleware, (req, res) => { req.params.
 router.delete('/staah-ota-mapping/:id', authMiddleware, (req, res) => { req.params.model = 'staah_ota_company_mappings'; generic.destroy(req, res); });
 
 // Allotment Room child (AllotmentController@room parity; must precede /allotment/:id)
-router.get('/allotment/room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.list(req, res); });
-router.post('/allotment/room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.create(req, res); });
-router.put('/allotment/room/:id', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.update(req, res); });
+router.get('/allotment/room', authMiddleware, (req, res) => { AllotmentController.roomList(req, res); });
+router.post('/allotment/room', authMiddleware, (req, res) => { AllotmentController.roomUpsert(req, res); });
+router.put('/allotment/room/:id', authMiddleware, (req, res) => { AllotmentController.roomUpsert(req, res); });
 router.delete('/allotment/room/:id', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.destroy(req, res); });
-router.get('/allotment-room', authMiddleware, (req, res) => { req.params.model = 'room_allotments'; generic.list(req, res); });
+router.get('/allotment-room', authMiddleware, (req, res) => { AllotmentController.roomList(req, res); });
 
 // Phase 4.9 Remaining Modules
 

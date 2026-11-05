@@ -3126,10 +3126,10 @@ const messageBoolByFolio = new Set(openMessageFolios.map((r: any) => String(r.fo
         }
       }
 
-      // PHP Shift::formatTable (:48-83)
-      const table = group
-        ? []
-        : [
+      // PHP Shift::formatTable (:48-83). `group` only hides the table on grouped
+      // embeds, but the night-audit grid always sends `group=night-audit` from the
+      // page path — returning [] there made the Shift table never render.
+      const table = [
             { label: 'No', key: 'no', type: 'none', is_search: false },
             { label: 'Name', key: 'name', type: 'text', is_link: true, is_search: false },
             { label: 'Start', key: 'start', type: 'time', is_search: false },

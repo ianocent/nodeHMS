@@ -447,7 +447,10 @@ export class FolioController {
 
   static async updateStatus(req: Request, res: Response): Promise<void> {
     try {
-      const id = idParam(req.params.id);
+      // Route parity: /reservation/update-status/:folio (param `folio`) and
+      // /folios/:id/update-status, /folio/:id/update-status (param `id`) all bind
+      // this handler. Read both so a param-name mismatch can never reach BigInt().
+      const id = idParam((req.params.id ?? req.params.folio) as any);
       if (!(await assertFolioFresh(req, res, id))) return;
       const userId = req.user?.id;
       const { status_reservation, check_in_date, check_out_date, reason, to_virtual, remark } = req.body;

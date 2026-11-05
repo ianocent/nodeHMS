@@ -8,12 +8,13 @@ import { getPermissionFlags } from '../middleware/permission.middleware';
 import { writeAudit } from '../utils/audit';
 import { calculateCodePost, moneyFormat } from '../utils/cmsConfig';
 import { getColorMaid, getColorRoom, MAID_STATUSES, ROOM_STATUSES, STATUS_RESERVATION_MAP } from '../utils/cmsStatus';
+import { assertFolioFresh } from '../utils/concurrency';
 import { mandatoryCheckInBlock, readPropertyMandatory } from '../utils/guestMandatory';
 import { pushCondition, searchPredicate } from '../utils/querySafety';
 import { applyPromoDiscounts, findPromosForNight, priceNight, PromoLike } from '../utils/reservationPricing';
 import { badRequest, error, notFound, success, validationError } from '../utils/response';
-import { assertFolioFresh } from '../utils/concurrency';
-import { availableRoom } from '../utils/roomAvailability';import { applySearchField, dataSearch } from '../utils/search';
+import { availableRoom } from '../utils/roomAvailability';
+import { applySearchField, dataSearch } from '../utils/search';
 import { AuthController } from './auth.controller';
 import {
   folioBalanceMinorUnits,
@@ -753,12 +754,29 @@ async function buildCardTypeOptions(propertyId?: bigint | null): Promise<{ value
  * Values are resolved in one batched query per call and merged into whatever
  * `data` the caller already assembled.
  */
+export function resolveEffectiveRoomAssignment(row: any): { roomId: bigint | null; roomTypeId: bigint | null; roomIdNext: bigint | null; roomTypeIdNext: bigint | null } {
+  const normalizeId = (value: any): bigint | null => {
+    if (value === undefined || value === null || value === '' || value === 0 || value === '0') return null;
+    const n = typeof value === 'string' ? BigInt(value) : BigInt(value);
+    return Number.isNaN(Number(n)) ? null : n;
+  };
+
+  const roomId = normalizeId(row?.room_id) ?? normalizeId(row?.room_id_next) ?? null;
+  const roomTypeId = normalizeId(row?.room_type_id) ?? normalizeId(row?.room_type_id_next) ?? null;
+  return {
+    roomId,
+    roomTypeId,
+    roomIdNext: normalizeId(row?.room_id_next),
+    roomTypeIdNext: normalizeId(row?.room_type_id_next),
+  };
+}
+
 async function withReservationNames(data: any, keys: string[] = []): Promise<any> {
   const pick = (v: any) => (v === undefined || v === null || v === '' ? null : v);
   const companyId = pick(data.company_profile_id);
-  const roomTypeId = pick(data.room_type_id);
+  const roomTypeId = pick(data.room_type_id) ?? pick(data.room_type_id_next);
   const roomTypeNextId = pick(data.room_type_id_next);
-  const roomId = pick(data.room_id);
+  const roomId = pick(data.room_id) ?? pick(data.room_id_next);
   const roomNextId = pick(data.room_id_next);
   const rateId = pick(data.rate_id);
 
@@ -3201,9 +3219,16 @@ success(res, formatted, 'Success', 200, {
       // A row can also carry room_id AND a stale room_id_next (same or older pick);
       // that must not light Change Room either, so promote whenever _next is set.
       if (folio.status_reservation !== 0 && folio.status_reservation !== 1 && folio.status_reservation !== 2) {
-        reservations = (reservations as any[]).map((r: any) =>
-          r.room_id_next ? { ...r, room_id: r.room_id_next, room_id_next: null } : r
-        ) as any;
+        reservations = (reservations as any[]).map((r: any) => {
+          if (!r.room_id_next && !r.room_type_id_next) return r;
+          return {
+            ...r,
+            room_id: r.room_id_next ?? r.room_id,
+            room_type_id: r.room_type_id_next ?? r.room_type_id,
+            room_id_next: null,
+            room_type_id_next: null,
+          };
+        }) as any;
       }
       // Laravel Folio::formatAction check_in: parent GIT needs >=1 child folio with status reservation (3)
       const childReservationCount = isParentGit
@@ -3216,7 +3241,7 @@ success(res, formatted, 'Success', 200, {
       const hasOpenMessage =
         (await prisma.messages.count({ where: { folio_id: id, is_open: true, deleted_at: null } })) > 0;
 
-      const [typeLinks, roomRows, reservationTypeLinks] = await Promise.all([
+      const [typeLinks, reservationTypeLinks, roomRows] = await Promise.all([
         prisma.model_has_types.findMany({ where: { model_type: { contains: 'Folio' }, model_id: id }, include: { types: true } }),
         // Market segment / source live on the Reservation pivot (Folio.php:2645
         // `$reservation->syncTypes($request)`), not the Folio one, so the detail
@@ -3381,12 +3406,16 @@ success(res, formatted, 'Success', 200, {
       };
 
       const isDayUse = !!folio.is_day_use;
-      // Prefer a reservation that actually carries an assigned room so the folio-
-      // level Room field does not render blank when the last (posting) row has
-      // no room even though an earlier non-posting row was assigned one.
+      // Prefer the effective room assignment, not just the current room_id field.
+      // Folio listing can assign a room to `room_id_next` while the detail row still
+      // carries `room_id = null`, and the old code would silently render the field blank.
       const lastReservation =
-        [...reservations].reverse().find((r: any) => r.room_id) || reservations[reservations.length - 1] || null;
-      const lastRoom = lastReservation?.room_id ? roomMap.get(Number(lastReservation.room_id)) : null;
+        [...reservations].reverse().find((r: any) => {
+          const assigned = resolveEffectiveRoomAssignment(r);
+          return !!(assigned.roomId || assigned.roomTypeId);
+        }) || reservations[reservations.length - 1] || null;
+      const lastRoomAssignment = lastReservation ? resolveEffectiveRoomAssignment(lastReservation) : { roomId: null, roomTypeId: null };
+      const lastRoom = lastRoomAssignment.roomId ? roomMap.get(Number(lastRoomAssignment.roomId)) : null;
 
       const base64Key = (r: any) => `${r.rate_id}-${r.adult}-${r.child}-${r.add_bed}-${r.room_type_id}-${r.room_id}`;
       const groupsMap = new Map<string, any[]>();
@@ -3419,6 +3448,9 @@ success(res, formatted, 'Success', 200, {
 
         const night = isDayUse ? 0 : Math.max(0, Math.round((new Date(checkOutDate).getTime() - new Date(checkInDate).getTime()) / 86400000));
 
+        const effectiveRoom = resolveEffectiveRoomAssignment(first);
+        const roomIdEff = effectiveRoom.roomId ?? null;
+        const roomTypeIdEff = effectiveRoom.roomTypeId ?? null;
         const rateLabel = first.rate_name ?? first.rates?.code ?? '';
         reservationItems.push({
           id: Number(first.id),
@@ -3432,13 +3464,13 @@ success(res, formatted, 'Success', 200, {
           reason: first.remark,
           check_in_date: checkInDate,
           check_out_date: checkOutDate,
-          room_type_id: first.room_type_id ? { value: Number(first.room_type_id), label: first.room_type_name ?? first.room_types?.name ?? '' } : [],
-          room_id: first.room_id ? { value: Number(first.room_id), label: roomMap.get(Number(first.room_id))?.name || first.room_name || '' } : [],
-          room_type_id_origin: first.room_type_id ? { value: Number(first.room_type_id), label: first.room_types?.name ?? '' } : [],
-          room_id_origin: { value: first.room_id ? Number(first.room_id) : 0, label: first.room_id ? (roomMap.get(Number(first.room_id))?.name ?? '') : '' },
-          room_type_id_next: first.room_type_id_next ? { value: Number(first.room_type_id_next), label: '' } : [],
-          room_id_next: first.room_id_next ? { value: Number(first.room_id_next), label: roomMap.get(Number(first.room_id_next))?.name ?? '' } : [],
-          change_room: first.room_id_next != null,
+          room_type_id: roomTypeIdEff ? { value: Number(roomTypeIdEff), label: first.room_type_name ?? first.room_types?.name ?? '' } : [],
+          room_id: roomIdEff ? { value: Number(roomIdEff), label: roomMap.get(Number(roomIdEff))?.name || first.room_name || '' } : [],
+          room_type_id_origin: roomTypeIdEff ? { value: Number(roomTypeIdEff), label: first.room_types?.name ?? first.room_type_name ?? '' } : [],
+          room_id_origin: { value: roomIdEff ? Number(roomIdEff) : 0, label: roomIdEff ? (roomMap.get(Number(roomIdEff))?.name ?? '') : '' },
+          room_type_id_next: effectiveRoom.roomTypeIdNext ? { value: Number(effectiveRoom.roomTypeIdNext), label: '' } : [],
+          room_id_next: effectiveRoom.roomIdNext ? { value: Number(effectiveRoom.roomIdNext), label: roomMap.get(Number(effectiveRoom.roomIdNext))?.name ?? '' } : [],
+          change_room: effectiveRoom.roomIdNext != null,
           night,
           is_room_change: !!first.room_type_id_next,
           rate_id: first.rate_id ? { value: Number(first.rate_id), label: rateLabel } : [],
@@ -4149,6 +4181,12 @@ success(res, formatted, 'Success', 200, {
 
         const dayKey = (d: Date) => new Date(d).toISOString().slice(0, 10);
         const oldRows = await prisma.reservations.findMany({ where: { folio_id: id, deleted_at: null } });
+        // PHP Folio::saveReservation (:2585) rebuilds prices only when
+        // `is_calculate == 1`. A plain "Save Change" keeps the price posted
+        // at creation; only the "Do you want to recalculate rate?" popup
+        // sets it. Update is always is_update=1 in Laravel, so the
+        // `is_update != 1` leg never applies here either.
+        const shouldRecalc = Number(req.body?.is_calculate) === 1;
 
         for (const item of reservation_list) {
           const itemCheckIn = new Date(item.check_in_date);
@@ -4195,6 +4233,41 @@ success(res, formatted, 'Success', 200, {
 
             const postedRow = oldRows.find((r) => r.is_posting === 1 && r.date && dayKey(r.date) === key && !r.deleted_at);
             if (postedRow) continue; // never touch audited nights
+
+            // Save Change without the recalc popup: keep the price posted at
+            // creation; only edit stay/guest fields. New nights still need a
+            // price, so they fall through to the pricing block below.
+            const existingRowNoCalc = oldRows.find((r) => (!r.is_posting || r.is_posting === 0) && r.date && dayKey(r.date) === key && !r.deleted_at);
+            if (!shouldRecalc && existingRowNoCalc) {
+              const rowDataNoPrice: any = {
+                rate_id: rateIdUpd,
+                rate_name: rateIdUpd ? updRateRows.find((r) => Number(r.id) === Number(rateIdUpd))?.name ?? null : null,
+                room_type_id: effRoomTypeId,
+                room_id: effRoomId,
+                room_type_id_next: effRoomTypeNextId,
+                room_id_next: effRoomNextId,
+                adult: intOr(item.adult, 1),
+                child: intOr(item.child, 0),
+                add_bed: intOr(item.add_bed, 0),
+                check_in_date: itemCheckIn,
+                check_out_date: itemCheckOut,
+                date: nightDate,
+                status_reservation: updateData.status_reservation || existing.status_reservation,
+                status: STATUS_ACTIVE,
+                night: nights,
+                eta: parseTimeLike(item.eta, nightDate),
+                etd: parseTimeLike(item.etd, nightDate),
+                is_24_hour: flagToInt(item.is_24_hour),
+                package_id: item.package_id ? BigInt(item.package_id) : null,
+                quantity: intOr(item.quantity, 1),
+                quantity_extra_day_use: intOr(item.quantity_extra_day_use, 0),
+                is_extra_day_use: item.is_extra_day_use === true || Number(item.is_extra_day_use) === 1 ? 1 : 0,
+                updated_by: userId,
+                updated_at: new Date(),
+              };
+              await prisma.reservations.update({ where: { id: existingRowNoCalc.id }, data: rowDataNoPrice });
+              continue;
+            }
 
             const pricing = await priceNight({
               // @ts-ignore
@@ -4317,7 +4390,7 @@ success(res, formatted, 'Success', 200, {
       success(res, bigintToNumber(updated), 'Success', 200, { permission: { view: true }, search_data: { statuses: ['reservation', 'pending', 'check_in', 'check_out', 'cancel_reservation'] } } as any);
     } catch (err: any) {
       console.error('Reservation update error:', err);
-      error(res, 'Failed to update reservation', 500);
+      error(res, err?.message || 'Failed to update reservation', 500);
     }
   }
 
@@ -4928,7 +5001,6 @@ let allAvailable = true;
         return;
       }
       if (!(await assertFolioFresh(req, res, reservation.folio_id))) return;
-       if (!(await assertFolioFresh(req, res, reservation.folio_id))) return;
 
       // Laravel ReservationController@unAssignRoom :3060-3065 clears the room
       // on EVERY reservation row of the folio. The old `status: 0` filter
@@ -5062,6 +5134,8 @@ let allAvailable = true;
   static async updateBulk(req: Request, res: Response): Promise<void> {
     try {
       const { status_reservation, folio_ids, remark, reason, parent_folio_id, to_virtual } = req.body;
+      const normalizedReason = (reason && typeof reason === 'object' ? (reason as any)?.value : reason) ?? null;
+      const normalizedReasonValue = normalizedReason != null ? String(normalizedReason).trim() || null : null;
 
       if (!status_reservation || !Array.isArray(folio_ids) || folio_ids.length === 0) {
         badRequest(res, 'status_reservation and folio_ids are required');
@@ -5081,7 +5155,7 @@ let allAvailable = true;
         badRequest(res, 'The remark field is required.');
         return;
       }
-      if (status_reservation === 'cancel_reservation' && !reason) {
+      if (status_reservation === 'cancel_reservation' && !normalizedReason) {
         badRequest(res, 'The reason field is required.');
         return;
       }
@@ -5217,7 +5291,7 @@ let allAvailable = true;
                   data: JSON.stringify({
                     ...parsedData,
                     remark_cancel_reservation: remark ?? null,
-                    reason_cancel_reservation: reason ?? null,
+                    reason_cancel_reservation: normalizedReasonValue ?? null,
                   }),
                 },
               });
@@ -5241,7 +5315,7 @@ let allAvailable = true;
             logName: 'front_desk',
             old: { status_reservation: folio.status_reservation },
             attributes: { status_reservation: statusId },
-            meta: { folio_number: folio.folio_number, action: status_reservation, bulk: true, reason: reason ?? null, remark: remark ?? null },
+            meta: { folio_number: folio.folio_number, action: status_reservation, bulk: true, reason: normalizedReasonValue ?? null, remark: remark ?? null },
           });
           succeeded.push(String(id));
         } catch (err: any) {
@@ -5819,15 +5893,24 @@ let allAvailable = true;
       const checkOutStr = checkOutRaw ? String(checkOutRaw).substring(0, 10) : (folio.check_out_date ? new Date(folio.check_out_date).toISOString().substring(0, 10) : null);
       if (!checkInStr || !checkOutStr) { badRequest(res, 'check_in_date and check_out_date are required'); return; }
 
-      // Where to_room (a room NAME in Laravel) is used, else room_id (numeric).
+      // Laravel allows a date move to keep the existing room when the caller
+      // does not provide a target room. Only validate/lock a room if one is
+      // explicitly chosen; otherwise the reservation keeps its current room_id.
       const targetRoomName = String(req.body?.to_room ?? '').trim();
+      const latestReservation: any = await prisma.reservations.findFirst({
+        where: { folio_id: folioId, deleted_at: null },
+        orderBy: { id: 'desc' },
+      });
+      if (!latestReservation) { badRequest(res, 'No reservation found for this folio'); return; }
+
+      const currentRoomId = latestReservation?.room_id ?? folio?.room_id ?? null;
+      const currentRoomTypeId = latestReservation?.room_type_id ?? folio?.room_type_id ?? null;
       let targetRoom: any = null;
       if (targetRoomName) {
         targetRoom = await prisma.rooms.findFirst({ where: { property_id: folio.property_id, name: targetRoomName, deleted_at: null } });
       } else if (req.body?.room_id && String(req.body.room_id) !== '0') {
         targetRoom = await prisma.rooms.findFirst({ where: { property_id: folio.property_id, id: BigInt(req.body.room_id), deleted_at: null } });
       }
-      if (!targetRoom) { badRequest(res, 'Target room is required'); return; }
 
       const checkInDate = new Date(`${checkInStr}T00:00:00.000Z`);
       const checkOutDate = new Date(`${checkOutStr}T00:00:00.000Z`);
@@ -5837,22 +5920,17 @@ let allAvailable = true;
       if (checkInStr < businessDate) { badRequest(res, 'Check In Date must be greater than or equal to business date'); return; }
 
       // Availability of the target room across the whole window (Laravel :929-944).
-      const conflict = await prisma.reservations.findFirst({
-        where: {
-          room_id: targetRoom.id,
-          deleted_at: null,
-          folio_id: { not: folioId },
-          date: { gte: checkInDate, lt: checkOutDate },
-        },
-      });
-      if (conflict) { badRequest(res, 'Target room is already occupied during this period'); return; }
-
-      // Latest reservation is the template (Laravel :946-953).
-      const latestReservation: any = await prisma.reservations.findFirst({
-        where: { folio_id: folioId, deleted_at: null },
-        orderBy: { id: 'desc' },
-      });
-      if (!latestReservation) { badRequest(res, 'No reservation found for this folio'); return; }
+      if (targetRoom) {
+        const conflict = await prisma.reservations.findFirst({
+          where: {
+            room_id: targetRoom.id,
+            deleted_at: null,
+            folio_id: { not: folioId },
+            date: { gte: checkInDate, lt: checkOutDate },
+          },
+        });
+        if (conflict) { badRequest(res, 'Target room is already occupied during this period'); return; }
+      }
 
       // Step 1: clear the old unposted rows in the window (Laravel :955-960).
       const removed = await prisma.reservations.deleteMany({
@@ -5867,6 +5945,8 @@ let allAvailable = true;
       const property = await prisma.properties.findUnique({ where: { id: folio.property_id }, select: { is_tax: true } });
       const isTax = (property as any)?.is_tax === 1;
       const userId = req.user?.id ?? null;
+      const resolvedRoomId = targetRoom?.id ?? currentRoomId;
+      const resolvedRoomTypeId = targetRoom?.room_type_id ?? currentRoomTypeId ?? latestReservation?.room_type_id ?? null;
 
       for (let i = 0; i < nights; i++) {
         const rowDate = new Date(checkInDate); rowDate.setDate(rowDate.getDate() + i);
@@ -5874,21 +5954,22 @@ let allAvailable = true;
           // @ts-ignore
           prisma,
           rateId: rateIdBig,
-          roomTypeId: targetRoom.room_type_id,
+          roomTypeId: resolvedRoomTypeId ? BigInt(resolvedRoomTypeId) : null,
           night: rowDate,
           getNight: nights,
           adult: Number(latestReservation.adult || 1),
           child: Number(latestReservation.child || 0),
           isTax,
           rateCodePost,
+          promos: [],
         } as any);
         await prisma.reservations.create({
           data: {
             property_id: folio.property_id,
             folio_id: folioId,
             rate_id: rateIdBig,
-            room_type_id: targetRoom.room_type_id,
-            room_id: targetRoom.id,
+            room_type_id: resolvedRoomTypeId ? BigInt(resolvedRoomTypeId) : null,
+            room_id: resolvedRoomId ? BigInt(resolvedRoomId) : null,
             eta: latestReservation.eta,
             etd: latestReservation.etd,
             adult: latestReservation.adult || 1,
@@ -5924,7 +6005,7 @@ let allAvailable = true;
       });
 
       enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
-      success(res, { moved: removed.count }, `Reservation moved successfully to ${targetRoomName || targetRoom.name}`);
+      success(res, { moved: removed.count }, `Reservation moved successfully${targetRoom ? ` to ${targetRoomName || targetRoom.name}` : ''}`);
     } catch (err: any) { console.error('moveReservation error:', err); error(res, err?.message ?? 'Failed to move reservation', 500); }
   }
 

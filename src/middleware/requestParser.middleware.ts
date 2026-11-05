@@ -21,7 +21,7 @@ export function requestParser(
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.header(
     'Access-Control-Allow-Headers',
-    'Content-Type, X-Token, X-Property-Id, Authorization, Accept'
+    'Content-Type, X-Token, X-Property-Id, Authorization, Accept, x-expected-version, X-Expected-Version'
   );
 
   if (req.method === 'OPTIONS') {
