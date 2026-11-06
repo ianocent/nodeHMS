@@ -3295,13 +3295,13 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
       // parity TransactionTemp::formatTable (options: folios check-in, code items active)
       const [folioOptions, codeItemOptions] = await Promise.all([
         prisma.folios.findMany({
-          where: { status_reservation: STATUS_RESERVATION.check_in.id, deleted_at: null },
+          where: { status_reservation: STATUS_RESERVATION.check_in.id, deleted_at: null, property_id: pid },
           select: { id: true, folio_number: true },
           orderBy: { id: 'desc' },
           take: 100,
         }),
         prisma.code_items.findMany({
-          where: { deleted_at: null, status: 1 },
+          where: { deleted_at: null, status: 1, property_id: pid },
           select: { id: true, name: true, sales: true },
           orderBy: { name: 'asc' },
         }),
@@ -3428,8 +3428,15 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
 static async batchPostingStore(req: Request, res: Response): Promise<void> {
     try {
       const pid = req.user?.lastProperty ?? 0n;
-      const { transactions: txns } = req.body;
-      if (!txns || !Array.isArray(txns) || txns.length === 0) { badRequest(res, 'transactions array is required'); return; }
+      const body: any = req.body || {};
+      let txns: any[] = Array.isArray(body.transactions) ? body.transactions : null;
+      if (!txns) {
+        // table-edit posts a single flat row (not wrapped in `transactions`)
+        txns = [body];
+      }
+      if (!txns || txns.length === 0 || !txns[0] || Object.keys(txns[0]).length === 0) {
+        badRequest(res, 'transactions array is required'); return;
+      }
 
       const created = [];
       for (const t of txns) {

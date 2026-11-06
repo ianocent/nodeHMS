@@ -1874,6 +1874,19 @@ success(res, formatted, 'Success', 200, {
       // validates it below, exactly where Laravel does (Reservation::find
       // at :329).
       const existing = await prisma.reservations.findUnique({ where: { id } });
+      // Move Reservation must never fall into the generic path (which then
+      // demands rate_id / type). Route it explicitly regardless of whether
+      // type_reservation was posted.
+      if ((req.body || {}).status_reservation === 'move_reservation') {
+        let routeFolio: any = await prisma.folios.findUnique({ where: { id }, select: { id: true, parent: true, deleted_at: true } });
+        if (!routeFolio && existing) {
+          routeFolio = await prisma.folios.findUnique({ where: { id: existing.folio_id }, select: { id: true, parent: true, deleted_at: true } });
+        }
+        if (routeFolio && !routeFolio.deleted_at && Number(routeFolio.parent ?? 0) !== 0) {
+          return await updateSubFolioImpl(req, res, BigInt(routeFolio.id));
+        }
+        return await ReservationController.moveReservationItems(req, res);
+      }
       if ((req.body || {}).type_reservation !== undefined) {
         const typeUpper = String(req.body.type_reservation ?? '').toUpperCase();
         const roomActions = ['assign_room', 'un_check_out', 'un_check_in', 'check_out', 'check_in'];
