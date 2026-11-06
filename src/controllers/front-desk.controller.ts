@@ -1452,7 +1452,10 @@ export class FrontDeskController {
       const search_field = req.query.search_field as string;
       const search_value = req.query.search_value as string;
       const type = (req.query.type as string) || 'check_in';
-      const group = req.query.group as string;
+      const rawGroup = req.query.group;
+      const group = Array.isArray(rawGroup) ? String(rawGroup[0]) : (rawGroup as string);
+      const isBatchCheckout = String(group || '').toLowerCase().includes('batch-check-out') ||
+        (Array.isArray(rawGroup) ? rawGroup.some((v: any) => String(v).toLowerCase().includes('batch-check-out')) : false);
       const displayStatus = req.query.display_status as string;
       const stayDates = req.query.stay_dates as string;
       const startDate = req.query.start_date as string;
@@ -1522,11 +1525,13 @@ export class FrontDeskController {
         where.type_reservation = TYPE_RESERVATION.vr.code;
       }
 
-      if (group === 'batch-check-out') {
+      if (isBatchCheckout) {
         where.status_reservation = STATUS_RESERVATION.check_in.id;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        where.check_out_date = { gte: today };
+        const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? 0n);
+        const bdStart = new Date(`${businessDate}T00:00:00`);
+        const bdEnd = new Date(bdStart);
+        bdEnd.setDate(bdEnd.getDate() + 1);
+        where.check_out_date = { gte: bdStart, lt: bdEnd };
       }
 
       where.status_reservation = where.status_reservation ?? { notIn: [STATUS_RESERVATION.cancel_reservation.id] };
@@ -1690,7 +1695,7 @@ const [folios, total] = await Promise.all([
         return sumNet(txnByFolio.get(String(f.id)) || []);
       };
 
-      const formatted = folios.map((f: any) => {
+      let formatted = folios.map((f: any) => {
         let guestName = `${f.first_name || ''} ${f.last_name || ''}`.trim();
         if (!guestName && f.guest_profile_id) {
           const gp = guestByProfileId.get(String(f.guest_profile_id));
@@ -1788,8 +1793,17 @@ const [folios, total] = await Promise.all([
       });
 
       // Table columns (filtered for batch-check-out)
+      if (isBatchCheckout) {
+        const parseBalance = (s: any) => {
+          const str = String(s ?? '').replace(/\\./g, '').replace(',', '.');
+          const n = Number(str);
+          return Number.isFinite(n) ? n : 0;
+        };
+        formatted = formatted.filter((r: any) => Math.abs(parseBalance(r.balance)) <= 1);
+      }
+
       let table = [...TABLE_COLUMNS];
-      if (group === 'batch-check-out') {
+      if (isBatchCheckout) {
         const excludeKeys = ['message_bool', 'ign', 'remark_bool', 'is_do_not_disturb', 'stay', 'room_status_color', 'room_clean_status_color', 'sharer', 'aa', 'cc'];
         table = table.filter(c => !excludeKeys.includes(c.key));
       } else {
@@ -3345,6 +3359,12 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
 
       success(res, formatted, 'Success', 200, {
         table,
+        permission: {
+          view: true,
+          add: req.user?.superUser || getPermissionFlags(req.user, 63).add,
+          edit: req.user?.superUser || getPermissionFlags(req.user, 63).edit,
+          delete: req.user?.superUser || getPermissionFlags(req.user, 63).delete,
+        },
         search_data: dataSearch(req, table) as any,
         pagination: { current_page: page, last_page: Math.ceil(total / limit), per_page: limit, total, from: (page - 1) * limit + 1, to: Math.min(page * limit, total) },
       });

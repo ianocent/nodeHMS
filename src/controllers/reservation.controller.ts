@@ -16,6 +16,7 @@ import { badRequest, error, notFound, success, validationError } from '../utils/
 import { availableRoom } from '../utils/roomAvailability';
 import { applySearchField, dataSearch } from '../utils/search';
 import { AuthController } from './auth.controller';
+import { formatFolioActions } from '../utils/folioActions';
 import {
   folioBalanceMinorUnits,
   isFolioSettledMinorPublic,
@@ -1313,7 +1314,9 @@ export class ReservationController {
       const propertyId = req.user?.lastProperty;
       const is_day_use = req.query.dayuse === '1';
       const parentId = req.query.parent_id ? BigInt(req.query.parent_id as string) : null;
-
+      const rawGroupR = req.query.group;
+      const group = (Array.isArray(rawGroupR) ? String(rawGroupR[0]) : (rawGroupR as string)) || null;
+ 
       const trash = req.query.trash === '1' || req.query.trash === 'true';
 
       // Laravel: `->statusReservation(['reservation','pending'], $displayStatus)`.
@@ -1434,7 +1437,21 @@ const folioIds = folios.map((f: any) => f.id);
         txnByFolio.get(key)!.push(t);
       }
       const guestByProfileId = new Map(batchGuests.map((g: any) => [String(g.id), g]));
-
+ 
+      const childRows = folioIds.length
+        ? await prisma.folios.findMany({
+            where: { parent: { in: folioIds }, deleted_at: null },
+            select: { parent: true, status_reservation: true },
+          })
+        : [];
+      const childStatusByParent = new Map<string, number[]>();
+      for (const c of childRows) {
+        const key = String(c.parent);
+        if (!childStatusByParent.has(key)) childStatusByParent.set(key, []);
+        childStatusByParent.get(key)!.push(Number(c.status_reservation));
+      }
+      const businessDate = await AuthController.getBusinessDate(req.user?.lastProperty ?? 0n);
+ 
 const formatted = folios.map((f: any) => {
         let guestName = `${f.first_name || ''} ${f.last_name || ''}`.trim();
         if (!guestName && f.guest_profile_id) {
@@ -1531,7 +1548,19 @@ const formatted = folios.map((f: any) => {
           is_popup_other_guest: false,
           aa,
           cc,
-          actions: [],
+          actions: formatFolioActions({
+             status_reservation: f.status_reservation,
+             type_reservation: f.type_reservation,
+             is_pending: Number(f.is_pending ?? 0) === 1 || Number(f.status_reservation ?? -1) === 5,
+             hasRoomChange: !!lastReservation?.room_id_next && lastReservation.room_id_next !== null,
+             childReservationCount: (childStatusByParent.get(String(f.id)) ?? []).filter((s) => s === 3).length,
+             check_in_date: f.check_in_date ? new Date(f.check_in_date).toISOString() : null,
+             businessDate,
+             group,
+             isParentGit: String(f.type_reservation ?? '').toLowerCase() === 'git' && Number(f.parent ?? 0) === 0,
+             isGit: String(f.type_reservation ?? '').toLowerCase() === 'git',
+             isFit: String(f.type_reservation ?? '').toLowerCase() === 'fit',
+           }),
         };
       });
 

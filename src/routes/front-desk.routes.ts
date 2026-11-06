@@ -27,6 +27,7 @@ router.get('/shift-roster', authMiddleware, FrontDeskController.shiftRosterList)
 
 // Front desk routes (menuId: 63 from Laravel)
 router.get('/front-desk', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
+router.get('/front-desk/batch-check-out', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
 router.get('/front-desk/:id', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
 router.get('/front-desk/:id/update', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
 router.get('/front-desk/:id/edit', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
@@ -43,6 +44,7 @@ router.post('/front-desk/batch-check-out', authMiddleware, requirePermission(63,
 
 // Singular aliases for frontend compatibility
 router.get('/front-desk', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
+router.get('/front-desk/batch-check-out', authMiddleware, requirePermission(63, 'view'), FrontDeskController.list);
 router.get('/front-desk/:id', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
 router.get('/front-desk/:id/update', authMiddleware, requirePermission(63, 'view'), FrontDeskController.show);
 router.post('/front-desk/batch-check-out', authMiddleware, requirePermission(63, 'edit'), FrontDeskController.batchCheckOut);

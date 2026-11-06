@@ -194,32 +194,56 @@ return {
     const user = req.user as any;
     const pid = user?.lastProperty ?? user?.last_property ?? BigInt(0);
 
-    // roles whose role_menu_crud.transaction_actions contains perform_cleaning=true
+    // roles whose role_menu_crud.transaction_actions has perform_cleaning === true
     const cruds = await prisma.role_menu_crud.findMany({
-      where: { transaction_actions: { contains: 'perform_cleaning' } },
-      select: { role_id: true },
+      select: { role_id: true, transaction_actions: true },
     });
-    const roleIds = [...new Set(cruds.map((c: any) => c.role_id))];
+    const roleIds = [...new Set(
+      cruds.filter((r: any) => {
+        if (!r.transaction_actions) return false;
+        try {
+          const ta = JSON.parse(r.transaction_actions);
+          return ta?.perform_cleaning === true || ta?.perform_cleaning === 1 || ta?.perform_cleaning === 'true';
+        } catch {
+          return false;
+        }
+      }).map((r: any) => r.role_id)
+    )];
 
     const memberships = roleIds.length
       ? await prisma.model_has_roles.findMany({
-          where: { role_id: { in: roleIds }, model_type: { contains: 'User' } },
+          where: { role_id: { in: roleIds }, model_type: 'App\\Models\\User' },
           select: { model_id: true },
         })
       : [];
-    const userIds = [...new Set(memberships.map((m: any) => m.model_id))];
+    const roleUserIds = [...new Set(memberships.map((m: any) => m.model_id))];
 
-    const users = await prisma.users.findMany({
-      where: {
-        id: { in: userIds, not: user.id },
-        property_id: pid,
-        deleted_at: null,
-      },
-      select: { id: true, name: true },
-      orderBy: { name: 'asc' },
-    });
+    // property-scoped users (base uses model_has_properties)
+    const propRows = pid
+      ? await prisma.model_has_properties.findMany({
+          where: { property_id: pid, model_type: 'App\\Models\\User' },
+          select: { model_id: true },
+        })
+      : [];
+    const propUserIds = new Set(propRows.map((p: any) => p.model_id));
 
-    success(res, bigintToNumber(users), 'Success', 200);
+    const users = roleUserIds.length
+      ? await prisma.users.findMany({
+          where: {
+            id: { in: roleUserIds },
+            deleted_at: null,
+          },
+          select: { id: true, name: true },
+          orderBy: { name: 'asc' },
+        })
+      : [];
+
+    const filtered = users
+      .filter((u: any) => (propUserIds.size ? propUserIds.has(u.id) : true))
+      .filter((u: any) => u.id !== user.id)
+      .map((u: any) => ({ id: Number(u.id), name: u.name }));
+
+    success(res, filtered, 'Success', 200);
   }
 }
 
