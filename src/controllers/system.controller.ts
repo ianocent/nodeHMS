@@ -1924,20 +1924,17 @@ export class SystemController {
 
       success(res, {
         code: 200,
-        name: (await getPrisma().properties.findUnique({ where: { id: BigInt(propertyId) }, select: { name: true } }))?.name ?? '',
         image: '',
-        data: {
-          name: authUser?.name ?? req.user?.name ?? '',
-          role: [],
-          username: authUser?.username ?? '',
-          email: authUser?.email ?? '',
-          access_token: plainTextToken,
-          expires_token: new Date().toISOString().slice(0, 19).replace('T', ' '),
-          force_change_password: false,
-          is_shift: shiftCount > 0,
-          is_need_shift: isNeedShift,
-          bussinesDate: nextBd,
-        },
+        name: authUser?.name ?? req.user?.name ?? '',
+        role: [],
+        username: authUser?.username ?? '',
+        email: authUser?.email ?? '',
+        access_token: plainTextToken,
+        expires_token: new Date().toISOString().slice(0, 19).replace('T', ' '),
+        force_change_password: false,
+        is_shift: shiftCount > 0,
+        is_need_shift: isNeedShift,
+        bussinesDate: nextBd,
       });
     } catch (err: any) {
       console.error('Night audit post error:', err);

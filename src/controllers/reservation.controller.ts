@@ -2498,7 +2498,7 @@ success(res, formatted, 'Success', 200, {
         body[body.typemulti.value] = true;
       }
 
-      const {
+      let {
         type_reservation = 'fit',
         guest_profile_id,
         company_profile_id: bodyCompanyProfileId,
@@ -2702,6 +2702,28 @@ success(res, formatted, 'Success', 200, {
         const rateIdBig = BigInt(rateIdStr);
         // @ts-ignore
         return findPromosForNight(prisma, rateIdBig, night, getNight, promo_code);
+      }
+
+      // If any requested room type has no available room, mark the whole
+      // reservation as pending (Laravel parity). Overbooking is intentionally
+      // NOT added to the available count here, so an overbooked type with
+      // zero base availability still becomes a pending reservation.
+      if (!is_pending && Array.isArray(reservation_list) && reservation_list.length > 0 && check_in_date && check_out_date) {
+        try {
+          const availableIds = await onlyAvailableRoomIds(propertyId!, String(check_in_date), String(check_out_date));
+          const typeIds = [...new Set(reservation_list.map((r: any) => r?.room_type_id).filter((v: any) => v !== undefined && v !== null && v !== ''))];
+          const rooms = await prisma.rooms.findMany({
+            where: { property_id: propertyId!, deleted_at: null, status: 1 },
+            select: { id: true, room_type_id: true, room_status: true },
+          });
+          for (const tid of typeIds) {
+            const typeRooms = rooms.filter((r: any) => Number(r.room_type_id) === Number(tid) && ![3, 4].includes(Number(r.room_status)));
+            const availableCount = typeRooms.filter((r: any) => availableIds.has(Number(r.id))).length;
+            if (availableCount <= 0) { is_pending = true; break; }
+          }
+        } catch (e) {
+          // Leave is_pending unchanged on any lookup failure.
+        }
       }
 
       // Determine reservation status

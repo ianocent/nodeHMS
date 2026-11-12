@@ -1080,7 +1080,26 @@ export async function performCheckIn(
           },
         });
 
-        // Laravel parity (Folio.php:1347-1354): set ATA now; 24h folios get ETD = now
+        // GIT master folio should reflect check-in once any subfolio is checked in.
+         if (Number(folio.parent ?? 0) !== 0) {
+           const parentId = BigInt(folio.parent);
+           const parent = await tx.folios.findUnique({
+             where: { id: parentId },
+             select: { status_reservation: true, type_reservation: true, deleted_at: true },
+           });
+           if (parent && !parent.deleted_at && String(parent.type_reservation ?? '').toLowerCase() === 'git' && parent.status_reservation !== STATUS_RESERVATION.check_in.id) {
+             await tx.folios.update({
+               where: { id: parentId },
+               data: {
+                 status_reservation: STATUS_RESERVATION.check_in.id,
+                 updated_by: userId ?? null,
+                 updated_at: new Date(),
+               },
+             });
+           }
+         }
+
+// Laravel parity (Folio.php:1347-1354): set ATA now; 24h folios get ETD = now
         const ata = new Date();
         for (const resv of folio.reservations) {
           const data: any = { ata };
@@ -1695,6 +1714,12 @@ const [folios, total] = await Promise.all([
         return sumNet(txnByFolio.get(String(f.id)) || []);
       };
 
+      const nextRoomIds = [...new Set(folios.flatMap((f: any) => (f.reservations ?? []).map((r: any) => r.room_id_next).filter(Boolean)))];
+      const nextRooms = nextRoomIds.length
+        ? await prisma.rooms.findMany({ where: { id: { in: nextRoomIds } }, select: { id: true, name: true } })
+        : [];
+      const nextRoomMap = new Map(nextRooms.map((r: any) => [Number(r.id), r]));
+
       let formatted = folios.map((f: any) => {
         let guestName = `${f.first_name || ''} ${f.last_name || ''}`.trim();
         if (!guestName && f.guest_profile_id) {
@@ -1762,7 +1787,7 @@ const [folios, total] = await Promise.all([
           // (type_reservation = git AND parent != 0)), excluding cancelled.
           stay: stayMap.get(String(f.guest_profile_id)) ?? 0,
           room: roomName,
-           room_next: lastReservation?.room_id_next ? (lastReservation.rooms?.name || '') : '',
+           room_next: lastReservation?.room_id_next ? (nextRoomMap.get(Number(lastReservation.room_id_next))?.name || '') : '',
           company: f.company_name || '',
           room_type: roomTypeName,
           check_in_date: f.check_in_date,
@@ -3381,6 +3406,7 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
 
       await prisma.$transaction(async (tx: any) => {
         for (const t of temps) {
+          const codePost = t.code ? await tx.code_posts.findUnique({ where: { id: BigInt(t.code) }, select: { name: true } }).catch(() => null) : null;
           await tx.transactions.create({
             data: {
               property_id: t.property_id,
@@ -3389,6 +3415,7 @@ static async batchPostingList(req: Request, res: Response): Promise<void> {
               type_amount: t.type_amount ?? 'PLUS',
               date: t.date,
               code: String(t.code ?? ''),
+              code_name: codePost?.name ?? null,
               code_item_id: t.code_item_id ?? undefined,
               description: t.description,
               overwrite_reason: t.overwrite_reason,

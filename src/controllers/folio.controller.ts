@@ -721,8 +721,8 @@ export class FolioController {
       if (status_reservation === 'move_reservation') {
         const isGitParent = String(folio.type_reservation || '').toLowerCase() === 'git' && Number(folio.parent) === 0;
         if (isGitParent) { badRequest(res, 'Action not allowed'); return; }
-        const toDateStr = req.body.to_date ?? req.body.date;
-        const fromDateStr = req.body.from_date;
+        const toDateStr = req.body.to_date ?? req.body.date ?? (folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : null);
+        const fromDateStr = req.body.from_date ?? (folio.check_in_date ? folio.check_in_date.toISOString().slice(0, 10) : null);
         if (!toDateStr) { badRequest(res, 'To Date is required'); return; }
 
         const fromStart = new Date(`${(fromDateStr ?? folio.check_in_date?.toISOString().slice(0, 10) ?? '')}T00:00:00`);
@@ -745,7 +745,11 @@ export class FolioController {
         if (folio.check_out_date) updateData.check_out_date = new Date(folio.check_out_date.getTime() + shiftDays * 86400000);
 
         enqueueJob('sync-staah-room-availability', { propertyId: Number(folio.property_id) });
-        // fall through to generic save below
+        await prisma.folios.update({ where: { id }, data: { ...updateData, updated_at: new Date() } });
+        const updated: any = await prisma.folios.findUnique({ where: { id } });
+        await auditFolioStatus(req, folio, updated, status_reservation, { reason: req.body?.remark ?? null, remark: req.body?.remark ?? null, to_virtual: req.body?.to_virtual });
+        success(res, bigintToNumber(updated), 'Status updated successfully');
+        return;
       }
 
       // Map action keys to actual status codes (Laravel parity)
